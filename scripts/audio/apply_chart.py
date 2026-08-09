@@ -471,7 +471,7 @@ def main():
                          "(default <song>_fx.ogg). Use a .wav name for a "
                          "lossless render - e.g. when scoring against the "
                          "capture with metric.py")
-    ap.add_argument("--ogg-quality", type=float, default=6,
+    ap.add_argument("--ogg-quality", type=float, default=10,
                     help="libvorbis -q:a for .ogg output, -1..10 (default 6, "
                          "~192 kbps). Ignored for .wav")
     ap.add_argument("-b", "--block", type=int, default=512,
@@ -907,7 +907,9 @@ def _apply_run(L, R, dryL, dryR, run, tabdefs, tl, block, applied, skipped, labe
     knob.append((max(tl.seconds(run[-1][1]) - base, 0.0), kv(run[-1][3])))
 
     # Which signal does a laser effect read, and how does its result combine with
-    # what the FX buttons already wrote? Three plausible models, see README 8.1.
+    # what the FX buttons already wrote? Three models, see audio_engine.md 8.1 -
+    # the disassembly points at "dry", the capture prefers "chain", and "chain"
+    # is what ships.
     if MODE[0] == "chain":
         srcL, srcR = L[i0:i1].copy(), R[i0:i1].copy()
     else:
