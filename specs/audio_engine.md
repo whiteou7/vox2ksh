@@ -848,3 +848,43 @@ And the rest:
 * **The knob value feeding laser filters** comes from `#TAB PARAM ASSIGN INFO` and the laser segment interpolation; I documented the 0..127 → cutoff mapping but not the laser‑position → 0..127 assignment table.
 * Block size in the game is the audio device's callback size (`gen+0x1a0`). Since coefficients and LFO values update per block, output is *block‑size dependent*. `sdvx_fx.py` defaults to 64 frames (`--block`); pick the same value if you are diffing against a capture.
 * The chart's first integer on Retrigger/Echo/Gate rows is consumed by the wrapper for musical grid snapping (`FUN_18062e310`, `samplesPerBeat = trunc(2646000/BPM)`), not by the DSP.
+
+### 8.1 Effect combination — what stacks, what overwrites
+
+Charts routinely have two effects live at once: both FX buttons held, or an FX hold running underneath a laser sweep. How the second one combines with the first is **the one place where the disassembly and the capture disagree**, and the shipped default follows the capture. Everything below is what `--laser-mode` selects.
+
+Three possible models, with `x` the track, `A` the FX-button effect and `B` the laser effect:
+
+| model | meaning | result |
+|---|---|---|
+| `chain` | series — `B` processes `A`'s output, like two pedals in a row | `B(A(x))` |
+| `dry` | overwrite — `B` reads the original track and replaces `A` where they overlap | `B(x)` |
+| `add` | parallel — both read the original, their changes sum | `x + (A(x) − x) + (B(x) − x)` |
+
+Order matters in `chain` and does not in `add`. A bit crusher into a lowpass is not the same sound as a lowpass into a bit crusher: the first filters already-aliased audio, the second aliases already-smooth audio.
+
+**Three cases, and only one of them is in doubt.**
+
+**FX-L + FX-R, both held — genuinely chained, not disputed.** The FX dispatcher `FUN_18062e3d0` loops its sub-index and swaps the generator's source pointer to the partial result, so the second button reads the first's output. Straight series inside the generator.
+
+**The default peak filter + anything — a separate stage, so the question does not arise.** The C4 = 0 laser sound is a device `_DSFXParamEq` (§7.1), not a generator effect. It is downstream of the whole generator and upstream of the SE mix, so it always stacks on top of whatever the generator produced, in that fixed order. It cannot overwrite a generator effect and a generator effect cannot overwrite it.
+
+**Tab-laser effect (C4 = 1..5) + FX button — this is the unresolved one.** The disassembly points at `dry`. `FUN_18062e3d0` restores the generator's source to the original track on the way out:
+
+```
+if (1 < lVar19) { puVar5 = *param_1; *puVar5 = param_2; ... }
+```
+
+and the laser dispatcher `FUN_18062ea60` then runs against that restored source and `memcpy`s its result over the destination — which reads as "lasers process the dry track and overwrite whatever the FX buttons wrote".
+
+Against the capture that model loses. `chain` scores best and is the default; `dry` and `add` were both measurably worse. So `apply_chart.py` ships the model the binary appears to contradict.
+
+**The per-model scores were never written down** — only the verdict. That is a gap in this document, not a missing experiment: re-run `--laser-mode chain|dry|add` through `tools/metric.py` and record the three numbers here. Until then, treat "chain wins" as a measured claim whose margin is unknown.
+
+Possible resolutions, none of them checked: the restore may apply only to the FX sub-chain and not to the laser stage; `param_2` may already point at the FX result rather than the original track by the time it is restored; or the overlap on this one chart may be too small to separate the models cleanly, in which case the measurement is weaker than it looks. Anyone reopening this should start by counting how many frames of `2229_kamui` actually have an FX hold and a C4 = 1..5 laser live simultaneously — `tools/blendfit.py` already reports the FX+laser and FX-L+FX-R overlap cases for exactly this reason.
+
+**Two consequences that apply whenever effects do stack.**
+
+*Mix compounds rather than averages.* Every effect computes `out = (1-mix)·dry + mix·wet` against **its own input**, not against the original track. Two effects at 50 % leave the original at 25 %, not 50 %.
+
+*There is an int16 requantisation between stages.* `FUN_18063dc40` writes each result back as clamped, truncated int16 before the next stage reads it through `FUN_18063d9e0` (§2). So a chain can clip **mid-chain**, not only at the output stage — a resonant filter feeding a boosting effect will hard-clip at the boundary in a way an all-float implementation would not reproduce. `apply_chart.py --no-stage-clip` disables it for comparison; the engine does clip, so the default keeps it.

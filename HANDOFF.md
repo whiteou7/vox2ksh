@@ -33,7 +33,7 @@ floor (codec noise)        1.14
 
 ### 1.2 Rejected by measurement — do not revisit
 
-Laser reading dry and overwriting FX; parallel/additive effect combination; an int16 round-trip between stages; scaling the mix depth (1.0 is optimal); putting the device EQ *after* the SE mix (2.029 vs 1.924 before); additive SE layering (1.889 vs 1.858); freezing the duck target between lasers (`--duck-hold`, costs 0.34).
+Laser reading dry and overwriting FX; parallel/additive effect combination (both `--laser-mode`, see §2.5 — the verdict stands but the margin was never recorded); an int16 round-trip between stages; scaling the mix depth (1.0 is optimal); putting the device EQ *after* the SE mix (2.029 vs 1.924 before); additive SE layering (1.889 vs 1.858); freezing the duck target between lasers (`--duck-hold`, costs 0.34).
 
 ---
 
@@ -81,6 +81,16 @@ Effect internal state (LFO phase, sample-and-hold position, gate step) restarts 
 * **Tape Stop Ex** (id 10) is structurally understood but its envelope constants are not fully transcribed.
 * **The laser-position → 0..127 knob assignment** from `#TAB PARAM ASSIGN INFO` is not documented; only the 0..127 → cutoff mapping is.
 * `#TRACK AUTO TAB` (applies FX-hold effects to lasers) and `#TRACK ORIGINAL L/R` are not handled by `apply_chart.py`.
+
+### 2.5 How a laser effect combines with an FX-button effect
+
+Written up in [`specs/audio_engine.md`](specs/audio_engine.md) §8.1. The short version: when a tab-laser effect (C4 = 1..5) overlaps an FX-button hold, the disassembly says the laser reads the **dry** track and overwrites the FX result (`FUN_18062e3d0` restores the generator's source pointer on the way out, and `FUN_18062ea60` then `memcpy`s over the destination), but against the capture that model loses to plain **series chaining**. `chain` is what `apply_chart.py` ships, i.e. the default contradicts the apparent reading of the binary.
+
+This is the only place in the audio element where transcription and measurement disagree and measurement won, which makes it worth more scepticism than its one-line entry in §1.2 suggests.
+
+**First thing to do if you reopen it**: the three `--laser-mode` scores were never recorded, only the verdict, so the margin is unknown. Re-run `chain` / `dry` / `add` through `metric.py` and put the numbers in §8.1. Second: count how many frames of this chart actually have an FX hold and a C4 = 1..5 laser live at the same time — if the overlap is small, the measurement is weaker than it looks and neither model is really established. `blendfit.py` already reports the FX+laser and FX-L+FX-R overlap cases.
+
+Not in doubt, for contrast: FX-L + FX-R chain genuinely (same dispatcher, source pointer swapped to the partial result), and the default peak filter is a separate device stage that always stacks on top of the generator (§7.1).
 
 ---
 
