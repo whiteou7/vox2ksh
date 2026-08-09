@@ -155,6 +155,42 @@ class Timeline:
     def samples(self, tick):
         return int(round(self.seconds(tick) * SR))
 
+    def timesig_num(self, tick):
+        """The raw #BEAT INFO numerator in force at `tick`.
+
+        The engine multiplies samplesPerBeat by this numerator verbatim
+        (`imul ecx, r11d` in FUN_18062e310), so it is the numerator, not the
+        num*(4/den) beat count that beats_per_measure returns.
+        """
+        num = self.beats[0][1]
+        for (mm, n, _d) in self.beats:
+            if self._measure_tick.get(mm, 0) <= tick:
+                num = n
+            else:
+                break
+        return num
+
+    def grid_anchor(self, tick):
+        """Sample position the musical grid is measured from.
+
+        FUN_18062e310 walks the BPM list and the time-signature list, and takes
+        whichever change is *later* (`cmp r10d, r8d ; cmovle r10d, r8d`). The
+        grid restarts at that point rather than at the start of the song.
+        """
+        a = 0
+        for (tk, _bpm) in self._bpm_pts:
+            if tk <= tick:
+                a = max(a, self.samples(tk))
+            else:
+                break
+        for (mm, _n, _d) in self.beats:
+            tk = self._measure_tick.get(mm, 0)
+            if tk <= tick:
+                a = max(a, self.samples(tk))
+            else:
+                break
+        return a
+
 
 def parse_fx_pairs(sec):
     """#FXBUTTON EFFECT INFO is 12 *pairs* of lines, and each pair is a pair of
@@ -235,6 +271,39 @@ CHIP_SAMPLE_NAMES = {
     9: "kick+crash alt", 10: "snare+click", 11: 'female "oh"', 12: 'male "hey"',
     13: 'male "yeah"', 14: "fireworks",
 }
+
+
+# Effect types whose phase is locked to the musical grid rather than to the note.
+# Established by xref, not assumed: FUN_18062e310 has exactly three call sites in
+# the DLL, and only ONE of them is in an FX wrapper - 0x1806310e5, inside the
+# Retrigger wrapper 0x180630fa0. The Echo/RetriggerEx wrapper (0x180631390) calls
+# the shared DSP at 0x1806316a7 with no snap, and so does every other wrapper.
+# See audio_engine.md 5.2.
+GRID_LOCKED = {1}
+
+
+def grid_snap_offset(tl, tick, length_beats):
+    """FUN_18062e310: how far into its period grid an effect start sits.
+
+        samplesPerBeat = trunc(2646000 / BPM)          # 2646000 = 44100*60
+        samplesPerMeasure = samplesPerBeat * timeSigNumerator
+        period = trunc(samplesPerBeat * lengthBeats)
+        offset = ((pos - anchor) % samplesPerMeasure) % period
+        if offset > period - 512: offset = 0           # snap forward when close
+
+    The wrapper then starts the effect at `pos - offset`, so the repeat cycle is
+    aligned to the song's grid and a note that begins mid-cycle joins it partway
+    through - including replaying audio from before the note.
+    """
+    pos = tl.samples(tick)
+    bpm = tl.bpm_at(tick)
+    spb = int(2646000.0 / bpm)              # truncating divide, as the engine does
+    spm = spb * tl.timesig_num(tick)
+    period = int(spb * float(length_beats))
+    if spm <= 0 or period <= 0:
+        return 0
+    off = ((pos - tl.grid_anchor(tick)) % spm) % period
+    return 0 if off > period - 512 else off
 
 
 MIXSCALE = [1.0]        # diagnostic: scale every effect's wet/dry mix parameter
@@ -478,6 +547,11 @@ def main():
                     help="per-block coefficient/LFO update size in frames "
                          "(the engine uses the audio callback size; 512 measured "
                          "closest against a capture)")
+    ap.add_argument("--no-grid-snap", action="store_true",
+                    help="diagnostic: start grid-locked effects at the note "
+                         "instead of at the previous grid boundary. The engine "
+                         "snaps (FUN_18062e310), so this is the wrong model - it "
+                         "exists to A/B the difference. See audio_engine.md 5.2")
     ap.add_argument("--no-fx", action="store_true", help="skip FX-button effects")
     ap.add_argument("--no-laser", action="store_true", help="skip laser effects")
     ap.add_argument("--dry", default=None,
@@ -600,7 +674,7 @@ def main():
                                               ", ".join("%g" % v for v in e[1:])))
     print()
 
-    applied, skipped = {}, {}
+    applied, skipped, snapped = {}, {}, {}
 
     # The FX dispatcher (FUN_18062e3d0) chains its two buttons by swapping the
     # generator's source pointer to the partial result... but on the way out it
@@ -633,15 +707,26 @@ def main():
                 for eff in fxdefs[di]:
                     if eff is None:
                         continue
-                    res = run_fx(L[i0:i1].copy(), R[i0:i1].copy(), eff, tl, t0,
+                    # Grid-locked effects start their phase at the previous grid
+                    # boundary, which is BEFORE the note - so feed the DSP that
+                    # much extra audio and keep only the part the note covers.
+                    snap = 0
+                    if (not args.no_grid_snap and int(eff[0]) in GRID_LOCKED
+                            and len(eff) > 3):
+                        snap = grid_snap_offset(tl, t0, eff[3])
+                    j0 = max(0, i0 - snap)
+                    pre = i0 - j0
+                    res = run_fx(L[j0:i1].copy(), R[j0:i1].copy(), eff, tl, t0,
                                  args.block)
                     name = FX_NAMES.get(int(eff[0]), "?")
                     if res is None:
                         skipped[name] = skipped.get(name, 0) + 1
                         continue
-                    L[i0:i1], R[i0:i1] = stage(res[0]), stage(res[1])
+                    L[i0:i1], R[i0:i1] = stage(res[0][pre:]), stage(res[1][pre:])
                     key = "%s (%s)" % (name, label)
                     applied[key] = applied.get(key, 0) + 1
+                    if snap:
+                        snapped[key] = snapped.get(key, 0) + 1
 
     # ---------------- lasers: TRACK1 = VOL-L, TRACK8 = VOL-R ----------------
     #
@@ -860,6 +945,10 @@ def main():
         R *= args.master_gain
     write_audio(out, L, R, sr, args.ogg_quality)
 
+    if snapped:
+        print("grid-locked (phase started before the note):")
+        for k in sorted(snapped):
+            print("  %-34s x%d" % (k, snapped[k]))
     print("applied:")
     for k in sorted(applied):
         print("  %-34s x%d" % (k, applied[k]))

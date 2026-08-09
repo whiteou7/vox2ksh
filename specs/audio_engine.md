@@ -57,7 +57,7 @@ Facts that matter if you want bit‑comparable output:
 * **Sample rate is hard‑coded 44100.** The constant `0.00014247585` = 2π/44100 appears in every filter; `44100.0f` appears in every time‑based effect.
 * **Everything is single precision `float`.** Coefficients too.
 * **Dry/wet is uniform**: `out = (1-mix)·dry + mix·wet`, `mix = clamp(param, 0, 100) / 100`. A few effects fold an extra makeup gain into the wet term (noted per effect).
-* **Processing is blocked.** Block length is `gen+0x1a0` (the audio callback's frame count). Filter coefficients / LFO values are recomputed **once per block**, not per sample. Effect start positions are snapped *backwards* onto the musical grid by `FUN_18062e310`, and the laser filters additionally start 64 samples early (`iVar1 = *param_3 - 0x40`).
+* **Processing is blocked.** Block length is `gen+0x1a0` (the audio callback's frame count). Filter coefficients / LFO values are recomputed **once per block**, not per sample. The laser filters start 64 samples early (`iVar1 = *param_3 - 0x40`). **Retrigger only** — not every effect — additionally has its phase snapped *backwards* onto the musical grid by `FUN_18062e310`; see §5.2, and note that an earlier revision of this document stated that far too generally.
 * **Quirk worth knowing** (`FUN_18063d9e0`): if the *left* int16 sample of a frame is exactly `0`, the code forces **both** channels of that frame to `0` in the work buffer. It is a real branch in the shipped binary, not a decompiler artefact.
 
 ---
@@ -395,6 +395,36 @@ Two consequences for any reimplementation:
 * a run must be split wherever the per‑point effect index changes, because charts routinely change filter mid‑section. Collapsing a section to a single filter both applies the wrong filter and misplaces the slam. On this one chart that error covered **18 s of audio**.
 
 Isolated slams (a run shorter than one block) genuinely produce nothing in this engine.
+
+### 5.2 Retrigger's phase is locked to the musical grid, not to the note
+
+Retrigger does not start its repeat cycle when the note starts. The cycle runs on the song's grid, and a note that begins mid-cycle **joins it partway through** — which means the effect can open by replaying audio from *before* the note. No other effect does this.
+
+**Scope, established by xref rather than assumed.** `FUN_18062e310` has exactly three call sites in the whole DLL: `0x18056e30d` (an unrelated subsystem), `0x1806344ed`, and `0x1806310e5` — and only the last is inside an FX wrapper, namely Retrigger's `0x180630fa0`. The Echo/RetriggerEx wrapper at `0x180631390` reaches the shared DSP at `0x1806316a7` with no snap call, and neither does Gate, Wobble, Flanger or any other wrapper. **Echo is note-locked; Retrigger is grid-locked.** They share DSP `0x18063ffb0` but differ here.
+
+**What the function computes.** Arguments are `(gen, notePos, lengthBeats /*xmm2*/, secPerBeat /*xmm3*/)`. It walks the BPM list at `gen+0x28` and the time-signature list at `gen+0x30`, taking the last entry of each at or before `notePos`:
+
+```
+samplesPerBeat    = trunc(2646000 / BPM)              # 0x18092e970 = 2646000.0 = 44100*60
+samplesPerMeasure = samplesPerBeat * timeSigNumerator # imul ecx, r11d - the raw numerator
+period            = trunc(samplesPerBeat * lengthBeats)
+anchor            = max(lastBpmChangePos, lastTimeSigChangePos)   # cmovle at 0x18062e387
+offset            = ((notePos - anchor) % samplesPerMeasure) % period
+if offset > period - 512:  offset = 0                 # 0x18092e884 = 512.0
+return offset
+```
+
+Two details worth keeping. The grid is anchored at the **later of the last BPM and time-signature change**, not at the start of the song — so a mid-song tempo change re-bases it. And the 512-sample tolerance snaps *forward* to the next boundary when the note is nearly on one, which stops a note that misses by a hair from being pushed back an entire period.
+
+The wrapper then does `snappedStart = notePos - offset` (`0x1806310ea`) and hands the snapped position to the DSP, so `offset` is how far into its own cycle the effect already is when the note begins.
+
+**Worked example.** A 2-beat Retrigger at 210 BPM: `samplesPerBeat` = 12600, `period` = 25200. A note starting one beat into that period gets `offset` = 12600, so its phase origin is a beat earlier and, with `count` = 16 (slices of 1575 samples), it opens at slice 8 — immediately replaying audio from a beat before the note rather than passing the first slice through dry.
+
+**In the reference implementation.** `apply_chart.py` computes the offset in `grid_snap_offset`, then feeds the DSP the region starting `offset` samples *before* the note and discards that pre-roll from the result, so only the note's own span is written back. `--no-grid-snap` restores the old note-locked behaviour for A/B comparison.
+
+**How much this actually changes.** On `2229_kamui_tjhangneil` MXM: **nothing**. Its single Retrigger note lands exactly on a period boundary (`offset` = 0), and its 28 Echoes are note-locked anyway, so the render is bit-identical with and without the snap. The behaviour was verified instead on `0001_albida_muryoku` 1n, where 6 Retrigger notes are off-grid and 0.89 % of output samples change, first at 20.138 s.
+
+One caveat that this exposed: the engine tracks positions in **integer samples** with a truncating `samplesPerBeat`, while `Timeline.samples()` converts through float seconds. On charts whose BPM does not divide 2646000 evenly the two drift apart, and the offsets that fall out are a few tens of samples where they should be zero. Inaudible, but it means `grid_snap_offset` can fire spuriously with a tiny value. Fixing it properly means giving `Timeline` an integer-sample clock.
 
 ## 6. Reference implementation
 
@@ -847,7 +877,7 @@ And the rest:
 * **Tape Stop Ex (`.vox` id 10, `0x180640c20`)** is structurally understood (pre‑roll + windowed slow‑down) but the exact envelope constants were not fully transcribed.
 * **The knob value feeding laser filters** comes from `#TAB PARAM ASSIGN INFO` and the laser segment interpolation; I documented the 0..127 → cutoff mapping but not the laser‑position → 0..127 assignment table.
 * Block size in the game is the audio device's callback size (`gen+0x1a0`). Since coefficients and LFO values update per block, output is *block‑size dependent*. `sdvx_fx.py` defaults to 64 frames (`--block`); pick the same value if you are diffing against a capture.
-* The chart's first integer on Retrigger/Echo/Gate rows is consumed by the wrapper for musical grid snapping (`FUN_18062e310`, `samplesPerBeat = trunc(2646000/BPM)`), not by the DSP.
+* ~~The chart's first integer on Retrigger/Echo/Gate rows is consumed by the wrapper for musical grid snapping, not by the DSP.~~ **This was wrong on every count and is corrected in §5.2.** The leading integer on a Retrigger/Echo row is the repeat **count**, passed to the DSP verbatim (`mov [rsp+0x30], r13d` at `0x180631285`, loaded from the param vector at `0x1806311aa`). Gate rows have no leading integer at all — their first field is the mix. The grid snap is a separate thing that takes no chart field, and it applies to Retrigger alone.
 
 ### 8.1 Effect combination — what stacks, what overwrites
 

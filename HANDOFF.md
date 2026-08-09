@@ -82,6 +82,17 @@ Effect internal state (LFO phase, sample-and-hold position, gate step) restarts 
 * **The laser-position → 0..127 knob assignment** from `#TAB PARAM ASSIGN INFO` is not documented; only the 0..127 → cutoff mapping is.
 * `#TRACK AUTO TAB` (applies FX-hold effects to lasers) and `#TRACK ORIGINAL L/R` are not handled by `apply_chart.py`.
 
+### 2.4b Retrigger grid-locking — implemented, but untested against the capture
+
+`specs/audio_engine.md` §5.2. Retrigger's repeat cycle is locked to the musical grid rather than to the note (`FUN_18062e310`), so a note starting mid-cycle joins partway through and replays audio from before itself. Now implemented in `apply_chart.py`, with `--no-grid-snap` to A/B it.
+
+**It cannot be scored.** `2229_kamui` has exactly one Retrigger note and it sits on a period boundary, so the render is bit-identical either way and `metric.py` has nothing to say. The code path was verified on `0001_albida_muryoku` 1n (6 off-grid notes, 0.89 % of samples change) — but that chart has no capture, so "correct per the disassembly" is as far as this goes. Scoring it needs a capture of a chart with off-grid Retrigger notes.
+
+Two things fell out of that work and are still open:
+
+* **Echo's 7th chart field is unexplained.** §3 claims the wrapper uses it "for grid alignment/update period", but the Echo wrapper demonstrably does not call the snap, so that description is at best imprecise. The field is `0.00` on every row of this chart, so nothing here exercises it.
+* **`Timeline` uses a float-seconds clock, the engine uses integer samples** with a truncating `samplesPerBeat = trunc(2646000/BPM)`. On charts whose BPM does not divide 2646000 evenly the two drift, which makes `grid_snap_offset` return a few tens of samples where it should return zero. Inaudible, but wrong, and it would matter more anywhere else position arithmetic is compared. The fix is an integer-sample clock in `Timeline`.
+
 ### 2.5 How a laser effect combines with an FX-button effect
 
 Written up in [`specs/audio_engine.md`](specs/audio_engine.md) §8.1. The short version: when a tab-laser effect (C4 = 1..5) overlaps an FX-button hold, the disassembly says the laser reads the **dry** track and overwrites the FX result (`FUN_18062e3d0` restores the generator's source pointer on the way out, and `FUN_18062ea60` then `memcpy`s over the destination), but against the capture that model loses to plain **series chaining**. `chain` is what `apply_chart.py` ships, i.e. the default contradicts the apparent reading of the binary.
