@@ -39,7 +39,9 @@ Laser reading dry and overwriting FX; parallel/additive effect combination (both
 
 ## 2. Unresolved
 
-All three are in the audio element. None blocks conversion work.
+All in the audio element. None blocks conversion work.
+
+**Start with §2.6.** Wobble is the one effect measurably failing to reproduce the game, established across independent charts rather than inferred. Everything else here is a refinement; that one is a defect.
 
 ### 2.1 SE level is derived but lands ~2 dB under the fit
 
@@ -71,9 +73,15 @@ Measured: this chart uses index 0 for every slam, so it does not block rendering
 
 **Worth a second look during the notes element** — that same 28-byte event vector is very likely where note/laser gameplay events live too, so finding its producer may pay for itself twice.
 
-### 2.3 Effect state continuity
+### 2.3 Effect state continuity — done for Wobble, still open for the rest
 
-Effect internal state (LFO phase, sample-and-hold position, gate step) restarts at every note in the reimplementation, whereas the game's counters are object members that run continuously. [`scripts/audio/blendfit.py`](scripts/audio/blendfit.py) shows Echo matching exactly (β = 1.00) while Wobble (0.03) and BitCrusher (0.23) are at the wrong *phase*, not the wrong depth. Fixing it means threading persistent per-effect state through `apply_chart.py`.
+Effect internal state (LFO phase, sample-and-hold position, gate step) restarted at every note in the reimplementation, whereas the game's counters are object members that run continuously. [`scripts/audio/blendfit.py`](scripts/audio/blendfit.py) shows Echo matching exactly (β = 1.00) while Wobble (0.03) and BitCrusher (0.23) are at the wrong *phase*, not the wrong depth.
+
+**Wobble is now threaded.** Its LFO counter is a member at `this+0x238`, written back every block (`0x1806416b1` / `0x1806416c2`), so it resumes rather than restarting. `sdvx_fx.fx_wobble` takes an optional `state` dict and `apply_chart.FXSTATE` carries it, keyed by effect type — one counter per type, matching the single member in the engine. `--no-persist` restores the old behaviour.
+
+Measured on feelsseasickness: Wobble exclusive gain −0.425 → −0.392. Correct per the binary, but **nowhere near enough** — see §2.6.
+
+Still open: BitCrusher's sample-and-hold position and Gate's step counter are almost certainly members too, but were not traced and are not threaded. Both currently score well (+2.0 / +2.8), so there is no measured pressure to change them — do not touch them without a measurement to justify it.
 
 ### 2.4 Smaller gaps in the audio writeup
 
@@ -104,6 +112,71 @@ This is the only place in the audio element where transcription and measurement 
 Not in doubt, for contrast: FX-L + FX-R chain genuinely (same dispatcher, source pointer swapped to the partial result), and the default peak filter is a separate device stage that always stacks on top of the generator (§7.1).
 
 ---
+
+### 2.6 Wobble moves the audio hard, in the wrong direction — the top open item
+
+**Read this before the numbers, because the obvious misreading is wrong.** Wobble is *not* inactive, and it is not too subtle to hear. It changes the audio more than any other effect measured. What it fails to do is move the render *toward* the recording. On feelsseasickness, over the frames where Wobble is the only effect running:
+
+```
+              d(dry, ref)   d(render, ref)   d(dry, render)
+Wobble           5.330          5.723            6.382
+Gate             5.244          2.416            4.082
+Retrigger        7.206          2.700            6.220
+```
+
+Gate and Retrigger start at some distance from the reference and end up much closer. Wobble travels **further than either of them** (6.382, the largest movement of the three) and ends up slightly *further away* than doing nothing. Large, audible, wrong direction.
+
+That rules out a whole class of causes — it is not "the effect isn't being applied", "the mix is too low", or "the region is mistimed". Something about the *shape* of what it does is wrong: the filter type, the sweep waveform, the frequency mapping, or the phase.
+
+`xcheck.py` now reports this directly as the `moved` column, so the distinction is visible without a special script: big `moved` with ~zero `gain` means a wrong algorithm, not an idle one.
+
+**The defect, aggregated.** Measured with [`scripts/audio/masscheck.py`](scripts/audio/masscheck.py) over 6 charts with gameplay recordings, as exclusive-frame gain (`dry − render`, higher is better):
+
+```
+effect               mean   median    worst  charts
+Wobble             +0.024   +0.005   -0.657       5
+Flanger            +1.278   +1.408   +1.015       6
+BitCrusher         +2.250   +1.920   +1.061       6
+TapeStop           +2.329   +2.743   +1.137       4
+SideChain          +2.714   +3.639   +1.070       4
+Retrigger          +2.884   +3.141   +1.843       6
+Gate               +3.200   +3.313   +2.200       6
+```
+
+Every other DSP buys +1.3 to +4.1. Wobble buys nothing, and on some charts is negative. This is not one chart's quirk — it reproduces across independent songs.
+
+**Ruled out, do not redo:**
+
+* *LFO phase continuity* — implemented (§2.3), moved it −0.425 → −0.392. Correct, but not the cause.
+* *Block size* — the LFO only updates once per block, so this was a prime suspect. 64 / 128 / 512 all land at ≈ −0.4 on feelsseasickness. Not it.
+* *Period units* — §4.9's prose claimed "4 s period"; that was wrong and is corrected. The wrapper computes `xmm6 = (60/BPM) * period` at `0x180632ab6`, i.e. **beats**, which is what `apply_chart` already did. At 248 BPM the two readings differ 4x, so this was worth checking, but the code was right.
+
+**What is left to check**, in the order worth trying:
+
+1. **The frequency computation, term by term.** Disassemble the DSP at `0x1806414f0` and compare against §4.9's five waveform cases rather than testing hypotheses one at a time. The log-triangle case (`wave_type 3`, the one every observed chart uses) is the place to start.
+2. **The `filterType` / `waveType` column assignment.** `apply_chart.run_fx` reads `ftype = p[0]`, `wtype = p[1]`. This is *inferred*, not verified: it is self-consistent only because the observed `6, 0, 3, …` rows give a valid filter type either way round only for `ftype=0`. Verify at the wrapper which slot feeds the filter selector.
+3. **The resonance trim.** `filter_blocked` applies `(1 − Q·0.04)` to the mixed signal for LPF/HPF. If Wobble's leaf applies it differently, the level would be wrong throughout.
+
+**Do not** attribute this to the reference recordings. The same tooling gives +1.3 to +4.1 on every other effect using those exact files.
+
+### 2.7 No known floor for the non-kamui references
+
+kamui has a measured codec floor of 1.14 — the score an untouched track gets from coding noise alone, which is what makes "1.799" interpretable. The reference recordings in `scripts/shared/reference/ksh/` and the feelsseasickness YouTube rip have **no such floor measured**, so a score of "+1.05 gain" has no yardstick: nobody knows whether there is 0.2 or 2.0 of headroom left.
+
+Worth establishing, because without it the mass numbers can only be compared to each other, never to "correct". The cheapest estimate is to score a chart's *idle* frames — where the chart does nothing, the render is the dry track, so whatever the metric reports there is the floor for that recording.
+
+### 2.8 Reading the metric: never judge a localized fix by the ALL column
+
+Recorded because it caused a wrong conclusion in the session that added these tools.
+
+`xcheck.py` reports each region twice: the raw mask, and **exclusive** frames where that effect is the only FX running. Effects overlap constantly — feelsseasickness has Echo running under HPF+Gate — so the raw column measures everything active in a region, not the named effect. Read the exclusive column for attribution.
+
+Two concrete ways this misleads:
+
+* Echo scored **−0.457** on its raw mask and **+2.046** exclusive. The raw number was the HPF+Gate on top of it. Echo is fine; a session concluded it was broken.
+* A real fix worth **+0.639** on Retrigger exclusive frames showed as **+0.010** on ALL, because 65 improved frames are diluted across 5157. Judged on ALL it looks like noise.
+
+Validated end to end: rendering feelsseasickness before and after the §2.3 + §2.4b fixes, with alignment and dry track held fixed, the metric preferred "after" on every region that changed and got worse on none — agreeing with a listener who picked "after" blind. The tool tracks perception when read at the right granularity.
 
 ## 3. To do
 

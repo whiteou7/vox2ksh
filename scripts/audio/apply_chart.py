@@ -306,6 +306,17 @@ def grid_snap_offset(tl, tick, length_beats):
     return 0 if off > period - 512 else off
 
 
+# Persistent per-effect DSP state, keyed by .vox effect type.
+#
+# The engine keeps these counters as members of one long-lived object - Wobble's
+# LFO lives at this+0x238 and is written back every block - so they run on across
+# notes instead of restarting at each one. There is one counter per effect type,
+# not per chart definition or per note, which is why this is keyed by type.
+# Cleared per render in main(). See audio_engine.md 4.9.
+FXSTATE = {}
+PERSIST = {6}           # effect types whose state is threaded (6 = Wobble)
+
+
 MIXSCALE = [1.0]        # diagnostic: scale every effect's wet/dry mix parameter
 
 
@@ -344,7 +355,8 @@ def run_fx(L, R, eff, tl, tick, block, knob=None):
         ftype, wtype, mix, fa, fb_, per, q = (int(p[0]), int(p[1]), p[2],
                                               p[3], p[4], p[5], p[6])
         return FX.fx_wobble(L, R, mix, ftype, wtype, fa, fb_, per * spb, q,
-                            block=block)
+                            block=block,
+                            state=FXSTATE.setdefault(t, {}) if t in PERSIST else None)
     if t == 7:                                          # Bit Crusher
         return FX.fx_bitcrush(L, R, p[0], int(p[1]), block=block)
     if t == 11:                                         # Low Pass Filter
@@ -547,6 +559,11 @@ def main():
                     help="per-block coefficient/LFO update size in frames "
                          "(the engine uses the audio callback size; 512 measured "
                          "closest against a capture)")
+    ap.add_argument("--no-persist", action="store_true",
+                    help="diagnostic: restart each effect's internal counter at "
+                         "every note instead of resuming. The engine keeps them "
+                         "in object members, so this is the wrong model - it "
+                         "exists to A/B the difference")
     ap.add_argument("--no-grid-snap", action="store_true",
                     help="diagnostic: start grid-locked effects at the note "
                          "instead of at the previous grid boundary. The engine "
@@ -625,6 +642,8 @@ def main():
     MODE[0] = args.laser_mode
     STAGE_CLIP[0] = not args.no_stage_clip
     MIXSCALE[0] = args.mix_scale
+    if args.no_persist:
+        PERSIST.clear()
     folder = os.path.abspath(args.folder)
     base = os.path.basename(folder)
     voxes = sorted(f for f in os.listdir(folder) if f.endswith(".vox"))
@@ -675,6 +694,8 @@ def main():
     print()
 
     applied, skipped, snapped = {}, {}, {}
+    FXSTATE.clear()          # persistent DSP counters are per-render
+
 
     # The FX dispatcher (FUN_18062e3d0) chains its two buttons by swapping the
     # generator's source pointer to the partial result... but on the way out it

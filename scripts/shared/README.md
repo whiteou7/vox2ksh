@@ -26,6 +26,14 @@ Build from the bottom up — `pe.py` and `funcs.py` are the foundation and every
 | `listfuncs.py` | Lists `.pdata` function starts in an address window. Useful for "what is in this region". |
 | `dumpconst.py` | Dumps a VA range interpreted as float / double / u32 side by side. Written for finding coefficient tables — `DAT_18090c050`, the 128-entry laser frequency table, came out of this. |
 
+## `reference/ksh/`
+
+Manual `.ksh` conversions, one folder per song. Each folder's `.ogg` files are **gameplay recordings with the audio effects already applied** — not the clean song — which makes them usable as calibration references for the audio element. Pick the highest difficulty present (`mxm` > `exh` > `adv` > `nov`); that is what the recordings are of.
+
+Confirmed rather than assumed: on `777`, `mxm.ogg` correlates 0.81 with the game's own clean `.s3v` — same audio, modified — while the four difficulty `.ogg`s are all distinct files.
+
+[`../audio/masscheck.py`](../audio/masscheck.py) matches these to charts in `data/music` by name (41 of 86 folders currently match) and scores every one. `feelsseasickness` is **not** in this set; it has its own YouTube recording at the project root.
+
 ## Chart survey
 
 | file | what it does |

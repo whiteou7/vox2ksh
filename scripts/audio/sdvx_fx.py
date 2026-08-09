@@ -588,7 +588,15 @@ def fx_flanger(L, R, mix, delay_ms, rate, depth_pct, stages, block=64):
 # --------------------------------------------------------------------------
 
 def fx_wobble(L, R, mix, filter_type, wave_type, freq_a, freq_b,
-              period_sec, q, block=64):
+              period_sec, q, block=64, state=None):
+    """LFO-swept biquad.
+
+    The engine's LFO counter is an object member at `this+0x238`, written back
+    every block (0x1806416b1 / 0x1806416c2) - so it does NOT restart at each
+    note, it resumes where the previous note left it. Pass a dict as `state` to
+    reproduce that; omit it and the phase starts at zero, which is what a
+    standalone one-shot render wants.
+    """
     lo = min(float(freq_a), float(freq_b))
     hi = max(float(freq_a), float(freq_b))
     period = max(float(period_sec), 0.1) * SR
@@ -596,9 +604,10 @@ def fx_wobble(L, R, mix, filter_type, wave_type, freq_a, freq_b,
     ratio = hi / max(lo, 1e-9)
     kind = {0: "lpf", 1: "hpf", 2: "bpf"}[int(filter_type)]
     wt = int(wave_type)
+    start = float(state.get("counter", 0.0)) if state is not None else 0.0
 
     def freq_for(bi):
-        counter = (bi * block) % period
+        counter = (start + bi * block) % period
         ph = counter / period
         if wt == 0:
             return lo + ph * (hi - lo)
@@ -613,7 +622,11 @@ def fx_wobble(L, R, mix, filter_type, wave_type, freq_a, freq_b,
             return hi if counter >= period * 0.5 else lo
         return lo
 
-    return filter_blocked(L, R, kind, mix, freq_for, Q, block)
+    out = filter_blocked(L, R, kind, mix, freq_for, Q, block)
+    if state is not None:
+        nblocks = (L.size + block - 1) // block
+        state["counter"] = (start + nblocks * block) % period
+    return out
 
 
 # --------------------------------------------------------------------------

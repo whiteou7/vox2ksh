@@ -352,7 +352,7 @@ counter += N ; if counter >= period: counter -= period
 filterType 0 -> LPF(0x18063df40), 1 -> HPF(0x18063e500), 2 -> BPF(0x18063eb10)
 ```
 
-`6, 0, 3, 80.00, 500.00, 18000.00, 4.00, 1.40` = LPF, log‑triangle, 80 % wet, 500↔18000 Hz, 4 s period, Q = 1.4.
+`6, 0, 3, 80.00, 500.00, 18000.00, 4.00, 1.40` = LPF, log‑triangle, 80 % wet, 500↔18000 Hz, a **4 beat** period, Q = 1.4. (An earlier revision of this line read that field as 4 *seconds*. It is beats, like the other period fields — the wrapper computes `xmm6 = (60/BPM) * period` at `0x180632ab6`, which is what §5 tabulates. At 248 BPM the two readings differ by 4x, so this is audible, not pedantic.)
 
 ### 4.10 Pitch Shift — `0x1806429b0`
 
