@@ -1,0 +1,33 @@
+# All script output: renders, decoded WAVs, extracted sample banks, scratch.
+# Everything in here is regenerable — see scripts/shared/_paths.py for how.
+output/*
+!output/.gitkeep
+!output/README.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Game data never belongs in the repo (it is next to it, in ../data and ../modules)
+*.s3v
+*.s3p
+*.2dx
+*.dll
+*.exe
+
+# Bulk audio. The one exception is the cabinet capture used for calibration,
+# which is small, irreplaceable, and force-added under scripts/audio/reference/.
+*.wav
+*.mp3
+*.ogg
+!scripts/audio/reference/*.ogg
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

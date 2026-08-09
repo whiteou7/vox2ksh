@@ -1,0 +1,723 @@
+#!/usr/bin/env python3
+"""
+SOUND VOLTEX audio-effect engine — reference reimplementation.
+
+Transcribed from BMSoundLibSvo::CSvoEffectedAudioGeneratorImpl in
+modules/soundvoltex.dll (see README.md for addresses and derivations).
+
+Conventions kept identical to the game:
+  * fixed 44100 Hz, stereo
+  * DSP operates on float values in the raw int16 magnitude domain (+-32768),
+    NOT normalised to +-1
+  * out = (1-mix)*dry + mix*wet, mix = clamp(param,0,100)/100
+  * coefficients / LFO values are recomputed once per block, not per sample
+  * final writeback clamps to [-32768, 32767] and truncates toward zero
+
+Requires numpy. scipy is used for the IIR sections if present (much faster),
+otherwise a pure-python fallback runs.
+"""
+
+import argparse
+import math
+import sys
+import wave
+
+import numpy as np
+
+try:
+    from scipy.signal import lfilter, lfilter_zi  # noqa: F401
+    HAVE_SCIPY = True
+except Exception:                                  # pragma: no cover
+    HAVE_SCIPY = False
+
+SR = 44100
+TWO_PI_OVER_SR = 0.00014247585   # the literal float constant in the DLL
+INV_127 = 0.007874016            # 1/127, the knob normaliser
+
+
+# --------------------------------------------------------------------------
+# WAV I/O  (16-bit PCM only, matching the engine's native format)
+# --------------------------------------------------------------------------
+
+def read_wav(path):
+    with wave.open(path, "rb") as w:
+        if w.getsampwidth() != 2:
+            raise SystemExit("only 16-bit PCM WAV is supported (the engine's native format)")
+        ch, sr, n = w.getnchannels(), w.getframerate(), w.getnframes()
+        raw = w.readframes(n)
+    data = np.frombuffer(raw, dtype="<i2").astype(np.float32)
+    if ch == 1:
+        L = R = data
+    else:
+        data = data.reshape(-1, ch)
+        L, R = data[:, 0].copy(), data[:, 1].copy()
+    if sr != SR:
+        print(f"warning: input is {sr} Hz; the engine is hard-coded to {SR} Hz. "
+              f"Times/frequencies will be off unless you resample first.", file=sys.stderr)
+    return L.astype(np.float32), R.astype(np.float32), sr
+
+
+def writeback(L, R):
+    """Engine writeback (FUN_18063dc40): clamp to int16 range, truncate toward
+    zero, interleave. Returns the raw int16 frames.
+
+    This is the game's actual output format, so it is the right hand-off point
+    for anything downstream - a container writer, or a pipe to an encoder.
+    """
+    def q(a):
+        a = np.where(a < -32768.0, -32768.0, np.where(a > 32767.0, 32767.0, a))
+        return np.trunc(a).astype(np.int16)
+    inter = np.empty(L.size * 2, dtype=np.int16)
+    inter[0::2] = q(L)
+    inter[1::2] = q(R)
+    return inter
+
+
+def write_wav(path, L, R, sr):
+    """Engine writeback, into a 16-bit PCM WAV."""
+    inter = writeback(L, R)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(inter.tobytes())
+
+
+# --------------------------------------------------------------------------
+# small helpers
+# --------------------------------------------------------------------------
+
+def clampf(v, lo, hi):
+    return lo if v < lo else (hi if v > hi else v)
+
+
+def mixof(v):
+    return clampf(float(v), 0.0, 100.0) * 0.01
+
+
+def blocks(n, block):
+    i = 0
+    while i < n:
+        j = min(i + block, n)
+        yield i, j
+        i = j
+
+
+# --------------------------------------------------------------------------
+# 4.1  biquads
+# --------------------------------------------------------------------------
+
+def biquad_coeffs(kind, freq, q):
+    """RBJ cookbook, exactly as FUN_18063df40 / e500 / eb10 compute them."""
+    f = max(float(freq), 1.0)
+    Q = max(float(q), 0.1)
+    w0 = np.float32(f * TWO_PI_OVER_SR)
+    sn, cs = math.sin(w0), math.cos(w0)
+    alpha = sn * (0.5 / Q)
+    a0i = 1.0 / (1.0 + alpha)
+    if kind == "lpf":
+        b0 = b2 = (1.0 - cs) * 0.5 * a0i
+        b1 = (1.0 - cs) * a0i
+    elif kind == "hpf":
+        b0 = b2 = (1.0 + cs) * 0.5 * a0i
+        b1 = -((1.0 + cs) * a0i)
+    elif kind == "bpf":
+        b0 = alpha * a0i
+        b1 = 0.0
+        b2 = -alpha * a0i
+    else:
+        raise ValueError(kind)
+    a1 = -2.0 * cs * a0i
+    a2 = (1.0 - alpha) * a0i
+    return (b0, b1, b2, a1, a2)
+
+
+def _iir_run(x, c, state):
+    """y[n] = b0 x[n] + b1 x[n-1] + b2 x[n-2] - a1 y[n-1] - a2 y[n-2]"""
+    b0, b1, b2, a1, a2 = c
+    if HAVE_SCIPY:
+        # scipy wants a = [1, a1, a2]; the DLL's signs already match that form.
+        zi = np.asarray(state[0], dtype=np.float64)
+        y, zf = lfilter([b0, b1, b2], [1.0, a1, a2], x.astype(np.float64), zi=zi)
+        state[0] = zf
+        return y.astype(np.float32)
+    x1, x2, y1, y2 = state[1]
+    y = np.empty_like(x)
+    for i in range(x.size):
+        xn = float(x[i])
+        yn = b0 * xn + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        y[i] = yn
+        x2, x1 = x1, xn
+        y2, y1 = y1, yn
+    state[1] = (x1, x2, y1, y2)
+    return y
+
+
+def _new_iir_state():
+    return [np.zeros(2, dtype=np.float64), (0.0, 0.0, 0.0, 0.0)]
+
+
+def filter_blocked(L, R, kind, mix, freq_fn, q, block):
+    """Run a biquad, recomputing coefficients once per block (freq_fn(blockIdx))."""
+    m = mixof(mix)
+    Q = max(float(q), 0.1)
+    if kind == "bpf":
+        if Q <= 1.0:
+            g = max(Q + 0.9, 0.1)
+        else:
+            g = Q * 0.2 + 2.0
+            if g > 4.0:
+                g = 3.0
+        trim = 1.0
+    else:
+        g = 1.0
+        trim = 1.0 - Q * 0.04
+
+    sl, sr_ = _new_iir_state(), _new_iir_state()
+    outL, outR = L.copy(), R.copy()
+    for bi, (i, j) in enumerate(blocks(L.size, block)):
+        c = biquad_coeffs(kind, freq_fn(bi), Q)
+        yl = _iir_run(L[i:j], c, sl)
+        yr = _iir_run(R[i:j], c, sr_)
+        if kind == "bpf":
+            outL[i:j] = (1.0 - m) * L[i:j] + m * yl * g
+            outR[i:j] = (1.0 - m) * R[i:j] + m * yr * g
+        else:
+            outL[i:j] = ((1.0 - m) * L[i:j] + m * yl) * trim
+            outR[i:j] = ((1.0 - m) * R[i:j] + m * yr) * trim
+    return outL, outR
+
+
+def fx_lpf(L, R, mix, freq, q, block=64):
+    return filter_blocked(L, R, "lpf", mix, lambda b: freq, q, block)
+
+
+def fx_hpf(L, R, mix, freq, q, block=64):
+    return filter_blocked(L, R, "hpf", mix, lambda b: freq, q, block)
+
+
+def fx_peak(L, R, mix, freq, q, block=64):
+    return filter_blocked(L, R, "bpf", mix, lambda b: freq, q, block)
+
+
+# --------------------------------------------------------------------------
+# 4.2  laser / knob sweeps
+# --------------------------------------------------------------------------
+
+def _knob_curve(knob, nblocks, block):
+    """knob: list of (seconds, value 0..127) breakpoints -> per-block value."""
+    if not knob:
+        return lambda b: 0.0
+    ts = np.array([k[0] for k in knob], dtype=np.float64)
+    vs = np.array([k[1] for k in knob], dtype=np.float64)
+    bt = (np.arange(nblocks) * block) / float(SR)
+    vals = np.interp(bt, ts, vs)
+    return lambda b: float(vals[min(b, nblocks - 1)])
+
+
+def fx_laser_lpf(L, R, mix, f_lo, f_hi, q, knob=None, block=64):
+    lo = max(float(f_lo), 1.0)
+    ratio = float(f_hi) / lo
+    nb = (L.size + block - 1) // block
+    kv = _knob_curve(knob, nb, block)
+    return filter_blocked(L, R, "lpf", mix,
+                          lambda b: lo * (ratio ** (1.0 - kv(b) * INV_127)), q, block)
+
+
+def fx_laser_hpf(L, R, mix, f_lo, f_hi, q, knob=None, block=64):
+    lo = max(float(f_lo), 1.0)
+    ratio = float(f_hi) / lo
+    nb = (L.size + block - 1) // block
+    kv = _knob_curve(knob, nb, block)
+    return filter_blocked(L, R, "hpf", mix,
+                          lambda b: lo * (ratio ** (kv(b) * INV_127)), q, block)
+
+
+def peaking_coeffs(freq, q, gain_db):
+    """RBJ peakingEQ, parameterised by Q."""
+    A = 10.0 ** (gain_db / 40.0)
+    w0 = 2.0 * math.pi * max(float(freq), 20.0) / SR
+    sn, cs = math.sin(w0), math.cos(w0)
+    alpha = sn / (2.0 * max(q, 0.05))
+    a0 = 1.0 + alpha / A
+    b0 = (1.0 + alpha * A) / a0
+    b1 = (-2.0 * cs) / a0
+    b2 = (1.0 - alpha * A) / a0
+    a1 = (-2.0 * cs) / a0
+    a2 = (1.0 - alpha / A) / a0
+    return (b0, b1, b2, a1, a2)
+
+
+def peaking_coeffs_bw(freq, bw_semitones, gain_db):
+    """RBJ peakingEQ parameterised by bandwidth in semitones.
+
+    _DSFXParamEq.fBandwidth is documented in semitones, so the DirectSound
+    ParamEq DMO's shape is the cookbook peaking filter with
+    BW(octaves) = semitones / 12.
+    """
+    if gain_db == 0.0:
+        return (1.0, 0.0, 0.0, 0.0, 0.0)
+    A = 10.0 ** (gain_db / 40.0)
+    w0 = 2.0 * math.pi * max(float(freq), 20.0) / SR
+    sn, cs = math.sin(w0), math.cos(w0)
+    bw = max(float(bw_semitones), 1.0) / 12.0          # octaves
+    alpha = sn * math.sinh(0.5 * math.log(2.0) * bw * w0 / sn)
+    a0 = 1.0 + alpha / A
+    return ((1.0 + alpha * A) / a0, (-2.0 * cs) / a0, (1.0 - alpha * A) / a0,
+            (-2.0 * cs) / a0, (1.0 - alpha / A) / a0)
+
+
+# --------------------------------------------------------------------------
+# The default ("peak filter") laser sound.
+#
+# This is NOT the SVO effect generator. FUN_1805c7a00 maps the laser knob to a
+# _DSFXParamEq and pushes it into slot 0 of the sound device's ParamEq array
+# (FUN_180626b30 -> CDmoSoundFxAudioProcessor<_DSFXParamEq>). Everything below
+# is transcribed from that function; see README section 7.
+#
+# 128-entry centre-frequency table at DAT_18090c050, indexed by int(knob).
+# --------------------------------------------------------------------------
+
+PEAK_FC_TABLE = (
+    0.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0,
+    48.0, 54.0, 100.0, 106.0, 112.0, 118.0, 124.0, 130.0,
+    136.0, 142.0, 148.0, 154.0, 160.0, 166.0, 172.0, 178.0,
+    184.0, 190.0, 196.0, 202.0, 232.0, 262.0, 292.0, 322.0,
+    352.0, 382.0, 412.0, 442.0, 472.0, 522.0, 572.0, 622.0,
+    672.0, 722.0, 772.0, 822.0, 872.0, 922.0, 972.0, 1022.0,
+    1072.0, 1122.0, 1172.0, 1222.0, 1272.0, 1322.0, 1372.0, 1422.0,
+    1472.0, 1522.0, 1572.0, 1622.0, 1672.0, 1722.0, 1772.0, 1822.0,
+    1872.0, 1922.0, 1972.0, 2022.0, 2072.0, 2122.0, 2172.0, 2222.0,
+    2272.0, 2322.0, 2372.0, 2422.0, 2472.0, 2522.0, 2572.0, 2622.0,
+    2672.0, 2722.0, 2772.0, 2822.0, 2872.0, 2922.0, 2972.0, 3022.0,
+    3072.0, 3122.0, 3172.0, 3222.0, 3272.0, 3322.0, 3372.0, 3422.0,
+    3472.0, 3522.0, 3572.0, 3622.0, 3672.0, 3852.0, 4032.0, 4212.0,
+    4392.0, 4572.0, 4752.0, 4932.0, 5112.0, 5292.0, 5472.0, 5652.0,
+    5832.0, 6012.0, 6192.0, 6372.0, 6552.0, 6732.0, 6912.0, 7400.0,
+    7700.0, 8000.0, 8400.0, 8800.0, 9270.0, 9750.0, 10240.0, 10800.0,
+)
+
+# DirectSound ParamEq limits, applied verbatim by FUN_1805c7a00.
+PEAK_CENTER_MIN = 80.0
+PEAK_CENTER_MAX = 16000.0
+
+# The knob value below which the game leaves the EQ flat and the music at unity.
+PEAK_KNOB_DEADZONE = 4
+
+# Music-voice target gain vs knob (voice vtable+0x60 -> ramped gain, bank 2).
+PEAK_DUCK_MAX = 0.8
+PEAK_DUCK_MIN = 0.57
+PEAK_DUCK_SLOPE = 0.0025274728          # per knob step over 4..94
+PEAK_DUCK_RAMP = 0.33                   # gain units per second (FUN_1806a2520)
+
+
+def paramq_from_knob(knob):
+    """int knob 0..127 -> (fCenter, fBandwidth semitones, fGain dB).
+
+    Transcribed from FUN_1805c7a00 @ 0x1805c7a00.
+    """
+    v = int(knob)
+    v = 0 if v < 0 else (127 if v > 127 else v)
+    fc = PEAK_FC_TABLE[v]
+    if fc > PEAK_CENTER_MAX:
+        fc = PEAK_CENTER_MAX
+    elif fc < PEAK_CENTER_MIN:
+        fc = PEAK_CENTER_MIN
+    if fc < 200.0:
+        bw = gain = fc * 0.075                    # 6.0 .. 15.0, continuous at 200
+    elif fc < 1000.0:
+        bw = gain = 15.0
+    else:
+        bw = 15.0 - (fc - 1000.0) * 0.0003        # 15.0 .. 10.5
+        gain = 15.0 - (fc - 1000.0) * 0.0005      # 15.0 ..  7.5
+    if v < PEAK_KNOB_DEADZONE:
+        gain = 0.0
+    return fc, bw, gain
+
+
+def peak_duck_target(knob):
+    """int knob 0..127 -> music-voice target gain (FUN_1805c7a00 tail)."""
+    v = int(knob)
+    v = 0 if v < 0 else (127 if v > 127 else v)
+    if v < PEAK_KNOB_DEADZONE:
+        return 1.0
+    if v < 95:
+        return PEAK_DUCK_MAX - (v - 4) * PEAK_DUCK_SLOPE
+    if v < 100:
+        return PEAK_DUCK_MIN
+    if v < 120:
+        return (v - 100) * 0.011500001 + PEAK_DUCK_MIN
+    return PEAK_DUCK_MAX
+
+
+def fx_laser_peak(L, R, knob=None, block=64, knob_per_block=None):
+    """Run the device ParamEq over L/R with a knob curve.
+
+    `knob` is the usual list of (seconds, value 0..127) breakpoints;
+    `knob_per_block` overrides it with a ready-made per-block array.
+    """
+    nb = (L.size + block - 1) // block
+    if knob_per_block is None:
+        kv = _knob_curve(knob, nb, block)
+        kvals = [kv(b) for b in range(nb)]
+    else:
+        kvals = knob_per_block
+    sl, sr_ = _new_iir_state(), _new_iir_state()
+    outL, outR = L.copy(), R.copy()
+    for bi, (i, j) in enumerate(blocks(L.size, block)):
+        fc, bw, gain = paramq_from_knob(kvals[bi])
+        c = peaking_coeffs_bw(fc, bw, gain)
+        outL[i:j] = _iir_run(L[i:j], c, sl)
+        outR[i:j] = _iir_run(R[i:j], c, sr_)
+    return outL, outR
+
+
+def fx_laser_bitcrush(L, R, mix, _rate_unused, knob=None, block=64):
+    nb = (L.size + block - 1) // block
+    kv = _knob_curve(knob, nb, block)
+    outL, outR = L.copy(), R.copy()
+    for bi, (i, j) in enumerate(blocks(L.size, block)):
+        vn = clampf(kv(bi) * INV_127, 0.0, 1.0)
+        rate = int(vn * 29.0 + 1.0)
+        outL[i:j], outR[i:j] = fx_bitcrush(L[i:j], R[i:j], mix, rate, block=block)
+    return outL, outR
+
+
+# --------------------------------------------------------------------------
+# 4.3  bit crusher
+# --------------------------------------------------------------------------
+
+def fx_bitcrush(L, R, mix, rate, block=64):
+    """Sample-and-hold decimator.
+
+    Note: in the DLL the phase counter is a *local* that restarts at 0 on every
+    call, i.e. the hold grid realigns at each audio block boundary. Reproduced
+    here, so output depends on `block` exactly as the game's does.
+    """
+    m = mixof(mix)
+    rate = int(clampf(int(rate), 1, 30))
+    outL, outR = L.copy(), R.copy()
+    for i, j in blocks(L.size, block):
+        loc = np.arange(j - i)
+        src = i + (loc - (loc % rate))
+        outL[i:j] = (1.0 - m) * L[i:j] + m * L[src]
+        outR[i:j] = (1.0 - m) * R[i:j] + m * R[src]
+    return outL.astype(np.float32), outR.astype(np.float32)
+
+
+# --------------------------------------------------------------------------
+# 4.4  retrigger / echo
+# --------------------------------------------------------------------------
+
+def fx_retrigger(L, R, mix, length_sec, feedback, count, gate, release, block=64):
+    m = mixof(mix)
+    ln = clampf(float(length_sec), 0.1, 8.0)
+    fb = clampf(float(feedback), 0.1, 1.0)
+    cnt = int(clampf(int(count), 1, 32))
+    gt = clampf(float(gate), 0.1, 1.0)
+    rel = clampf(float(release), 0.0, 1.0)
+
+    seg = max(int(ln * SR) // cnt, 1)
+    gate_len = int(seg * gt)
+    fade_len = int(gate_len * rel)
+    gtab = np.array([fb ** k for k in range(32)], dtype=np.float32)
+
+    n = L.size
+    t = np.arange(n) % (seg * cnt)
+    rep = t // seg
+    rem = t % seg
+    src = np.maximum(np.arange(n) - rep * seg, 0)
+
+    env = gtab[rep]
+    if fade_len > 0:
+        tail = rem > (gate_len - fade_len)
+        f = 1.0 - ((rem - gate_len) + fade_len) / float(fade_len)
+        env = np.where(tail, env * np.clip(f, 0.0, 1.0), env)
+    env = np.where(rem > gate_len, 0.0, env)
+
+    outL = (1.0 - m) * L + m * L[src] * env
+    outR = (1.0 - m) * R + m * R[src] * env
+    return outL.astype(np.float32), outR.astype(np.float32)
+
+
+# --------------------------------------------------------------------------
+# 4.5  gate
+# --------------------------------------------------------------------------
+
+DEFAULT_GATE_PATTERN = [32, 4] * 8          # the constant at 0x180933e50
+
+
+def fx_gate(L, R, mix, steps, period_sec, pattern=None, block=64):
+    m = mixof(mix)
+    steps = int(clampf(int(steps), 1, 32))
+    period = clampf(float(period_sec), 0.1, 4.0) * SR
+    step_len = max(int(period) // steps, 1)
+    pat = np.array(pattern or DEFAULT_GATE_PATTERN, dtype=np.float64)
+
+    n = L.size
+    t = np.arange(n) % int(period)
+    idx = t // step_len
+    idx = np.where(idx > 15, idx - 16, idx)
+    idx = np.clip(idx, 0, len(pat) - 1)
+    g = (pat[idx] * 0.0322).astype(np.float32)
+
+    outL = (1.0 - m) * L + m * L * g
+    outR = (1.0 - m) * R + m * R * g
+    return outL.astype(np.float32), outR.astype(np.float32)
+
+
+# --------------------------------------------------------------------------
+# 4.6  tape stop
+# --------------------------------------------------------------------------
+
+def fx_tapestop(L, R, mix, speed, dur_sec, block=64):
+    m = mixof(mix)
+    speed = clampf(float(speed), 1.0, 10.0)
+    dur = clampf(float(dur_sec), 0.1, 2.0)
+    total = dur * SR
+    step = 1.0 / total
+
+    n = L.size
+    outL, outR = L.copy(), R.copy()
+    idx = 0
+    frac = 0.0
+    written = 0
+    for i in range(n):
+        if written + 1 >= total:
+            outL[i] = (1.0 - m) * L[i]
+            outR[i] = (1.0 - m) * R[i]
+            continue
+        if frac < 1.0:
+            before = idx
+            idx += 1
+            frac += before * step * speed + 1.0
+        env = 1.0 - written * step
+        s = min(idx, n - 1)
+        outL[i] = (1.0 - m) * L[i] + m * L[s] * env
+        outR[i] = (1.0 - m) * R[i] + m * R[s] * env
+        written += 1
+        frac -= 1.0
+    return outL, outR
+
+
+# --------------------------------------------------------------------------
+# 4.7  side chain
+# --------------------------------------------------------------------------
+
+def fx_sidechain(L, R, mix, period_sec, attack, hold, release, block=64):
+    m = mixof(mix)
+    period = max(float(period_sec), 0.1)
+    a_pct = int(clampf(int(attack), 0, 100))
+    h_pct = int(clampf(int(hold), 0, 100))
+    r_pct = int(clampf(int(release), 0, 100))
+
+    N = int(period * SR)
+    A = max(int(a_pct * 0.002 * N), 1)
+    H = int(h_pct * 0.003 * N)
+    Rl = max(int(r_pct * 0.005 * N), 1)
+
+    t = np.arange(L.size) % N
+    g = np.ones(L.size, dtype=np.float32)
+    g = np.where(t < A, 1.0 - t / float(A), g)
+    g = np.where((t >= A) & (t < A + H), 0.0, g)
+    seg3 = (t >= A + H) & (t < A + H + Rl)
+    g = np.where(seg3, ((t - H) - A) / float(Rl), g)
+
+    outL = (1.0 - m) * L + m * L * g
+    outR = (1.0 - m) * R + m * R * g
+    return outL.astype(np.float32), outR.astype(np.float32)
+
+
+# --------------------------------------------------------------------------
+# 4.8  flanger
+# --------------------------------------------------------------------------
+
+def fx_flanger(L, R, mix, delay_ms, rate, depth_pct, stages, block=64):
+    m = mixof(mix)
+    d = clampf(float(delay_ms), 0.1, 3.0) * 44.1     # base delay in samples
+    rate = max(float(rate), 0.0) * 0.5               # LFO Hz
+    depth_pct = int(clampf(int(depth_pct), 0, 100))
+    st = clampf(float(stages), 0.0, 4.0)
+    depth = depth_pct * 0.01 * d
+    if rate <= 0.0:
+        return L.copy(), R.copy()
+
+    top = int(math.ceil(st))
+    wrap = 22050.0 / rate
+    quarter = 11025.0 / rate
+
+    n = L.size
+    curL, curR = L.astype(np.float64), R.astype(np.float64)
+    idx = np.arange(n)
+
+    for p in range(top, -1, -1):
+        c = (np.arange(n) % wrap)
+        sL = np.sin(c * rate * TWO_PI_OVER_SR)
+        c2 = (c + quarter) % wrap
+        sR = np.sin(c2 * rate * TWO_PI_OVER_SR)
+
+        posL = idx - (sL * depth + d)
+        posR = idx - (sR * depth + d)
+
+        def tap(buf, pos):
+            i0 = np.floor(pos).astype(np.int64)
+            fr = pos - i0
+            i0 = np.clip(i0, 0, n - 2)
+            return buf[i0] * (1.0 - fr) + buf[i0 + 1] * fr
+
+        wL, wR = tap(curL, posL), tap(curR, posR)
+
+        if p == top:
+            a = m - (1.0 - m) * (top - st)
+            b = (top - st) * m + (1.0 - m)
+            curL = a * wL + b * curL
+            curR = a * wR + b * curR
+        else:
+            curL = m * wL + (1.0 - m) * curL
+            curR = m * wR + (1.0 - m) * curR
+
+        if st >= 1.0 and p == 0:
+            curL *= 1.5
+            curR *= 1.5
+
+    return curL.astype(np.float32), curR.astype(np.float32)
+
+
+# --------------------------------------------------------------------------
+# 4.9  wobble
+# --------------------------------------------------------------------------
+
+def fx_wobble(L, R, mix, filter_type, wave_type, freq_a, freq_b,
+              period_sec, q, block=64):
+    lo = min(float(freq_a), float(freq_b))
+    hi = max(float(freq_a), float(freq_b))
+    period = max(float(period_sec), 0.1) * SR
+    Q = max(float(q), 0.1)
+    ratio = hi / max(lo, 1e-9)
+    kind = {0: "lpf", 1: "hpf", 2: "bpf"}[int(filter_type)]
+    wt = int(wave_type)
+
+    def freq_for(bi):
+        counter = (bi * block) % period
+        ph = counter / period
+        if wt == 0:
+            return lo + ph * (hi - lo)
+        if wt == 1:
+            return hi - ph * (hi - lo)
+        if wt == 2:
+            return lo * (ratio ** ((math.sin(ph * 2.0 * math.pi) + 1.0) * 0.5))
+        if wt == 3:
+            tri = 2.0 * ph if counter < period * 0.5 else 2.0 - 2.0 * ph
+            return lo * (ratio ** tri)
+        if wt == 4:
+            return hi if counter >= period * 0.5 else lo
+        return lo
+
+    return filter_blocked(L, R, kind, mix, freq_for, Q, block)
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+EFFECTS = {
+    # name              (fn,             param names / .vox column order after the type id)
+    "retrigger":     (fx_retrigger,      "mix,lengthSec,feedback,count,gate,release"),
+    "gate":          (fx_gate,           "mix,steps,periodSec"),
+    "flanger":       (fx_flanger,        "mix,delayMs,rate,depthPct,stages"),
+    "tapestop":      (fx_tapestop,       "mix,speed,durSec"),
+    "sidechain":     (fx_sidechain,      "mix,periodSec,attack,hold,release"),
+    "wobble":        (fx_wobble,         "mix,filterType,waveType,freqA,freqB,periodSec,Q"),
+    "bitcrush":      (fx_bitcrush,       "mix,rate"),
+    "lpf":           (fx_lpf,            "mix,freq,Q"),
+    "hpf":           (fx_hpf,            "mix,freq,Q"),
+    "peak":          (fx_peak,           "mix,freq,Q"),
+    "laser_lpf":     (fx_laser_lpf,      "mix,freqLo,freqHi,Q"),
+    "laser_hpf":     (fx_laser_hpf,      "mix,freqLo,freqHi,Q"),
+    "laser_bitcrush":(fx_laser_bitcrush, "mix,rate"),
+}
+
+INT_PARAMS = {
+    "retrigger": {3},
+    "gate": {1},
+    "flanger": {3},
+    "sidechain": {2, 3, 4},
+    "wobble": {1, 2},
+    "bitcrush": {1},
+    "laser_bitcrush": {1},
+}
+
+
+def parse_knob(s):
+    if not s:
+        return None
+    out = []
+    for part in s.split(","):
+        t, v = part.split(":")
+        out.append((float(t), float(v)))
+    return sorted(out)
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Apply SOUND VOLTEX FX/laser effects to a 16-bit WAV file.")
+    ap.add_argument("input", nargs="?")
+    ap.add_argument("output", nargs="?")
+    ap.add_argument("--effect", "-e")
+    ap.add_argument("--params", "-p", default="",
+                    help="comma-separated, in .vox column order (see --list)")
+    ap.add_argument("--range", "-r", default=None,
+                    help="apply only to START:END seconds, e.g. 8:16")
+    ap.add_argument("--knob", "-k", default=None,
+                    help="laser knob automation: 'sec:val,sec:val' with val in 0..127")
+    ap.add_argument("--block", "-b", type=int, default=64,
+                    help="per-block coefficient update size in frames (default 64)")
+    ap.add_argument("--list", action="store_true", help="list effects and parameters")
+    args = ap.parse_args()
+
+    if args.list or not args.effect:
+        print("effect          parameters (.vox column order)")
+        print("-" * 66)
+        for k, (_, sig) in EFFECTS.items():
+            print(f"{k:<16}{sig}")
+        return 0
+
+    if not args.input or not args.output:
+        ap.error("input and output are required")
+
+    if args.effect not in EFFECTS:
+        ap.error(f"unknown effect {args.effect!r}; try --list")
+    fn, sig = EFFECTS[args.effect]
+
+    raw = [p for p in args.params.split(",") if p != ""]
+    ints = INT_PARAMS.get(args.effect, set())
+    params = [int(float(p)) if i in ints else float(p) for i, p in enumerate(raw)]
+    want = len(sig.split(","))
+    if len(params) != want:
+        ap.error(f"{args.effect} takes {want} params ({sig}), got {len(params)}")
+
+    L, R, sr = read_wav(args.input)
+
+    if args.range:
+        a, b = args.range.split(":")
+        i0, i1 = int(float(a) * sr), int(float(b) * sr)
+        i0, i1 = max(0, i0), min(L.size, i1)
+    else:
+        i0, i1 = 0, L.size
+
+    kw = {"block": args.block}
+    if args.effect.startswith("laser_"):
+        kw["knob"] = parse_knob(args.knob)
+
+    wl, wr = fn(L[i0:i1].copy(), R[i0:i1].copy(), *params, **kw)
+    outL, outR = L.copy(), R.copy()
+    outL[i0:i1], outR[i0:i1] = wl, wr
+
+    write_wav(args.output, outL, outR, sr)
+    print(f"wrote {args.output}  [{args.effect} {args.params} over "
+          f"{i0/sr:.3f}s..{i1/sr:.3f}s, block={args.block}]")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
