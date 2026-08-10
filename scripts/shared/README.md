@@ -38,4 +38,4 @@ Confirmed rather than assumed: on `777`, `mxm.ogg` correlates 0.81 with the game
 
 | file | what it does |
 |---|---|
-| `voxsurvey.py` | Walks every `.vox` in `data/music` (8103 charts) and tabulates section rows by leading id, so parameter layouts and value ranges can be *observed* rather than assumed. Currently targets `#FXBUTTON EFFECT INFO` and `#TAB EFFECT INFO`; retarget the section names for the notes and camera elements. |
+| `voxsurvey.py` | Walks every `.vox` in `data/music` (8103 charts) and tabulates section rows by leading id, so parameter layouts and value ranges can be *observed* rather than assumed. Targets `#FXBUTTON EFFECT INFO` and `#TAB EFFECT INFO`; `../camera/survey.py` is the same approach retargeted at `#SPCONTROLER` and the laser roll/swing columns. |

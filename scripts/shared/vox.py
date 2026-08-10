@@ -278,6 +278,58 @@ def _tick_from(poss, sec):
 
 
 # --------------------------------------------------------------------------
+# #SPCONTROLER - camera/tilt track
+# --------------------------------------------------------------------------
+
+# Row shape, confirmed against raw charts (matches vox_format.md #SPCONTROLER):
+#   C0=timing  C1=control-type  C2=2 (unused, constant)  C3=length in cells
+#   C4=start value  C5=end value  C6=node type (Tilt only; 0 elsewhere)  C7=0 (unused)
+# Only the three non-KSMv2 camera control types are parsed here: `Tilt`
+# (-> ksh `tilt`), `CAM_RotX` (-> ksh `zoom_top`), `CAM_Radi` (-> ksh
+# `zoom_bottom`). `Realize`, `Morphing2`, `LaneY`, `SpecialN`, etc. are
+# out of scope (see specs/camera.md) and left in raw `sec[...]` form.
+CAMERA_TAGS = ("Tilt", "CAM_RotX", "CAM_Radi")
+
+
+class CameraSeg:
+    """One #SPCONTROLER row for a Tilt/CAM_RotX/CAM_Radi control - a linear
+    ramp from `start` to `end` over `length` cells beginning at `tick`.
+    `length` of 0 is a same-tick jump (as vox uses to snap back to 0
+    between manual sections). `node_type` is Tilt-only (see vox_format.md);
+    0 elsewhere.
+    """
+    __slots__ = ("tick", "length", "start", "end", "node_type")
+
+    def __init__(self, tick, length, start, end, node_type):
+        self.tick = tick
+        self.length = length
+        self.start = start
+        self.end = end
+        self.node_type = node_type
+
+    @property
+    def end_tick(self):
+        return self.tick + self.length
+
+
+def parse_spcontroler(sec, control_type):
+    """#SPCONTROLER rows matching `control_type` -> sorted list of CameraSeg."""
+    out = []
+    for line in sec.get("#SPCONTROLER", []):
+        f = line.split("\t")
+        if len(f) < 6 or f[1] != control_type:
+            continue
+        tick = _tick_from(f[0], sec)
+        length = int(float(f[3]))
+        start = float(f[4])
+        end = float(f[5])
+        node_type = int(float(f[6])) if len(f) > 6 else 0
+        out.append(CameraSeg(tick, length, start, end, node_type))
+    out.sort(key=lambda s: s.tick)
+    return out
+
+
+# --------------------------------------------------------------------------
 # whole-chart convenience wrapper
 # --------------------------------------------------------------------------
 
@@ -300,6 +352,13 @@ class VoxChart:
         self.bt = [parse_bt_fx_track(self.sec, t) for t in BT_TAGS]
         self.fx = [parse_bt_fx_track(self.sec, t) for t in FX_TAGS]
         self.laser = [parse_laser_track(self.sec, t, self.version) for t in LASER_TAGS]
+
+        # camera: {"tilt": [...], "cam_rotx": [...], "cam_radi": [...]}
+        self.camera = {
+            "tilt": parse_spcontroler(self.sec, "Tilt"),
+            "cam_rotx": parse_spcontroler(self.sec, "CAM_RotX"),
+            "cam_radi": parse_spcontroler(self.sec, "CAM_Radi"),
+        }
 
         end = self.sec.get("#END POSITION")
         self.end_tick = self.tl.tick_of(end[0]) if end else self._infer_end_tick()
@@ -331,3 +390,5 @@ if __name__ == "__main__":
         print("FX-%s: %d notes" % ("LR"[i], len(lst)))
     for i, lst in enumerate(c.laser):
         print("laser-%s: %d points" % ("LR"[i], len(lst)))
+    for name, lst in c.camera.items():
+        print("%s: %d segments" % (name, len(lst)))

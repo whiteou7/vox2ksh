@@ -22,6 +22,12 @@ a line, via gcd. This is always exact and never requires resampling on the
 button/hold side; ticks are integers throughout and vox's own grid (48
 cells/1-4-note by default) is always a whole multiple of whatever ksh
 resolution gets picked.
+
+`camera=True` additionally places tilt/zoom_top/zoom_bottom option lines and
+lane-spin tokens computed by ../camera/camera.py into the same grid. Off by
+default so every existing caller (notably notes/xcheck.py) keeps its exact
+prior output; see specs/camera.md for what's approximate about the camera
+values themselves - this module only places them, it doesn't compute them.
 """
 
 import argparse
@@ -146,13 +152,30 @@ DIFF_MAP = {"1n": "light", "2a": "challenge", "3e": "extended",
             "4i": "infinite", "5m": "infinite"}
 
 
-def convert(vox_path, out_path):
+def convert(vox_path, out_path, camera=False):
     chart = vox.load(vox_path)
     tl = chart.tl
 
     bt_lanes = [HoldLane(notes) for notes in chart.bt]
     fx_lanes = [HoldLane(notes) for notes in chart.fx]
     laser_lanes = [LaserLane(laser.build_runs(pts, tl)) for pts in chart.laser]
+
+    # camera: tick -> pending "option=value" line(s), and tick -> spin suffix.
+    # Computed here (not passed in) since it needs the same VoxChart this
+    # function already loaded - see ../camera/camera.py for the actual math.
+    # `camera` (the bool param) is never rebound below - the module is
+    # imported under the alias `camera_mod` specifically to avoid that.
+    cam_opts = {}    # tick -> [line, ...]   (each already "option=value")
+    cam_spin = {}    # tick -> "@(24" etc (side already resolved/dropped)
+    if camera:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "camera"))
+        import camera as camera_mod
+        for (t, value) in camera_mod.compute_tilt_events(chart):
+            cam_opts.setdefault(t, []).append("tilt=" + value)
+        for (t, line) in camera_mod.compute_zoom_events(chart):
+            cam_opts.setdefault(t, []).append(line)
+        for t, (_side, token) in camera_mod.compute_spin_tokens(chart).items():
+            cam_spin[t] = token
 
     tight_runs = sum(1 for lane in laser_lanes for r in lane.runs if r.tight)
     if tight_runs:
@@ -190,6 +213,18 @@ def convert(vox_path, out_path):
             last_tick = max(last_tick, r.end_tick)
     last_measure, _ = tl.measure_of_tick(last_tick)
 
+    # camera events past the chart's real end (e.g. a zoom hold that
+    # outlasts the last note into a trimmed outro - see the last_tick
+    # comment above) have nowhere to go once notes/laser already end the
+    # chart; drop them rather than extending the chart for camera alone.
+    if camera:
+        dropped = sum(1 for t in cam_opts if t > last_tick) + sum(1 for t in cam_spin if t > last_tick)
+        cam_opts = {t: v for t, v in cam_opts.items() if t <= last_tick}
+        cam_spin = {t: v for t, v in cam_spin.items() if t <= last_tick}
+        if dropped:
+            print("note: %d camera event(s) past the chart's last real note were dropped"
+                  % dropped, file=sys.stderr)
+
     # the initial tempo is already stated in the header's "t="; only changes
     # after it need a body "t=" line. Time signature is different: KSM's own
     # editor always restates "beat=" right after the first bar line even
@@ -218,6 +253,9 @@ def convert(vox_path, out_path):
                         if m_start <= t < m_start + mlen}
         for (off, _bpm) in bpm_by_measure.get(m, []):
             anchors.add(off)
+        if camera:
+            anchors |= {t - m_start for t in cam_opts if m_start <= t < m_start + mlen}
+            anchors |= {t - m_start for t in cam_spin if m_start <= t < m_start + mlen}
 
         res = measure_resolution(mlen, anchors)
         step = mlen // res
@@ -237,6 +275,9 @@ def convert(vox_path, out_path):
             tick = m_start + k * step
             if k in bpm_here:
                 lines.append("t=%s" % _fmt_bpm(bpm_here[k]))
+            if camera:
+                for opt_line in cam_opts.get(tick, ()):
+                    lines.append(opt_line)
 
             for li, lane in enumerate(fx_lanes):
                 if lane.hold_starting_at(tick):
@@ -250,7 +291,8 @@ def convert(vox_path, out_path):
             bt_chars = "".join(lane.char_at(tick, BT_CHIP, BT_HOLD) for lane in bt_lanes)
             fx_chars = "".join(lane.char_at(tick, FX_CHIP, FX_HOLD) for lane in fx_lanes)
             laser_chars = "".join(lane.char_at(tick) for lane in laser_lanes)
-            lines.append("%s|%s|%s" % (bt_chars, fx_chars, laser_chars))
+            spin_suffix = cam_spin.get(tick, "") if camera else ""
+            lines.append("%s|%s|%s%s" % (bt_chars, fx_chars, laser_chars, spin_suffix))
 
         lines.append("--")
 
