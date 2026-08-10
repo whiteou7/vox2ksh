@@ -7,6 +7,7 @@
 | [`audio_engine.md`](audio_engine.md) | The audio element in full: effect inventory with DLL addresses, transcribed DSP math, chart→DSP unit conversions, the device ParamEq, the SE bank, calibration against a cabinet capture. |
 | [`audio_engine_primer.md`](audio_engine_primer.md) | The same material with no assembly or audio-engineering background assumed. |
 | [`camera.md`](camera.md) | The camera element: tilt/spin/zoom/roll → whatever `.ksh` can express. |
+| [`notes.md`](notes.md) | The notes element: BT/FX/laser → `.ksh` chart body, and the laser decimation problem. |
 
 ## Conventions
 
