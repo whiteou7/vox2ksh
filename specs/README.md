@@ -2,7 +2,7 @@
 
 | file | what it is |
 |---|---|
-| [`vox_format.md`](vox_format.md) | The `.vox` container: encoding, sections, track layout, column meanings. Based on zacharied's community notes, covering v10 and v12. |
+| [`vox_format.md`](vox_format.md) | The `.vox` container: encoding, sections, track layout, column meanings. Based on zacharied's community notes, covering v10 and v12, plus a "Format version 13" section that's this project's own survey (v13 postdates the inherited notes). |
 | [`ksh_format.md`](ksh_format.md) | The `.ksh` target format, and the conversion decisions that follow from it. |
 | [`audio_engine.md`](audio_engine.md) | The audio element in full: effect inventory with DLL addresses, transcribed DSP math, chart→DSP unit conversions, the device ParamEq, the SE bank, calibration against a cabinet capture. |
 | [`audio_engine_primer.md`](audio_engine_primer.md) | The same material with no assembly or audio-engineering background assumed. |
