@@ -12,7 +12,6 @@ changing any constant below; most of them are honest approximations from a
 30-chart hand-charted reference set, not exact transcriptions, and
 specs/camera.md says which is which.
 """
-import bisect
 import os
 import sys
 
@@ -22,44 +21,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 # --------------------------------------------------------------------------
 # tilt
 # --------------------------------------------------------------------------
-
-# How many cells of complete laser silence (both lanes) before a run start
-# counts as a fresh "section" worth pretilt-cancelling, vs just the next
-# segment of an ongoing laser passage. 48 = 1 beat at the default 48/quarter
-# resolution. See specs/camera.md "Tilt: pretilt cancellation".
-PRETILT_SILENCE_MIN = 48
-
-# Lead time (cells) before a fresh section's laser run where `tilt=0` gets
-# inserted. The one cleanly-repeating example found (foolish_again/exh.ksh,
-# 6/6 occurrences exact) used 24 - a somewhat arbitrary choice among the
-# observed gaps (0, 24, 48, 96, 168, 192...) and flagged as such.
-PRETILT_LEAD = 24
-
-
-def _laser_run_starts(chart):
-    """-> sorted [(tick, side_idx), ...] for every node_type==1 row."""
-    out = []
-    for side_idx, lst in enumerate(chart.laser):
-        for p in lst:
-            if p.node_type == 1:
-                out.append((p.tick, side_idx))
-    out.sort()
-    return out
-
-
-def _section_start_ticks(chart, silence_min=PRETILT_SILENCE_MIN):
-    """-> sorted run-start ticks with no laser activity (either lane) in the
-    `silence_min` cells right before - see specs/camera.md.
-    """
-    all_ticks = sorted(p.tick for lst in chart.laser for p in lst)
-    out = []
-    for (t, _side) in _laser_run_starts(chart):
-        i = bisect.bisect_left(all_ticks, t)
-        prev = all_ticks[i - 1] if i > 0 else None
-        if prev is None or t - prev >= silence_min:
-            out.append(t)
-    return sorted(set(out))
-
 
 def fmt_tilt(v):
     s = "%.3f" % v
@@ -106,30 +67,19 @@ def _place_track(points):
     return out
 
 
-def compute_tilt_events(chart, silence_min=PRETILT_SILENCE_MIN, lead=PRETILT_LEAD):
+def compute_tilt_events(chart):
     """-> sorted [(tick, "tilt=<value>"), ...].
 
     Baseline is `tilt=normal` throughout (let ksh's own auto-tilt run, same
     as it does in the arcade for laser-driven tilt - see specs/camera.md;
     the auto-tilt *formula* itself isn't modelled here, only ksh's built-in
-    version of it). Two things override that baseline:
-
-    1. Pretilt cancellation: KSM's auto-tilt anticipates an upcoming laser
-       before the arcade would, so at every fresh laser section start (not
-       every run - see _section_start_ticks) this inserts `tilt=0` `lead`
-       cells early, then `tilt=normal` right at the run start to hand back
-       to KSM's auto-tilt once the real laser motion begins.
-    2. Manual `Tilt` vox segments (9% of charts - specs/camera.md) are
-       charter-authored camera work, passed through as literal floats at
-       each segment's start/end tick, taking priority over both the
-       baseline and any pretilt bracket that would otherwise land inside
-       their span.
+    version of it). Manual `Tilt` vox segments (9% of charts -
+    specs/camera.md) are charter-authored camera work and override that
+    baseline, passed through as literal floats at each segment's start/end
+    tick.
     """
     manual = chart.camera["tilt"]
     manual_ranges = [(s.tick, s.end_tick) for s in manual]
-
-    def in_manual(t):
-        return any(a <= t <= b for (a, b) in manual_ranges)
 
     # A manual segment's start/end are appended as two points per segment,
     # in that order, so a zero-length segment (tick == end_tick, a genuine
@@ -149,14 +99,6 @@ def compute_tilt_events(chart, silence_min=PRETILT_SILENCE_MIN, lead=PRETILT_LEA
     for (_a, b) in manual_ranges:
         if b not in starts:
             points.append((b, "normal"))
-
-    for t in _section_start_ticks(chart, silence_min):
-        if in_manual(t):
-            continue
-        lead_tick = max(0, t - lead)
-        if not in_manual(lead_tick):
-            points.append((lead_tick, "0"))
-        points.append((t, "normal"))
 
     return _dedupe_consecutive(_place_track(points))
 

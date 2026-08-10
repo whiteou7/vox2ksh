@@ -45,7 +45,22 @@ Crosschecked against 30 chart/difficulty pairs (every reference folder `xcheck.p
 
 Four real bugs found and fixed along the way, all against charts *outside* the 30-chart set (user-reported), all reverified against the full aggregate before being called done - see `specs/notes.md` §"Bugs found and fixed" for what each one was and, for the trickiest of the four, the two broken interim fixes the aggregate caught before a correct one shipped.
 
-Roll/swing is not part of this element - it's camera-domain (vox's per-point roll type driving lane spin/tilt visuals); see 3.1. `#TRACK AUTO TAB` (FX-hold effects applied to lasers) also unread - effect data doesn't matter yet, but the track's note-length data might, if that ever changes.
+Roll/swing is not part of this element - it's camera-domain (vox's per-point roll type driving lane spin/tilt visuals); see 1.4. `#TRACK AUTO TAB` (FX-hold effects applied to lasers) also unread - effect data doesn't matter yet, but the track's note-length data might, if that ever changes.
+
+### 1.4 Camera — zoom and spin
+
+Full writeup: [`specs/camera.md`](specs/camera.md). Implementation: [`scripts/camera/`](scripts/camera/) (`camera.py`, `convert.py`, `survey.py`, `correlate.py`). Scope: lane tilt, spin/swing, top/bottom zoom; `zoom_side`/`center_split`/`rotation_deg`/`*_curve` explicitly out of scope (KSMv2-only or unneeded - confirmed zero usage in the reference set for `zoom_side`). **Pretilt** (KSM tilting in anticipation of an upcoming laser, before the arcade would) **is also out of scope, by direction**: it's triggered by any laser at all, not a chart-detectable condition, so it's a game-engine problem rather than something a `.vox` -> `.ksh` mapping could fix - the converter doesn't attempt to cancel or reproduce it.
+
+`shared/vox.py` now parses `#SPCONTROLER` (`Tilt`/`CAM_RotX`/`CAM_Radi`) into `VoxChart.camera`, matching the documented row layout exactly. A converter exists: `scripts/camera/convert.py`, or `notes/convert.py`'s `convert(..., camera=True)` — additive, `notes/xcheck.py` confirmed byte-for-byte unaffected when `camera=False` (the default).
+
+What's solid, all confirmed against the 30-chart reference set via `correlate.py`:
+
+* **Zoom sign/direction**: `CAM_RotX` correlates positively with `zoom_top`, `CAM_Radi` *negatively* with `zoom_bottom` (a real sign flip between the two formats' conventions). Scale is an approximation on purpose — per direction, exact accuracy isn't the bar here — `camera.py` uses ~140 / ~-125 as central-tendency constants; the reference conversions are hand-made, not derived, so per-song regressed slopes vary and there's no single exact constant to fit.
+* **Spin kind mapping**: vox "roll" (`roll_type` 1,2,3,4,6,7) → ksh full spin (`@(`/`@)`); vox "swing" (`roll_type` 5) → ksh half spin (`@<`/`@>`). **100% match, 49/49 + 17/17.** `S<`/`S>` intentionally never emitted — unused in every reference chart, even for genuine vox swings.
+* **Spin direction**: the roll/swing tag sits on the laser point immediately *before* a same-tick slam (not after — this took a fix to get right), and the slam's direction determines clockwise/counterclockwise (right-to-left = clockwise = `@(`/`@<`; left-to-right = counterclockwise = `@)`/`@>`). **100% match, 66/66.**
+* Corpus survey facts (all 8103 charts, `survey.py`): 82% of charts have `CAM_RotX`/`CAM_Radi`, only 9% have any manual `Tilt`. A `roll_type` value of **7** exists (v12, 49 rows) — undocumented in the inherited `vox_format.md` notes, a correction in the spirit of `audio_engine.md` §3's effect-id fixes.
+
+Two bugs found and fixed (both in `specs/camera.md` "Bugs found and fixed", both the same *class* of mistake as notes.md bug #3 — a middle point silently dropped/overwritten changes the interpolated shape): a same-tick vox snap (zero-length segment, `start != end`) got overwritten instead of spaced onto two adjacent grid lines; and a dedup pass dropped the *last* point of a same-value run, which is what stops ksh's linear interpolation from blending a flat hold straight into the next ramp. Both confirmed and fixed against `2226_gryphone_etia_5m.vox`'s raw segments directly (a file initially and wrongly treated as an independent hand reference — it's actually prior machine-placeholder output; see the doc for the retraction).
 
 ---
 
@@ -192,12 +207,8 @@ Validated end to end: rendering feelsseasickness before and after the §2.3 + §
 
 ## 3. To do
 
-### 3.1 The camera element
+### 3.0 Bundle the layered SE with the tkinter app build
 
-Try to map vox camera values to ksm without having to reverse engineer the graphic engine.
-
-Scope includes roll/swing: vox's per-point laser roll type (`#TRACK1`/`#TRACK8` C3 - 6-beat roll, 2-beat roll, 12-beat triple roll, swing, ...) -> ksh's spin markers (`@(`/`@)`/`@<`/`@>`/`S<`/`S>`). Not the notes element's problem even though it lives in the same track column as laser position - see 1.3.
-
-### 3.2 The Tkinter application
+### 3.1 The Tkinter application
 
 ---

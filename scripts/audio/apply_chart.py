@@ -580,7 +580,7 @@ def main():
                     help="override the level for FX chip samples. By default each "
                          "sample uses the gain in its own S3V0 header (-13.00 dB "
                          "-> 0.2239 for general_sampler[2..13]) times --se-trim")
-    ap.add_argument("--se-trim", type=float, default=1.25,
+    ap.add_argument("--se-trim", type=float, default=1.2,
                     help="global multiplier on every header-derived SE gain "
                          "(default %(default)g). This is the one fudge factor left: "
                          "the headers put the slam at 0.5513 but the capture fits "
