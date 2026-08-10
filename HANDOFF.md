@@ -35,6 +35,18 @@ floor (codec noise)        1.14
 
 Laser reading dry and overwriting FX; parallel/additive effect combination (both `--laser-mode`, see §2.5 — the verdict stands but the margin was never recorded); an int16 round-trip between stages; scaling the mix depth (1.0 is optimal); putting the device EQ *after* the SE mix (2.029 vs 1.924 before); additive SE layering (1.889 vs 1.858); freezing the duck target between lasers (`--duck-hold`, costs 0.34).
 
+### 1.3 Notes — buttons and lasers
+
+Full writeup: [`specs/notes.md`](specs/notes.md). Implementation: [`scripts/notes/`](scripts/notes/) (`convert.py`, `laser.py`, `xcheck.py`).
+
+Converts `.vox` BT/FX/laser tracks to a playable `.ksh` body; timing/BPM/beat just enough to build the grid, everything else (song metadata, every sound-fx parameter) is placeholder, as directed. The three named risks (width, continuity, the unrepresentable 32nd slam) all landed - see `specs/notes.md` for how.
+
+Crosschecked against 30 chart/difficulty pairs (every reference folder `xcheck.py` can match to a `data/music` chart, same by-name matching as `scripts/audio/masscheck.py`, times every difficulty present - not a hand-picked handful). BT/FX/laser-run counts match almost exactly; laser point counts land within ~4% mean, which is expected (decimation approximates a curve's shape, not one charter's exact point choices).
+
+Four real bugs found and fixed along the way, all against charts *outside* the 30-chart set (user-reported), all reverified against the full aggregate before being called done - see `specs/notes.md` §"Bugs found and fixed" for what each one was and, for the trickiest of the four, the two broken interim fixes the aggregate caught before a correct one shipped.
+
+Roll/swing is not part of this element - it's camera-domain (vox's per-point roll type driving lane spin/tilt visuals); see 3.1. `#TRACK AUTO TAB` (FX-hold effects applied to lasers) also unread - effect data doesn't matter yet, but the track's note-length data might, if that ever changes.
+
 ---
 
 ## 2. Unresolved
@@ -180,65 +192,12 @@ Validated end to end: rendering feelsseasickness before and after the §2.3 + §
 
 ## 3. To do
 
-### 3.1 The notes element
-
-**Buttons and lasers: done and crosschecked.** [`scripts/notes/convert.py`](scripts/notes/convert.py)
-converts `.vox` BT/FX/laser tracks to a playable `.ksh` body; timing/BPM/beat
-just enough to build the grid, everything else (song metadata, every
-sound-fx parameter) is placeholder, as directed - that's baked into the
-audio track already, not the notes element's problem.
-
-The three named risks all landed:
-
-* **Width.** Vox's normal/wide flag -> `laserrange_l`/`laserrange_r`. Direct.
-* **Continuity.** Vox's laser tracks are pre-interpolated curves, sampled as
-  fine as 1/64 of a measure - denser than ksh's own slam cutoff (1/32), so
-  naively reproducing every point would turn smooth sweeps into strings of
-  accidental slams. [`scripts/notes/laser.py`](scripts/notes/laser.py)
-  decimates: Douglas-Peucker simplification, then a minimum-spacing pass at
-  1/24 of a measure (this project's working number for "still reads as
-  continuous" - not the same as ksh's 1/32 slam threshold, which is where
-  the *engine* calls something a slam, not a safe margin to author to).
-* **The unrepresentable 32nd (and finer) slam.** Accepted as a real format
-  limit. `laser.py`'s `Run.tight` flags every run where keeping the true
-  start/end broke the minimum-spacing rule; `convert.py` reports a count.
-  There is no ksh construct that does better.
-
-A real vox same-tick slam is different from all of that - not a curve to
-approximate, a genuine instantaneous jump - and is handled separately:
-both values are kept exactly, the second pushed to the next free tick.
-
-Crosschecked against every difficulty in every reference folder
-`scripts/notes/xcheck.py` can match to a `data/music` chart (30
-chart/difficulty pairs, same by-name matching as `scripts/audio/masscheck.py`
-- not a hand-picked handful), via structural note/hold/laser-point counts,
-not a text diff (these are hand conversions, not an oracle). BT/FX counts
-match exactly on 83-100% of charts, off by 1 on the rest; laser run counts
-match exactly on 97%; laser point counts land within ~4% mean. `laser.py`'s
-decimation constants (`RDP_TOL`, `min_gap_frac`) are swept against all 30 -
-see `scripts/notes/README.md` for the numbers and where the stable optimum
-sits. Found and fixed two real bugs along the way: `shared/vox.py`'s
-section parser closed on any line starting with "#END", which also ate the
-opening tag "#END POSITION"; and a gap between two laser runs could vanish
-entirely if no other lane happened to need a grid line inside it, splicing
-two separate runs into what reads as one continuous laser.
-
-**Roll/swing is not part of this element** - it's camera-domain (vox's
-per-point roll type driving lane spin/tilt visuals), not notes; see 3.2.
-`#TRACK AUTO TAB` (FX-hold effects applied to lasers) also unread - effect
-data doesn't matter yet, but the track's note-length data might, if that
-ever changes.
-
-### 3.2 The camera element
+### 3.1 The camera element
 
 Try to map vox camera values to ksm without having to reverse engineer the graphic engine.
 
-Scope includes roll/swing: vox's per-point laser roll type (`#TRACK1`/
-`#TRACK8` C3 - 6-beat roll, 2-beat roll, 12-beat triple roll, swing, ...) ->
-ksh's spin markers (`@(`/`@)`/`@<`/`@>`/`S<`/`S>`). Not the notes element's
-problem even though it lives in the same track column as laser position -
-see 3.1.
+Scope includes roll/swing: vox's per-point laser roll type (`#TRACK1`/`#TRACK8` C3 - 6-beat roll, 2-beat roll, 12-beat triple roll, swing, ...) -> ksh's spin markers (`@(`/`@)`/`@<`/`@>`/`S<`/`S>`). Not the notes element's problem even though it lives in the same track column as laser position - see 1.3.
 
-### 3.3 The Tkinter application
+### 3.2 The Tkinter application
 
 ---
