@@ -169,18 +169,55 @@ def _enforce_min_gap(pts, min_gap):
     landing exactly on ksh's slam cutoff for a movement that was never meant
     to be a slam. Only genuinely unavoidable when even the run's own start
     is too close to its end.
+
+    The forward pass keeps *whichever* candidate first clears min_gap from
+    the previously kept point, which is not always the best one: a true
+    local extremum (a curve's peak or trough) often has several
+    RDP-surviving points within min_gap of each other on its way in and
+    out, and the first one to clear the gap can land a few ticks short of
+    the extremum itself - visibly shifting the turning point early. Fixed
+    by a second pass, deliberately bounded to each slot's own dropped
+    candidates (never chaining forward past them - an unbounded version of
+    this tried first, and either collapsed long monotonic runs to a single
+    point or, worse, kept a point for every tiny wiggle in a fast
+    oscillation instead of thinning it, depending on which direction the
+    bug leaned): for each kept point, if a candidate that was dropped for
+    being too close to it is *more extreme* in the same direction the curve
+    was already heading, and swapping it in still clears min_gap from both
+    neighbours, use it instead. Found and fixed against 2226_gryphone_etia:
+    a real trough at a run's tick 3792 was dropped in favour of a
+    slightly-higher, slightly-earlier point at 3786, six ticks short of the
+    threshold, shifting the visible turning point six ticks early.
     """
     if len(pts) <= 2:
         return pts, False
     out = [pts[0]]
+    dropped_after = {}   # index into `out` -> [(t, v), ...] dropped right after it
     for t, v in pts[1:-1]:
         if t - out[-1][0] >= min_gap:
             out.append((t, v))
+        else:
+            dropped_after.setdefault(len(out) - 1, []).append((t, v))
     last = pts[-1]
     while len(out) > 1 and last[0] - out[-1][0] < min_gap:
         out.pop()
     tight = (last[0] - out[-1][0]) < min_gap
     out.append(last)
+
+    for i in range(1, len(out) - 1):
+        cands = dropped_after.get(i, ())
+        if not cands:
+            continue
+        prev_v = out[i - 1][1]
+        best_t, best_v = out[i]
+        rising = best_v >= prev_v
+        for t, v in cands:
+            more_extreme = (rising and v >= best_v) or (not rising and v <= best_v)
+            if (more_extreme and t - out[i - 1][0] >= min_gap
+                    and out[i + 1][0] - t >= min_gap):
+                best_t, best_v = t, v
+        out[i] = (best_t, best_v)
+
     return out, tight
 
 

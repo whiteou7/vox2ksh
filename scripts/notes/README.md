@@ -58,6 +58,25 @@ present in that folder):
   tick earlier so both get a row. This pattern occurs zero times across all
   30 reference charts, which is why it went uncaught until a chart that
   actually has it turned up.
+* **Fixed a third real bug** (`2226_gryphone_etia_5m.vox`, user-reported):
+  the forward min-gap pass keeps *whichever* candidate first clears
+  min_gap from the previous kept point, not necessarily the best one. A
+  true local extremum (peak or trough) often has several RDP-surviving
+  points within min_gap of each other on its way in and out, and the first
+  to clear the gap can land a few ticks short of the actual extremum -
+  visibly shifting the rendered turning point early. `_enforce_min_gap` now
+  runs a second, deliberately bounded pass: for each kept point, if a
+  candidate dropped for being too close to it is more extreme in the same
+  direction the curve was already heading, and swapping it in still clears
+  min_gap from both neighbours, it's used instead - never chaining forward
+  past that one slot's own dropped candidates. (An unbounded first attempt
+  at this either collapsed long monotonic runs to a single point, or kept a
+  point for every tiny wiggle in a fast oscillation instead of thinning it,
+  depending on which direction the bug leaned - both caught by re-running
+  the full 30-chart aggregate, which is the point of keeping it around.)
+  Net effect on the 30-chart aggregate: none - same 24.4 mean point-count
+  error as before this fix, because it only relocates a point within a slot
+  that was already going to be kept, it doesn't change how many are.
 * Bars: exact on 77% of charts, short by 1-3 measures on the rest.
   Deliberately NOT padded to vox's `#END POSITION` - see the comment above
   `last_tick` in convert.py, that field is the arcade chart's official end
