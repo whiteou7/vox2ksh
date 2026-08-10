@@ -56,6 +56,21 @@ values" - the second point is pushed to the very next free tick, which
 forces that measure's grid down to full native resolution wherever it
 happens (see convert.py's resolution picker) and reproduces the jump as
 ksh's own 1/32-or-shorter slam rule expects.
+
+The same "same row, two values" problem can also land on a *run boundary*
+instead of inside one run's own point list: vox flags one run's true end
+and the next run's true start at the identical tick (node_type 2 then 1,
+same tick) rather than folding it into one run's own point sequence -
+common in zigzag/chain laser patterns. `build_runs`'s tie-breaking in
+`LaserLane.run_at` (convert.py) always resolves that shared tick to
+whichever run *starts* there, so without correction the earlier run's true
+endpoint never gets a row at all - the output draws a straight line from
+that run's second-to-last point clear through to the next run's landing
+value, a multi-tick diagonal standing in for what should be a vertical hold
+followed by an instant drop. `build_runs` moves the earlier run's endpoint
+one tick earlier so both get a row - found and fixed against
+2397_ultracharge_yutaimai (user-reported); occurs zero times in the 30
+reference charts xcheck.py currently matches, so it went uncaught there.
 """
 
 KSH_STEPS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmno"   # 51 steps
@@ -221,6 +236,20 @@ def _bump_to_free_tick(t, used):
     return t + bump
 
 
+def _bump_to_free_tick_before(t, used, floor):
+    """Like _bump_to_free_tick but searches backward, never going past
+    `floor` (exclusive) - the tick of whatever point precedes it.
+    """
+    bump = 1
+    while t - bump in used and t - bump > floor:
+        bump += 1
+    new_t = t - bump
+    if new_t <= floor:
+        return None      # no free tick between the two points - give up
+    used.add(new_t)
+    return new_t
+
+
 def build_runs(laser_points, tl, min_gap_frac=24):
     """vox LaserPoint stream (one lane, already tick-sorted) -> [Run, ...].
 
@@ -257,4 +286,27 @@ def build_runs(laser_points, tl, min_gap_frac=24):
                 points.append((t, v))
 
         out.append(Run(points, slam_after, width, tight))
+
+    # A slam can land exactly on a run *boundary* instead of inside one
+    # run's own point list: vox flags one run's true end and the next
+    # run's true start at the identical tick (node_type 2 then 1, same
+    # tick) - a real handoff, not the mid-run case _split_at_slams already
+    # covers. Only one grid row exists per tick, and LaserLane.run_at()
+    # resolves the tie toward whichever run *starts* there, so the earlier
+    # run's true endpoint would otherwise never get a row of its own - the
+    # output draws a straight line from that run's second-to-last point
+    # clear through to the next run's landing value instead of a vertical
+    # hold followed by an instant drop. Move the earlier run's endpoint one
+    # tick earlier so it gets a row; found and fixed against
+    # 2397_ultracharge_yutaimai (user-reported).
+    for a, b in zip(out, out[1:]):
+        if a.end_tick != b.start_tick:
+            continue
+        t, v = a.points[-1]
+        floor = a.points[-2][0] if len(a.points) > 1 else a.points[0][0] - 1
+        new_t = _bump_to_free_tick_before(t, used_ticks, floor)
+        if new_t is not None:
+            used_ticks.discard(t)
+            a.points[-1] = (new_t, v)
+
     return out

@@ -45,6 +45,19 @@ present in that folder):
   does for an ordinary curve tail. Across all 30 reference charts, every
   `Run.tight` case turned out to be this - zero remain after the fix (was
   several dozen instances before).
+* **Fixed a second real bug, also found against a chart outside the
+  reference set** (`2397_ultracharge_yutaimai_5m.vox`, user-reported): a
+  zigzag/chain laser pattern can put one run's true end and the next run's
+  true start at the identical vox tick (a slam split across the run
+  boundary rather than embedded in one run's own points). Only one grid row
+  exists per tick, and the tie always resolved to the *starting* run - so
+  the earlier run's true endpoint never got a row, and the output drew a
+  multi-tick diagonal from that run's second-to-last point straight through
+  to the next run's landing value, instead of a vertical hold followed by
+  an instant drop. `build_runs` now moves the earlier run's endpoint one
+  tick earlier so both get a row. This pattern occurs zero times across all
+  30 reference charts, which is why it went uncaught until a chart that
+  actually has it turned up.
 * Bars: exact on 77% of charts, short by 1-3 measures on the rest.
   Deliberately NOT padded to vox's `#END POSITION` - see the comment above
   `last_tick` in convert.py, that field is the arcade chart's official end
