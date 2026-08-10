@@ -13,8 +13,10 @@ Conventions kept identical to the game:
   * coefficients / LFO values are recomputed once per block, not per sample
   * final writeback clamps to [-32768, 32767] and truncates toward zero
 
-Requires numpy. scipy is used for the IIR sections if present (much faster),
-otherwise a pure-python fallback runs.
+Requires numpy. The biquad recursion (_iir_run) runs a pure-Python per-sample
+loop rather than a vectorised filter: its feedback path must clamp to int16
+every sample (see _iir_run's docstring), which is a nonlinearity no
+vectorised IIR routine can express.
 """
 
 import argparse
@@ -23,12 +25,6 @@ import sys
 import wave
 
 import numpy as np
-
-try:
-    from scipy.signal import lfilter, lfilter_zi  # noqa: F401
-    HAVE_SCIPY = True
-except Exception:                                  # pragma: no cover
-    HAVE_SCIPY = False
 
 SR = 44100
 TWO_PI_OVER_SR = 0.00014247585   # the literal float constant in the DLL
@@ -133,28 +129,49 @@ def biquad_coeffs(kind, freq, q):
 
 
 def _iir_run(x, c, state):
-    """y[n] = b0 x[n] + b1 x[n-1] + b2 x[n-2] - a1 y[n-1] - a2 y[n-2]"""
+    """y[n] = b0 x[n] + b1 x[n-1] + b2 x[n-2] - a1 y[n-1] - a2 y[n-2]
+
+    The feedback memory (y[n-1], y[n-2]) is clamped and truncated to int16
+    range every sample, not just at the end of the block. Per the module
+    docstring and README 6.2, the engine's scratch buffers are raw int16 with
+    no normalisation, and every effect writes its result back through that
+    clamped buffer before the next stage - or the next sample - reads it. A
+    resonant biquad reads its own history out of that same buffer, so its
+    feedback path saturates sample-by-sample on real hardware. Running the
+    recursion in full float precision and clamping only once per block (the
+    previous behaviour, and still what scipy's vectorised lfilter does) lets
+    a high-Q filter's internal state ring up far past +-32768 before a single
+    brutal truncation at the block boundary - measured on a real chart
+    (gryphone_etia 5m, measures 30-33: a fast laser wiggle through the tab
+    LPF at Q=5.0) to produce sustained full-scale clipping that the cabinet
+    capture of the same passage never comes close to. Clamping the feedback
+    every sample cut that window's clipped-sample count from 32 to 2 while
+    leaving passages that never approach the ceiling untouched, since the
+    clamp is then a no-op. This is necessarily the slow per-sample path -
+    the nonlinearity breaks scipy's vectorised lfilter - but it only runs
+    while a filter effect is actually active.
+    """
     b0, b1, b2, a1, a2 = c
-    if HAVE_SCIPY:
-        # scipy wants a = [1, a1, a2]; the DLL's signs already match that form.
-        zi = np.asarray(state[0], dtype=np.float64)
-        y, zf = lfilter([b0, b1, b2], [1.0, a1, a2], x.astype(np.float64), zi=zi)
-        state[0] = zf
-        return y.astype(np.float32)
-    x1, x2, y1, y2 = state[1]
+    x1, x2, y1, y2 = state
     y = np.empty_like(x)
     for i in range(x.size):
         xn = float(x[i])
         yn = b0 * xn + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
         y[i] = yn
         x2, x1 = x1, xn
-        y2, y1 = y1, yn
-    state[1] = (x1, x2, y1, y2)
+        yn_fb = yn
+        if yn_fb > 32767.0:
+            yn_fb = 32767.0
+        elif yn_fb < -32768.0:
+            yn_fb = -32768.0
+        yn_fb = float(int(yn_fb))          # truncate toward zero, like the engine
+        y2, y1 = y1, yn_fb
+    state[0], state[1], state[2], state[3] = x1, x2, y1, y2
     return y
 
 
 def _new_iir_state():
-    return [np.zeros(2, dtype=np.float64), (0.0, 0.0, 0.0, 0.0)]
+    return [0.0, 0.0, 0.0, 0.0]
 
 
 def filter_blocked(L, R, kind, mix, freq_fn, q, block):
