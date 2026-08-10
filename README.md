@@ -11,7 +11,7 @@ Conversion splits into three independent problems. They share the `.vox` parser 
 | element | what it covers | status |
 |---|---|---|
 | **audio** | The FX/laser effect engine, the device ParamEq, the music duck, the layered SE bank, and the sample-level `S3V0` header gains. | **Largely done** — engine transcribed, reference implementation renders a real chart and scores 1.799 against a cabinet capture (floor 1.14). Three open items, all narrow. |
-| **notes** | BT/FX/laser note data, timing, BPM and time-signature changes, laser slams, curve types, chip vs hold — the part that becomes `.ksh` chart body. | **Not started.** |
+| **notes** | BT/FX/laser note data, timing, BPM and time-signature changes, laser slams, curve types, chip vs hold — the part that becomes `.ksh` chart body. | **Buttons and lasers done, crosschecked against 5 reference charts.** Roll/swing (spin) not yet attempted. |
 | **camera** | `#CAMERA`/`#TILT`-class track data: lane tilt, spin, zoom, roll. `.ksh` expresses only a subset, so this needs a mapping decision, not just a transcription. | **Not started.** |
 
 Audio was done first because it was the hardest to verify and the easiest to get silently wrong. Notes is the element the converter actually needs first.

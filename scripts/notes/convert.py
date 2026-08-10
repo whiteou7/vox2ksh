@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""
+.vox -> .ksh: buttons and lasers.
+
+    python convert.py <chart.vox> [-o out.ksh]
+
+Scope, per HANDOFF.md 3.1: BT/FX/laser note data, timing (BPM/time-signature
+changes, needed to build the grid at all), laser slams, curve types, chip vs
+hold. Explicitly NOT in scope, by direction: track/song metadata (title,
+artist, jacket, audio filename, ...) - written as placeholders - and every
+sound-fx parameter (FX-button effect defs, laser filter defs, FX hold's own
+effect index, FX chip's sample id) since those are already baked into the
+audio track (see the audio element) and have no bearing on the note grid.
+`fx-l`/`fx-r` are always reset to blank right before a hold starts, matching
+every reference conversion in scripts/shared/reference/ksh - they don't
+carry real effect data either.
+
+Grid resolution is picked per measure, independently: the minimum number of
+equal-width lines that lets every real event in that measure (a BT/FX note
+edge, or a laser point surviving decimation - see laser.py) land exactly on
+a line, via gcd. This is always exact and never requires resampling on the
+button/hold side; ticks are integers throughout and vox's own grid (48
+cells/1-4-note by default) is always a whole multiple of whatever ksh
+resolution gets picked.
+"""
+
+import argparse
+import bisect
+import math
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared"))
+import vox
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import laser
+
+
+BT_CHIP, BT_HOLD = "1", "2"
+FX_CHIP, FX_HOLD = "2", "1"     # swapped vs BT - ksh_format.md's "historical reasons"
+
+
+# --------------------------------------------------------------------------
+# lane lookups
+# --------------------------------------------------------------------------
+
+class HoldLane:
+    """Sorted (start, end) intervals + a set of chip ticks for one BT/FX lane."""
+
+    def __init__(self, notes):
+        holds = sorted((n.tick, n.end_tick) for n in notes if n.is_hold)
+        self.starts = [h[0] for h in holds]
+        self.ends = [h[1] for h in holds]
+        self.chips = set(n.tick for n in notes if not n.is_hold)
+
+    def char_at(self, tick, chip_char, hold_char):
+        if tick in self.chips:
+            return chip_char
+        i = bisect.bisect_right(self.starts, tick) - 1
+        if i >= 0 and tick < self.ends[i]:
+            return hold_char
+        return "0"
+
+    def hold_starting_at(self, tick):
+        return tick in self.starts
+
+    def anchors(self):
+        out = set(self.chips)
+        for s, e in zip(self.starts, self.ends):
+            out.add(s)
+            out.add(e)
+        return out
+
+
+class LaserLane:
+    """A laser-track's runs, ordered and queryable by tick."""
+
+    def __init__(self, runs):
+        self.runs = sorted(runs, key=lambda r: r.start_tick)
+        self.run_starts = [r.start_tick for r in self.runs]
+
+    def run_at(self, tick):
+        i = bisect.bisect_right(self.run_starts, tick) - 1
+        if i >= 0 and self.runs[i].start_tick <= tick <= self.runs[i].end_tick:
+            return self.runs[i]
+        return None
+
+    def char_at(self, tick):
+        r = self.run_at(tick)
+        if r is None:
+            return "-"
+        ticks = [p[0] for p in r.points]
+        j = bisect.bisect_left(ticks, tick)
+        if j < len(ticks) and ticks[j] == tick:
+            return laser.pos_to_char(r.points[j][1])
+        return ":"
+
+    def run_starting_at(self, tick):
+        i = bisect.bisect_left(self.run_starts, tick)
+        return self.runs[i] if i < len(self.runs) and self.runs[i].start_tick == tick else None
+
+    def anchors(self):
+        """Every kept point, plus one tick into every gap between runs.
+
+        Without the latter, a gap that no *other* lane happens to need a
+        grid line inside of gets no line at all - the output would go
+        straight from one run's last explicit char to the next run's first
+        with no '-' between them, silently splicing two separate vox runs
+        into what reads as one continuous laser. A one-tick gap can't be
+        fixed this way (there is no room for a third distinct row) - that
+        is the same kind of grid limit as an unrepresentable 32nd slam.
+        """
+        out = set()
+        for r in self.runs:
+            for (t, _v) in r.points:
+                out.add(t)
+        for a, b in zip(self.runs, self.runs[1:]):
+            if b.start_tick - a.end_tick >= 2:
+                out.add(a.end_tick + 1)
+        return out
+
+
+# --------------------------------------------------------------------------
+# grid resolution
+# --------------------------------------------------------------------------
+
+def measure_resolution(length, anchor_offsets):
+    """Minimum number of equal lines so every offset in (0, length) lands
+    exactly on one - gcd-based, always exact (see module docstring).
+    """
+    g = length
+    for o in anchor_offsets:
+        if 0 < o < length:
+            g = math.gcd(g, o)
+    if g <= 0:
+        g = length
+    return max(1, length // g)
+
+
+# --------------------------------------------------------------------------
+# conversion
+# --------------------------------------------------------------------------
+
+DIFF_MAP = {"1n": "light", "2a": "challenge", "3e": "extended",
+            "4i": "infinite", "5m": "infinite"}
+
+
+def convert(vox_path, out_path):
+    chart = vox.load(vox_path)
+    tl = chart.tl
+
+    bt_lanes = [HoldLane(notes) for notes in chart.bt]
+    fx_lanes = [HoldLane(notes) for notes in chart.fx]
+    laser_lanes = [LaserLane(laser.build_runs(pts, tl)) for pts in chart.laser]
+
+    tight_runs = sum(1 for lane in laser_lanes for r in lane.runs if r.tight)
+    if tight_runs:
+        print("note: %d laser run(s) needed a sub-1/24 gap to keep their true "
+              "shape (see laser.py's docstring, point 3) - real, unavoidable "
+              "given .ksh's grid" % tight_runs, file=sys.stderr)
+
+    # BPM / time-signature change points, as body option lines
+    bpm_changes = []   # (tick, bpm)
+    seen_bpm = None
+    for (mm, bb, tt, bpm) in tl.bpms:
+        tick = tl.abs_tick(mm, bb, tt)
+        if bpm != seen_bpm:
+            bpm_changes.append((tick, bpm))
+            seen_bpm = bpm
+    beat_changes = []  # (measure0, num, den) - only meaningful at measure starts
+    for (mm, num, den) in tl.beats:
+        beat_changes.append((mm, num, den))
+
+    # How far the chart goes. Deliberately NOT chart.end_tick: vox's
+    # #END POSITION is the arcade chart's official end (used for gauge/score
+    # purposes) and routinely runs well past the last real event - a trailing
+    # note-less outro adds measures no reference conversion bothers keeping.
+    # Crosschecked via xcheck.py: ending at the last real event lands on or
+    # within 1 measure of every one of the 5 matched reference conversions;
+    # #END POSITION overshoots all of them, by 8 measures on the worst one.
+    last_tick = 0
+    for lane in bt_lanes + fx_lanes:
+        if lane.ends:
+            last_tick = max(last_tick, lane.ends[-1])
+        if lane.chips:
+            last_tick = max(last_tick, max(lane.chips))
+    for lane in laser_lanes:
+        for r in lane.runs:
+            last_tick = max(last_tick, r.end_tick)
+    last_measure, _ = tl.measure_of_tick(last_tick)
+
+    # the initial tempo is already stated in the header's "t="; only changes
+    # after it need a body "t=" line. Time signature is different: KSM's own
+    # editor always restates "beat=" right after the first bar line even
+    # when it matches the header default, so measure 0 keeps its entry.
+    bpm_by_measure = {}
+    for (tick, bpm) in bpm_changes[1:]:
+        m, off = tl.measure_of_tick(tick)
+        bpm_by_measure.setdefault(m, []).append((off, bpm))
+    beat_by_measure = {mm: (num, den) for (mm, num, den) in beat_changes}
+
+    lines = []
+    lines.extend(_header(chart, bpm_changes, beat_changes))
+
+    cur_num, cur_den = None, None
+
+    for m in range(0, last_measure + 1):
+        mlen = tl.measure_length(m)
+        m_start = tl.measure_start_tick(m)
+
+        anchors = set()
+        for lane in bt_lanes + fx_lanes:
+            anchors |= {t - m_start for t in lane.anchors()
+                        if m_start <= t < m_start + mlen}
+        for lane in laser_lanes:
+            anchors |= {t - m_start for t in lane.anchors()
+                        if m_start <= t < m_start + mlen}
+        for (off, _bpm) in bpm_by_measure.get(m, []):
+            anchors.add(off)
+
+        res = measure_resolution(mlen, anchors)
+        step = mlen // res
+
+        if m in beat_by_measure:
+            num, den = beat_by_measure[m]
+            # KSM's own editor always restates "beat=" for measure 0, even
+            # though it duplicates the header default; later measures only
+            # get one when the time signature actually changes.
+            if m == 0 or (num, den) != (cur_num, cur_den):
+                lines.append("beat=%d/%d" % (num, den))
+            cur_num, cur_den = num, den
+
+        bpm_here = dict(bpm_by_measure.get(m, []))
+
+        for k in range(res):
+            tick = m_start + k * step
+            if k in bpm_here:
+                lines.append("t=%s" % _fmt_bpm(bpm_here[k]))
+
+            for li, lane in enumerate(fx_lanes):
+                if lane.hold_starting_at(tick):
+                    lines.append("fx-%s=" % ("l" if li == 0 else "r"))
+
+            for li, lane in enumerate(laser_lanes):
+                run = lane.run_starting_at(tick)
+                if run is not None and run.width == 2:
+                    lines.append("laserrange_%s=2x" % ("l" if li == 0 else "r"))
+
+            bt_chars = "".join(lane.char_at(tick, BT_CHIP, BT_HOLD) for lane in bt_lanes)
+            fx_chars = "".join(lane.char_at(tick, FX_CHIP, FX_HOLD) for lane in fx_lanes)
+            laser_chars = "".join(lane.char_at(tick) for lane in laser_lanes)
+            lines.append("%s|%s|%s" % (bt_chars, fx_chars, laser_chars))
+
+        lines.append("--")
+
+    with open(out_path, "w", encoding="utf-8-sig", newline="\r\n") as f:
+        f.write("\n".join(lines) + "\n")
+    return out_path
+
+
+def _fmt_bpm(bpm):
+    s = "%.3f" % bpm
+    s = s.rstrip("0").rstrip(".")
+    return s if s else "0"
+
+
+def _header(chart, bpm_changes, beat_changes):
+    base = os.path.splitext(os.path.basename(chart.path))[0]
+    diff_suffix = base.rsplit("_", 1)[-1] if "_" in base else ""
+    difficulty = DIFF_MAP.get(diff_suffix, "infinite")
+
+    bpms = sorted(set(b for _t, b in bpm_changes)) or [120.0]
+    if len(bpms) == 1:
+        t_val = _fmt_bpm(bpms[0])
+    else:
+        t_val = "%s-%s" % (_fmt_bpm(min(bpms)), _fmt_bpm(max(bpms)))
+    num0, den0 = (beat_changes[0][1], beat_changes[0][2]) if beat_changes else (4, 4)
+
+    h = [
+        "title=%s" % base,
+        "artist=",
+        "effect=",
+        "jacket=",
+        "illustrator=",
+        "difficulty=%s" % difficulty,
+        "level=1",
+        "t=%s" % t_val,
+        "to=0",
+        "beat=%d/%d" % (num0, den0),
+        "m=dummy.ogg",
+        "mvol=100",
+        "o=0",
+        "bg=desert",
+        "layer=arrow",
+        "po=0",
+        "plength=0",
+        "total=0",
+        "chokkakuvol=50",
+        "chokkakuautovol=1",
+        "filtertype=peak",
+        "pfiltergain=50",
+        "pfilterdelay=40",
+        "ver=171",
+        "--",
+    ]
+    return h
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("vox", help="path to a .vox chart")
+    ap.add_argument("-o", "--output", default=None)
+    args = ap.parse_args()
+    out = args.output or os.path.splitext(os.path.basename(args.vox))[0] + ".ksh"
+    path = convert(args.vox, out)
+    print("wrote %s" % path)
+
+
+if __name__ == "__main__":
+    main()
