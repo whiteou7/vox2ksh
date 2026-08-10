@@ -200,6 +200,17 @@ DEFAULT_BEATS = {1: 6, 2: 2, 3: 3, 4: 12, 5: 3}
 BEAT_TO_KSH192 = 32
 TYPE6_UNIT_TO_KSH192 = 6   # 1/32 note, in a 4/4 measure
 
+# roll_type=6/7's C8 is 0 (i.e. "no length") on chart-format-13 charts
+# specifically - confirmed corpus-wide: 76/80 type-6/7 rows in a 148-chart
+# v13 sample have C8=0, vs essentially never in the v10/v12 corpus. On
+# those rows C9 (cells_per_chain elsewhere) holds the real length instead,
+# in 1/16-note units - found by hand on 2393_alive_dadadaizu (itself v13),
+# track8 measure 79 of the 5m chart. See vox_format.md's "Format version
+# 13" and specs/camera.md's "Spin/swing: length" for the full survey. No
+# version check needed here: v10/v12 rows essentially never have C8=0 for
+# these types, so this fallback is naturally inert on them.
+TYPE6_FALLBACK_UNIT_TO_KSH192 = 12   # 1/16 note, in a 4/4 measure
+
 
 def _outgoing_dirsign(lst, i, max_lookahead=5):
     """Sign of the first position change after point i - the roll/swing tag
@@ -236,10 +247,15 @@ def compute_spin_tokens(chart):
             else:
                 base = "@(" if dirsign < 0 else "@)"
 
-            if p.roll_type == 6:
-                length = (p.roll_length or 0) * TYPE6_UNIT_TO_KSH192
-            elif p.roll_length:
-                length = p.roll_length * BEAT_TO_KSH192
+            if p.roll_length:
+                if p.roll_type == 6:
+                    length = p.roll_length * TYPE6_UNIT_TO_KSH192
+                else:
+                    length = p.roll_length * BEAT_TO_KSH192
+            elif p.roll_type in (6, 7) and p.cells_per_chain:
+                length = p.cells_per_chain * TYPE6_FALLBACK_UNIT_TO_KSH192
+            elif p.roll_type in (6, 7):
+                length = 0
             else:
                 length = DEFAULT_BEATS.get(p.roll_type, 3) * BEAT_TO_KSH192
             length = max(1, int(round(length)))
