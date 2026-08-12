@@ -38,7 +38,14 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sdvx_fx as FX
 
-TICKS_PER_BEAT = 48          # max tick seen in every shipped chart is 47
+# Cells per 1/4 note, when the chart does not say otherwise. Charts that DO say
+# otherwise carry a #BEAT RESOLUTION tag, and 480 / 240 both occur in shipped
+# data - Timeline reads it per chart, so do not use this constant directly for
+# anything except the fallback. `scripts/shared/vox.py` (notes/camera) has
+# always honoured the tag; only this module hardcoded it, which silently
+# stretched every effect on those charts by 10x or 5x. See audio_engine.md 5.3.
+DEFAULT_TICKS_PER_BEAT = 48
+TICKS_PER_BEAT = DEFAULT_TICKS_PER_BEAT     # back-compat alias for importers
 SR = FX.SR
 
 
@@ -74,7 +81,15 @@ def parse_pos(s):
 class Timeline:
     """measure/beat/tick <-> seconds, honouring BPM and time-signature changes."""
 
-    def __init__(self, sec):
+    def __init__(self, sec, res=None):
+        # Cells per 1/4 note for THIS chart. Absent on most, but 480 and 240
+        # both occur, and the difference is not cosmetic: with the wrong value
+        # every note start, note length and BPM segment is scaled by the ratio.
+        if res is None:
+            rl = sec.get("#BEAT RESOLUTION")
+            res = int(rl[0].strip()) if rl else DEFAULT_TICKS_PER_BEAT
+        self.res = int(res)
+
         self.beats = []          # (measure0, num, den)
         for line in sec.get("#BEAT INFO", []):
             f = line.split()
@@ -101,7 +116,7 @@ class Timeline:
                 mi += 1
             self._measure_tick[meas] = acc
             num, den = self.beats[mi][1], self.beats[mi][2]
-            acc += int(num * (4.0 / den) * TICKS_PER_BEAT)
+            acc += int(num * (4.0 / den) * self.res)
 
         # BPM changes as absolute ticks, plus the elapsed seconds at each
         self._bpm_pts = []
@@ -112,10 +127,10 @@ class Timeline:
         for i in range(1, len(self._bpm_pts)):
             dt = self._bpm_pts[i][0] - self._bpm_pts[i - 1][0]
             spb = 60.0 / self._bpm_pts[i - 1][1]
-            self._bpm_sec.append(self._bpm_sec[-1] + dt / TICKS_PER_BEAT * spb)
+            self._bpm_sec.append(self._bpm_sec[-1] + dt / self.res * spb)
 
     def abs_tick(self, m0, b0, t):
-        return self._measure_tick[m0] + b0 * TICKS_PER_BEAT + t
+        return self._measure_tick[m0] + b0 * self.res + t
 
     def tick_of(self, poss):
         return self.abs_tick(*parse_pos(poss))
@@ -150,7 +165,7 @@ class Timeline:
             else:
                 break
         tk, bpm = self._bpm_pts[i]
-        return self._bpm_sec[i] + (tick - tk) / TICKS_PER_BEAT * (60.0 / bpm)
+        return self._bpm_sec[i] + (tick - tk) / self.res * (60.0 / bpm)
 
     def samples(self, tick):
         return int(round(self.seconds(tick) * SR))
@@ -319,12 +334,23 @@ PERSIST = {6}           # effect types whose state is threaded (6 = Wobble)
 
 MIXSCALE = [1.0]        # diagnostic: scale every effect's wet/dry mix parameter
 
+# Tape Stop Ex was unimplemented for a long time; this restores that so the
+# implementation can be A/B'd against doing nothing. See audio_engine.md 4.6b.
+TAPESTOP_EX = [True]
+
+# Tape Stop Ex's envelope floor is a struct field in the engine (this+0x46) that
+# was never traced to whatever writes it, so unlike every other constant in this
+# file it is fitted rather than transcribed. Kept on its own flag, the same way
+# --se-trim isolates the unexplained 2 dB, so it can be deleted if someone finds
+# the real source. See audio_engine.md 4.6b.
+TSE_FLOOR = [FX.TAPESTOP_EX_FLOOR]
+
 
 def _mx(v):
     return v * MIXSCALE[0]
 
 
-def run_fx(L, R, eff, tl, tick, block, knob=None):
+def run_fx(L, R, eff, tl, tick, block, knob=None, lookahead=None):
     """Apply one #FXBUTTON effect definition. Returns (L, R) or None if unsupported."""
     t = int(eff[0])
     p = list(eff[1:])
@@ -359,11 +385,20 @@ def run_fx(L, R, eff, tl, tick, block, knob=None):
                             state=FXSTATE.setdefault(t, {}) if t in PERSIST else None)
     if t == 7:                                          # Bit Crusher
         return FX.fx_bitcrush(L, R, p[0], int(p[1]), block=block)
+    if t == 10 and TAPESTOP_EX[0]:                      # Tape Stop Ex
+        # mix, speed, then duration/preroll/window in BEATS - NOT seconds. Plain
+        # Tape Stop (id 4) really is seconds, but this one goes through wrapper
+        # 0x1806320d0, which multiplies all three by 60/BPM at 0x180632170-8a
+        # before the call. Reading them as seconds makes preroll outrun every
+        # note on a fast chart and the effect silently never fires.
+        return FX.fx_tapestop_ex(L, R, p[0], p[1], p[2] * spb, p[3] * spb,
+                                 p[4] * spb, block=block, lookahead=lookahead,
+                                 floor=TSE_FLOOR[0])
     if t == 11:                                         # Low Pass Filter
         return FX.fx_laser_lpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block)
     if t == 12:                                         # High Pass Filter
         return FX.fx_laser_hpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block)
-    return None                                         # 9, 10, 13 -> not implemented
+    return None                                         # 9, 13 -> not implemented
 
 
 def run_tab(L, R, eff, knob, block):
@@ -569,6 +604,24 @@ def main():
                          "instead of at the previous grid boundary. The engine "
                          "snaps (FUN_18062e310), so this is the wrong model - it "
                          "exists to A/B the difference. See audio_engine.md 5.2")
+    ap.add_argument("--tapestop-ex-floor", type=float, default=FX.TAPESTOP_EX_FLOOR,
+                    help="level Tape Stop Ex's envelope ramps up FROM, 0..1 "
+                         "(default %(default)g). The engine keeps this in a "
+                         "struct field nothing was traced to, so it is the one "
+                         "fitted number in that effect rather than a "
+                         "transcribed one - see audio_engine.md 4.6b")
+    ap.add_argument("--no-tapestop-ex", action="store_true",
+                    help="diagnostic: leave Tape Stop Ex (.vox id 10) notes dry, "
+                         "which is what this renderer did before 4.6b was "
+                         "transcribed. Exists to A/B the implementation")
+    ap.add_argument("--no-auto-tab", action="store_true",
+                    help="skip #TRACK AUTO TAB spans, where a laser borrows an "
+                         "FX-button effect pair (33.8%% of charts use this). "
+                         "Applying them is worth +1.07 dB over these spans and "
+                         "helped on 11 of 11 charts measured, so it is on by "
+                         "default - but note the paired #TAB PARAM ASSIGN INFO "
+                         "parameter sweep is still unimplemented, so borrowed "
+                         "effects run at their authored parameters only")
     ap.add_argument("--no-fx", action="store_true", help="skip FX-button effects")
     ap.add_argument("--no-laser", action="store_true", help="skip laser effects")
     ap.add_argument("--dry", default=None,
@@ -642,6 +695,8 @@ def main():
     MODE[0] = args.laser_mode
     STAGE_CLIP[0] = not args.no_stage_clip
     MIXSCALE[0] = args.mix_scale
+    TAPESTOP_EX[0] = not args.no_tapestop_ex
+    TSE_FLOOR[0] = args.tapestop_ex_floor
     if args.no_persist:
         PERSIST.clear()
     folder = os.path.abspath(args.folder)
@@ -737,8 +792,10 @@ def main():
                         snap = grid_snap_offset(tl, t0, eff[3])
                     j0 = max(0, i0 - snap)
                     pre = i0 - j0
+                    # lookahead lets Tape Stop Ex record past this note's end,
+                    # as the engine's snapshot does (sdvx_fx.fx_tapestop_ex)
                     res = run_fx(L[j0:i1].copy(), R[j0:i1].copy(), eff, tl, t0,
-                                 args.block)
+                                 args.block, lookahead=(L, R, j0))
                     name = FX_NAMES.get(int(eff[0]), "?")
                     if res is None:
                         skipped[name] = skipped.get(name, 0) + 1
@@ -748,6 +805,59 @@ def main():
                     applied[key] = applied.get(key, 0) + 1
                     if snap:
                         snapped[key] = snapped.get(key, 0) + 1
+
+    # ---------------- #TRACK AUTO TAB: lasers borrowing an FX-button effect ---
+    #
+    # Rows are `timing  lengthCells  effectIndex`, and effectIndex is 2-INDEXED
+    # exactly like an FX hold's C2, so the pair is `C2 - 2`. That base is settled
+    # by the corpus rather than by one example: read as 2-indexed the column
+    # spans 2..13 (twelve consecutive values for twelve pairs) and lands on a
+    # pair carrying a #TAB PARAM ASSIGN INFO entry 40.7% of the time, versus
+    # 13.1% read as 0-indexed. See vox_format.md and audio_engine.md 6.3.
+    #
+    # On by default (--no-auto-tab disables): worth +1.07 dB over the spans it
+    # covers, improving 11 of 11 charts measured. It was off while three charts
+    # appeared to regress; those turned out to be the #BEAT RESOLUTION bug of
+    # audio_engine.md 5.3, not this feature. #TAB PARAM ASSIGN INFO's
+    # laser-driven parameter sweep is still NOT implemented (its direction was
+    # never resolved), so each borrowed effect runs at its authored parameters -
+    # right for the ~59% of spans with no modulation, incomplete for the rest.
+    if not args.no_auto_tab:
+        for line in sec.get("#TRACK AUTO TAB", []):
+            f = line.split()
+            if len(f) < 3:
+                continue
+            try:
+                length, ev = int(f[1]), int(f[2])
+            except ValueError:
+                continue
+            if length <= 0 or ev < 2:
+                continue
+            di = ev - 2
+            if di >= len(fxdefs):
+                continue
+            t0 = tl.tick_of(f[0])
+            i0, i1 = max(0, tl.samples(t0)), min(n, tl.samples(t0 + length))
+            if i1 - i0 < 16:
+                continue
+            for eff in fxdefs[di]:
+                if eff is None:
+                    continue
+                snap = 0
+                if (not args.no_grid_snap and int(eff[0]) in GRID_LOCKED
+                        and len(eff) > 3):
+                    snap = grid_snap_offset(tl, t0, eff[3])
+                j0 = max(0, i0 - snap)
+                pre = i0 - j0
+                res = run_fx(L[j0:i1].copy(), R[j0:i1].copy(), eff, tl, t0,
+                             args.block, lookahead=(L, R, j0))
+                name = FX_NAMES.get(int(eff[0]), "?")
+                if res is None:
+                    skipped[name] = skipped.get(name, 0) + 1
+                    continue
+                L[i0:i1], R[i0:i1] = stage(res[0][pre:]), stage(res[1][pre:])
+                key = "%s (AUTO TAB)" % name
+                applied[key] = applied.get(key, 0) + 1
 
     # ---------------- lasers: TRACK1 = VOL-L, TRACK8 = VOL-R ----------------
     #

@@ -1,12 +1,16 @@
 # VOX format documentation
 
-Taken from m0seng so credit to them
+## Credits and status
+
+This document began as **zacharied's** VOX format notes and was substantially rewritten and extended by **m0seng**, whose v10/v12-focused version is what this project inherited. Both were invaluable — most of the structure below is still theirs, and the parts this project has changed are changes to *their* groundwork, not a replacement for it.
+
+**This project now maintains this document directly**, correcting inherited claims in place rather than annotating around them in other files.
+
+Text marked **[corrected]**, **[added]** or **[verified]** comes from this project's own work — Ghidra decompilation of `modules/soundvoltex.dll`, cross-checked against all 8107 shipped charts in `data/music/` and, where audible, against cabinet recordings in `scripts/shared/reference/ksh/`. **Unmarked text is inherited and not necessarily re-verified**: treat it as a well-informed hypothesis. DSP-level detail lives in [`audio_engine.md`](audio_engine.md), camera detail in [`camera.md`](camera.md).
 
 ## Notes
 
-These docs are based on zacharied's VOX format notes, which have been an invaluable resource in learning about the format.
-
-However, these docs will focus on the newer VOX versions v10 and v12, which combined make up virtually all charts found in EG (older charts appear to have been ported to v10). A newer **v13** exists (see "Format version 13" near the end of this document) - unlike everything else here, that section is this project's own survey, not from the inherited community notes, since v13 postdates them.
+These docs focus on the newer VOX versions v10 and v12, which combined make up virtually all charts found in EG (older charts appear to have been ported to v10). A newer **v13** exists (see "Format version 13" near the end of this document) — that section is this project's own survey, since v13 postdates the inherited notes.
 
 Some terminology and conventions:
 
@@ -86,6 +90,8 @@ Single integer denoting the VOX version.
 
 ### (v12) `#BEAT RESOLUTION`
 
+> **[added] — do not hardcode 48.** The tag is absent on 8088 of 8107 charts, which makes "cells per beat is 48" a comfortable and wrong assumption. Distribution: `48` (absent) ×8088, `144` ×1, `240` ×10, `480` ×8. On those 19 charts, assuming 48 scales **every** position and length by the ratio — 10x on a 480 chart — so notes start at the wrong time and holds run an order of magnitude long. This project's audio renderer carried that bug and it distorted three separate measurements before being caught. See [`audio_engine.md`](audio_engine.md) §5.3.
+
 (Optional) Single integer denoting the number of cells in a 1/4th note (48 by default).
 
 ### `#BEAT INFO`
@@ -160,34 +166,64 @@ Single timing defining the end of the chart.
 
 (Commasep) This section contains 12 pairs of lines. Each pair of lines corresponds to a pair of effects which can be referenced by FX tracks (`#TRACK2`/`#TRACK7`/`#TRACK AUTO TAB`).
 
-TODO: actually verify these are accurate?
+**Both lines of a pair are applied, in series** — [corrected]; the second line is all-zero on most charts, which made it look skippable, but the dispatcher (`FUN_18062e3d0`) loops its sub-index over {0, 1} and chains the second effect onto the first's output. Dropping the all-zero lines also shifts every later pair index by one, so a chart that does use the second slot breaks twice over.
 
-TODO: investigate parameters of each effect
++ C0: Effect type — **[corrected]**, the two TODOs that used to sit here are resolved. Four of the inherited names were wrong; the table below is traced from the setup function `FUN_18022db60`, which maps each id to an internal effect kind and parameter vector, through to the DSP routine that actually crunches the samples. Full derivation, per-effect parameter math and DLL addresses: [`audio_engine.md`](audio_engine.md) §3–§4.
 
-+ C0: Effect type
-    + `0`: No effect
-    + `1`: Retrigger
-    + `2`: Gate
-    + `3`: Phaser
-    + `4`: Tape stop
-    + `5`: Sidechain
-    + `6`: Wobble
-    + `7`: Bitcrusher
-    + `8`: Echo (?)
-    + `9`: Pitchshift
-    + `10`: Highpass
-    + `11`: Lowpass
-    + `12`: Flanger
+    | id | inherited name | **actual** | evidence |
+    |---|---|---|---|
+    | `0` | No effect | No effect | — |
+    | `1` | Retrigger | Retrigger | ✓ |
+    | `2` | Gate | Gate | ✓ |
+    | `3` | Phaser | **Flanger** | modulated fractional delay + feedback taps = flanger topology (`0x18063f420`) |
+    | `4` | Tape stop | Tape Stop | ✓ |
+    | `5` | Sidechain | Side Chain | ✓ — an amplitude envelope, no detector, not real compression |
+    | `6` | Wobble | Wobble | ✓ — LFO sweeping one of the biquads |
+    | `7` | Bitcrusher | Bit Crusher | ✓ — sample-and-hold decimator only, *no* bit-depth reduction despite the name |
+    | `8` | Echo (?) | **Echo / Retrigger Ex** — the `(?)` resolves to yes | shares DSP `0x18063ffb0` with Retrigger, 7th field |
+    | `9` | Pitchshift | Pitch Shift | ✓ — PSOLA (§4.10) |
+    | `10` | Highpass | **Tape Stop Ex** | 5 float params with tape-stop-shaped clamps, not a filter (`0x180640c20`) |
+    | `11` | Lowpass | Low Pass Filter | ✓ |
+    | `12` | Flanger | **High Pass Filter** | setup case `0xc` → vec `+0x88` → kind 13 → `0x18063e500` |
+    | `13` | *(absent)* | **[added]** composite / keyframed effect | own keyframe vector, dispatched as kind 14 |
 
-+ The number of columns in each line depends on the number of parameters that the effect has, which varies between effect types.
+    Chart data corroborates the swap independently: ids 11 and 12 both carry 4 params shaped `mix, freq, freq, Q` like filters, while id 3 carries 5.
+
++ The number of columns in each line depends on the number of parameters that the effect has, which varies between effect types. Exact per-type column order, from the reader `FUN_180239810`:
+
+    ```
+    1  -> %d, %d,  %f, %f, %f, %f, %f      2  -> %d, %f, %d, %f
+    3  -> %d, %f,  %f, %f, %d, %f          4  -> %d, %f, %f, %f
+    5  -> %d, %f,  %f, %d, %d, %d          6  -> %d, %d, %d, %f, %f, %f, %f, %f
+    7  -> %d, %f,  %d                      8  -> %d, %d, %f, %f, %f, %f, %f, %f
+    9  -> %d, %f,  %f                      10 -> %d, %f, %f, %f, %f, %f
+    11 -> %d, %f,  %f, %f, %f              12 -> %d, %f, %f, %f, %f
+    ```
+
++ **Units are not uniform, and are not all seconds** — [added]. Period/length fields are mostly in **beats** (converted with `60/BPM` by each effect's wrapper), but not all of them:
+
+    | effect | field | unit |
+    |---|---|---|
+    | Retrigger / Echo | length | beats |
+    | Gate | period | beats |
+    | Side Chain | period | beats |
+    | Wobble | period | beats |
+    | Flanger | period | **measures** |
+    | Tape Stop (id 4) | duration | **seconds** — passed through unconverted |
+    | Tape Stop Ex (id 10) | duration, preroll, window | **beats** — unlike id 4 |
+    | Bit Crusher | rate | raw sample count |
+
+    The id 4 / id 10 split is a genuine trap: the two effects share a name and disagree on units. Reading id 10's fields as seconds makes its preroll outrun the note on any fast chart, and the effect then silently never fires.
 
 ### `#TAB PARAM ASSIGN INFO`
 
 (Commasep) This section allows lasers to use the effects defined in `#FXBUTTON EFFECT INFO`, when enabled in `#TRACK AUTO TAB`.
 
-+ C0: index of effect pair in `#FXBUTTON EFFECT INFO` (0-indexed) (?)
-    + This column starts at 0 and increments every other line.
-    + Most likely, each line of `#TAB PARAM ASSIGN INFO` maps to the same (non-empty) line of `#FXBUTTON EFFECT INFO`.
+**Always exactly 24 rows, in every one of the 8107 shipped charts** — [verified] — i.e. one row per `#FXBUTTON EFFECT INFO` line (12 pairs × 2), present whether used or not. Only **431 charts (5.3 %)** have any row whose C1–C3 are nonzero, so on ~95 % of charts this section is entirely inert padding. That rarity is worth knowing before spending effort here.
+
+**This section has nothing to do with the ordinary laser filter sweep** — [added]. The 0–127 knob feeding `#TAB EFFECT INFO` filters is plain linear interpolation of laser position; this section applies only to effects borrowed from `#FXBUTTON EFFECT INFO` via `#TRACK AUTO TAB`.
+
++ C0: index of effect pair in `#FXBUTTON EFFECT INFO` (0-indexed) — [verified], the inherited `(?)` can be dropped. Across every shipped chart this column is never anything other than `0,0,1,1,2,2,…,11,11`, so it is a positional counter and the row-to-pair mapping is exactly the one the inherited note guessed.
 
 + C1: index of respective effect's parameter to be adjusted
     + `0`: no parameter to be adjusted
@@ -195,7 +231,17 @@ TODO: investigate parameters of each effect
 
 + C2/C3: lower/upper bounds of parameter
     + The laser's position is used as the interpolated value between the bounds.
-    + TODO: Does this range from left to right, or from default side to opposite side?
+    + The inherited TODO ("left to right, or default side to opposite side?") is **still open** — the consumer that reads these bounds at playback was never located. Note that C2 > C3 occurs in real data (e.g. `6, 3, 3.00, 0.50` and `2, 2, 24.00, 4.00`), so "lower/upper" is not an ordering: the pair is a *from → to*, and which end the laser's home side maps to is exactly the question.
+    + **Now testable.** `apply_chart.py` renders `#TRACK AUTO TAB` spans, so the two readings can be A/B'd against cabinet recordings on the ~5 % of charts carrying a nonzero row — which is how the effect-combination and grid-snap questions were settled. That is the cheapest route to closing this.
+
++ Worked example — `0002_broken_iroha` 4i, the smallest chart carrying a nonzero row:
+
+    ```
+    #TAB PARAM ASSIGN INFO row 12:   6, 3, 3.00, 0.50    -> pair 6 (a Wobble), param 3, swept 3.00 -> 0.50
+    #TRACK AUTO TAB single row:      021,03,00  96  8    -> from 021,03,00 for 96 cells, laser uses pair 8
+    ```
+
+    Note the two do not refer to the same pair: the chart's one modulation entry is on pair 6, while its one AUTO TAB span borrows pair 8 (a Side Chain) with no modulation attached. So the two sections are **independently indexed, not a parent/child pair** — a laser span can borrow an effect with or without a parameter sweep configured for it.
 
 ### `#REVERB EFFECT PARAM`
 
@@ -230,6 +276,8 @@ Original purpose unknown; currently empty for all charts.
     + `4`: 12-beat triple roll
     + `5`: 3-beat swing (or 2.5 beats?)
     + `6`: (v12) 8x-speed roll (length must be specified in C8)
+    + `7`: **[added]** — undocumented in the inherited notes but real: 49 rows across the corpus, v12 only. Behaves like type `6` (same `C8`/`C9` length mechanism), and this project's camera converter had a bug precisely because a `6`-only fallback was never extended to `7`.
+    + **[corrected] — the per-type beat lengths above are names, not measurements.** They come from the inherited notes' own naming and do not all survive checking against hand-made reference conversions: types `2` and `5` have observed defaults (72, and 72–96) that contradict the 64 and 96 their names imply. This project's converter still carries the name-derived table as a working approximation, flagged as unresolved — see [`camera.md`](camera.md) "Spin/swing: length". Treat every number in this list as a hypothesis; only the *kind* mapping (roll vs swing) and the spin *direction* rule have been verified to 100 % against reference charts.
 
 + C4: Laser effect
     + The effect is applied until the timing of the next node.
@@ -237,7 +285,10 @@ Original purpose unknown; currently empty for all charts.
         + Default side low, opposite side high
     + `1`-`5`: Index of effect in `#TAB EFFECT INFO` (1-indexed)
         + Low/high sides depend on filter type
-    + `6`: No effect (?)
+    + `6`: No effect — [verified], the inherited `(?)` can be dropped
+    + **[verified]** — this whole column is confirmed at the dispatcher, which keys its effect map on `noteField[4] - 1`, so C4 `1..5` becomes map key `0..4` = the five `#TAB EFFECT INFO` slots, and C4 `0` lands on a "nothing" sentinel.
+    + **`0` (peak filter) is not an entry in `#TAB EFFECT INFO` and is not produced by the effect engine at all** — [added]. It is a DirectSound parametric-EQ living in the *sound device*, driven straight from the gameplay event dispatcher, lagging the knob by 80 ms and ducking the music while it runs. It is also the overwhelmingly common case in practice (870 of 894 laser nodes on the chart measured). Full transcription in [`audio_engine.md`](audio_engine.md) §7.1.
+    + **Do not confuse this column with C7.** Both range 0–5 in practice, so mixing them up looks plausible and silently applies the wrong filters across an entire chart. C4 is the effect; C7 is the curve shape.
 
 + C5: Laser range
     + `1`: Normal laser
@@ -291,9 +342,10 @@ Original purpose unknown; currently empty for all charts.
         + `12`: Male "hey"
         + `13`: Male "yeah"
         + `14`: Fireworks ???
-        + What other samples there are and where they are defined are not yet known.
+        + ~~What other samples there are and where they are defined are not yet known.~~ **[added]** — resolved. There are exactly these 15 and they live in `data/sound/ver5/general_sampler.s3p`, registered as **bank 9** by the loader; the names above match the bank's own `.def` entries (`fs00_virtical_se01` … `fs14_shot13`). `sys_sd_shotfx.2dx` is bank 4 and carries the same 15 names. Each sample's playback level is authored in its own file header (an 8.8 fixed-point dB field), not in the game code — the chips sit 7.83 dB below the laser-slam sample. See [`audio_engine.md`](audio_engine.md) §6.1.
+        + **`255` is silent too**, not just `0` — [added]. The trigger reads `if (0 < idx && idx != 255)`, so both ends are "no sample". `0` is overwhelmingly the common value in practice (110 of 111 FX-L chips on one measured chart).
     + For hold notes this is the index of an effect defined in `#FXBUTTON EFFECT INFO`.
-        + This is **2-indexed**! (i.e.: `2` is the first effect)
+        + This is **2-indexed**! (i.e.: `2` is the first effect) — [verified] at the dispatcher, which computes `noteField[4] - 2`.
         + `0` and `1` seem to be unused. (no known examples)
 + C3: (v12?) (Optional) Cells per chain
     + Denotes the number of cells per chain contributed by a hold note.
@@ -317,16 +369,25 @@ Original purpose unknown; currently empty for all charts.
 
 (Tabsep) This track is used to apply FX hold effects to lasers.
 
+**Used by 2738 of 8107 charts (33.8 %)** — [verified], which is more common than several effects that get far more attention. This project's audio renderer applies these spans (worth +1.07 dB); the parameter sweep described under `#TAB PARAM ASSIGN INFO` is not implemented.
+
 + C0: Timing
 + C1: Effect length in cells
 + C2: Effect index
     + This is the index of an effect defined in `#FXBUTTON EFFECT INFO`.
     + This is **2-indexed**! (i.e.: `2` is the first effect)
     + `0` and `1` seem to be unused.
+    + **[verified]** corpus-wide, and worth getting right — reading it as 0-indexed inverts the apparent relationship between this track and `#TAB PARAM ASSIGN INFO`. Two checks over the 2128 AUTO TAB rows in charts that also carry modulation:
+        + **Range**: C2 spans `2..13` — twelve consecutive values, matching the twelve pairs under `C2 - 2`. A 0-indexed reading would leave `12` and `13` pointing past the last pair.
+        + **Correlation**: read as 2-indexed, a span lands on a pair carrying a modulation entry 40.7 % of the time; read as 0-indexed, 13.1 %, which is roughly chance.
+    + A `254` also appears (5 rows), which looks like the same "none" sentinel as the FX chip column's `255`, plus one stray `0`.
++ Relationship to `#TAB PARAM ASSIGN INFO` — **[added]**: this track picks *which* effect pair a laser span runs; that section optionally says *which parameter of that pair the laser sweeps, and between what bounds*. Roughly 59 % of AUTO TAB spans land on a pair with no modulation configured, which is simply the "run the effect at its authored parameters" case. Worked example under `#TAB PARAM ASSIGN INFO` above.
 
 ### (v12) `#TRACK ORIGINAL L`/`#TRACK ORIGINAL R`
 
 (Tabsep) These tracks have the same set of fields as `#TRACK1` and `#TRACK8`. However, while `#TRACK1` and `#TRACK8` contain the interpolated nodes of curved lasers, `#TRACK ORIGINAL L` and `#TRACK ORIGINAL R` do not; these tracks only contain the control nodes.
+
+**Present in 2488 charts (30.7 %)** — [verified] — and almost certainly **safe to ignore for playback**. Since `#TRACK1`/`#TRACK8` already carry the fully-interpolated curve the game itself plays, anything reading a chart to reproduce gameplay (audio or notes) wants those, not these. The most natural reading is that these are the in-house editor's authoring data, kept so a curve can be reloaded and re-edited from its original control points. This project's converters read only `#TRACK1`/`#TRACK8` and no discrepancy has ever been traced to that choice — though note this is an argument from redundancy, not a positive trace of the game ignoring them.
 
 ### `#SPCONTROLER`
 

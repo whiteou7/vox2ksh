@@ -57,7 +57,7 @@ Facts that matter if you want bit‑comparable output:
 * **Sample rate is hard‑coded 44100.** The constant `0.00014247585` = 2π/44100 appears in every filter; `44100.0f` appears in every time‑based effect.
 * **Everything is single precision `float`.** Coefficients too.
 * **Dry/wet is uniform**: `out = (1-mix)·dry + mix·wet`, `mix = clamp(param, 0, 100) / 100`. A few effects fold an extra makeup gain into the wet term (noted per effect).
-* **Processing is blocked.** Block length is `gen+0x1a0` (the audio callback's frame count). Filter coefficients / LFO values are recomputed **once per block**, not per sample. The laser filters start 64 samples early (`iVar1 = *param_3 - 0x40`). **Retrigger only** — not every effect — additionally has its phase snapped *backwards* onto the musical grid by `FUN_18062e310`; see §5.2, and note that an earlier revision of this document stated that far too generally.
+* **Processing is blocked.** Block length is `gen+0x1a0` (the audio callback's frame count). Filter coefficients / LFO values are recomputed **once per block**, not per sample. The laser filters start 64 samples early (`iVar1 = *param_3 - 0x40`). **Retrigger only** — not every effect — additionally has its phase snapped *backwards* onto the musical grid by `FUN_18062e310`; see §5.2.
 * **Quirk worth knowing** (`FUN_18063d9e0`): if the *left* int16 sample of a frame is exactly `0`, the code forces **both** channels of that frame to `0` in the work buffer. It is a real branch in the shipped binary, not a decompiler artefact.
 
 ---
@@ -176,7 +176,7 @@ LPF:  cutoff = lo * ratio ** (1 - v/127)      # v=0 -> freqHi (open), v=127 -> f
 HPF:  cutoff = lo * ratio ** (    v/127)      # v=0 -> freqLo (open), v=127 -> freqHi
 ```
 
-`1/127 = 0.007874016f`. The knob value is the *effect parameter* value, produced from laser position via `#TAB PARAM ASSIGN INFO` — it is not simply the raw laser x‑position.
+`1/127 = 0.007874016f`. `v` is the laser position itself, linearly interpolated across the segment — nothing else transforms it. `#TAB PARAM ASSIGN INFO` is **not** involved here; it belongs to the separate `#TRACK AUTO TAB` mechanism (§6.3).
 
 Laser Bit Crusher (`0x180630a20`) ignores the chart's rate field once the knob is moving:
 
@@ -276,7 +276,68 @@ else:
         frac    -= 1.0
 ```
 
-Playback advances one recorded sample only when `frac` drops below 1, and each advance adds `idx·step·speed + 1` to `frac` — so the effective playback rate is ≈ `1/(1 + idx·step·speed)`, a hyperbolic slow‑down, while `env` fades linearly to silence over `dur`. `.vox` id 10 (`0x180640c20`) is the same idea with two extra params (pre‑roll offset and a separate slow‑down window).
+Playback advances one recorded sample only when `frac` drops below 1, and each advance adds `idx·step·speed + 1` to `frac` — so the effective playback rate is ≈ `1/(1 + idx·step·speed)`, a hyperbolic slow‑down, while `env` fades linearly to silence over `dur`.
+
+### 4.6b Tape Stop Ex — `0x180640c20`
+
+`.vox` id 10 is a genuinely different envelope shape from Tape Stop, not the same effect with two bolted-on params — Tape Stop fades *out* to silence, Tape Stop Ex fades *in* from a floor. Five chart params `mix, speed, duration, preroll, window`.
+
+**The three time fields are in BEATS, not seconds** — which is the single most important thing in this section, and the opposite of plain Tape Stop (id 4), whose duration really is seconds. Wrapper `0x1806320d0` looks up the BPM at the current block and multiplies all three by `60/BPM` at `0x180632170`–`0x18063218a` before calling the DSP:
+
+```
+param_6 = duration * 60/BPM      param_7 = preroll * 60/BPM      param_8 = window * 60/BPM
+```
+
+Read them as seconds and on any chart above ~120 BPM the preroll outruns the note, the effect never reaches its active branch, and it renders nothing at all — no error, just a dead effect. The BPM is re-read per block, so a mid-note tempo change rescales all three.
+
+After the wrapper's conversion, the DSP clamps in seconds:
+
+```
+m       = clamp(mix, 0, 100) / 100
+speed   = clamp(speed, 1.0, 10.0)
+dur     = clamp(duration, 0.1, 2.0) * 44100          # samples
+window  = clamp(window,   0.1, 2.0) * 44100          # samples - the spin-up window
+preroll = max(preroll, 0.0) * 44100                  # samples - NO upper clamp, unlike every other field here
+```
+
+State is a **running absolute sample position** at `this+0x214`, incremented by the block length every call (unlike plain Tape Stop's `written`, this is not reset when a new block starts within the same note — it is the note-relative playhead). Three phases, gated on that position `pos` against `min(preroll, dur)` and `preroll + window`:
+
+* **`pos < min(preroll, dur)`**: nothing written here — the effect has not started yet. (Not directly re-derived: this reads as an implicit dry pass, consistent with the shared `prepare` step priming the wet buffer from the dry one, the same convention every other leaf relies on.)
+* **`min(preroll, dur) <= pos <= preroll + window`** (or the upper bound is skipped entirely when `preroll < 0`, though the earlier `max(preroll, 0)` clamp makes that path unreachable from chart data): the active phase. On first entry the raw dry samples are copied once into a record buffer (`this+0x40`/`this+0x41`, guarded by a one-shot flag at `this+0x45`, exactly like Tape Stop's own record buffer). Then, per sample, with `phase` counting up from 0 across `window` samples:
+  ```
+  env  = clamp( (phase/window)·(1 - floor) + floor ,  <= 1.0 )       # floor = this+0x46, a per-instance field
+  if frac < 1.0:
+      phase  += 1
+      frac   += (window - phase)·speed/window + 1.0                  # rate -> 0 as phase -> window: "grinding to a halt"
+      frac    = max(frac, 1.0)
+  frac -= 1.0
+  idx  = (window - recordLen) + phase                                 # index into the recorded buffer
+  out  = m · env · record[idx] + (1-m) · dry
+  ```
+  The envelope **ramps up** from `floor` toward `1.0` as `phase` approaches `window` — the mirror image of plain Tape Stop's fade-to-silence. Combined with the rate term, which advances the read head *more* often as `written` grows, `window` is a **spin-up**: the sound eases in quiet and slow and arrives at full level and speed as the window ends.
+* **`pos > preroll + window`**: plain `(1-m)·dry` — the wet contribution has finished.
+
+**Implemented and scored.** `sdvx_fx.fx_tapestop_ex` + `apply_chart.py`. Two things not obvious from the formula:
+
+* **The record buffer is filled from the track, not the note.** The snapshot is up to `window` long and routinely runs past the note's end, so a renderer holding only the note's slice clamps on its last sample and emits a DC buzz. `fx_tapestop_ex` takes `lookahead=(fullL, fullR, offset)` for this; without it three charts scored −6 to −24 dB, which reads like a wrong algorithm rather than a truncated buffer.
+* **It fires far less often than it appears.** A note shorter than its own preroll produces nothing. Only **27** reference-matched charts contain a note that reaches the active branch, with firing spans totalling 0.14–2.7 s each. `1954_treajourney_chubay` has ten id-10 notes and 95 "exclusive" frames by note-span masking, and fires on **none** of them. Score on note spans and the effect looks inert; score on firing spans and it is worth several dB.
+
+Measured on the 13 capture-matched charts that do fire (499 frames, scored over firing spans only, `dry − render`, higher is better):
+
+```
+                 mean    median   frame-weighted
+not implemented  +1.062   +0.513    +1.358
+floor 0.0        +1.924   +1.884    +2.035
+floor 0.4        +3.159   +3.497    +3.034
+floor 0.5        +3.217   +3.338    +3.097     <- shipped default
+floor 0.6        +3.234   +3.161    +3.124
+floor 0.75       +3.205   +3.200    +3.114
+floor 1.0        +3.048   +2.932    +2.986
+```
+
+12 of 13 charts improve, none gets worse, one (`1973_saihyou_kanekochiharu`) is unchanged. So the transcription is confirmed as a real improvement over doing nothing, by about **+2.2 dB** on the frames it touches.
+
+**Read the floor row carefully — it is a plateau, not an optimum.** The `floor` field (`this+0x46`) is fitted, not transcribed; nothing was traced to whatever writes it. What the sweep establishes is only that it sits **well above silence**: 0.0 costs 1.3 dB against anything else. Between 0.4 and 0.75 the spread is **0.08 dB**, which is noise, and the per-chart curves point in opposite directions — `1809_steelneedle_scorpion`, `1857_bonetrousle_tobyfox` and `2083_overture_kanonenora2r` fall monotonically from 0.4 to 1.0, while `1646_pureruby_shiki` and `1969_x1gnus_blacky` rise monotonically over exactly the same range. That is what a parameter the metric cannot constrain looks like, so 0.5 is the middle of a flat region rather than a measured value, and even `floor = 1.0` (meaning *no volume envelope at all*, only the rate ramp — a materially different claim about the effect) is only 0.19 dB behind. `--tapestop-ex-floor` isolates it, the way `--se-trim` isolates the unexplained SE gain. Do not tune it further against this metric; it will not answer. A secondary phase-tracking maximum at `this+0x224` also went unchased.
 
 ### 4.7 Side Chain — `0x180641770`
 
@@ -352,11 +413,28 @@ counter += N ; if counter >= period: counter -= period
 filterType 0 -> LPF(0x18063df40), 1 -> HPF(0x18063e500), 2 -> BPF(0x18063eb10)
 ```
 
-`6, 0, 3, 80.00, 500.00, 18000.00, 4.00, 1.40` = LPF, log‑triangle, 80 % wet, 500↔18000 Hz, a **4 beat** period, Q = 1.4. (An earlier revision of this line read that field as 4 *seconds*. It is beats, like the other period fields — the wrapper computes `xmm6 = (60/BPM) * period` at `0x180632ab6`, which is what §5 tabulates. At 248 BPM the two readings differ by 4x, so this is audible, not pedantic.)
+`6, 0, 3, 80.00, 500.00, 18000.00, 4.00, 1.40` = LPF, log‑triangle, 80 % wet, 500↔18000 Hz, a **4 beat** period, Q = 1.4. The period is in beats like every other period field (`xmm6 = (60/BPM) * period` at `0x180632ab6`), not seconds — at 248 BPM the two readings differ 4x.
 
 ### 4.10 Pitch Shift — `0x1806429b0`
 
-Time‑domain overlap‑add with resampling: `pow(2.0, semitones/12)` (double `pow` at `0x180769d80`), a windowed grain buffer at `this+0x4a…0x51`, cross‑faded segments whose count is `int(len/(ratio-1) + 0.5)` (or `len·ratio/(1-ratio)` when shifting down), and `sinf`‑based window weights. Two chart params: `mix` and `amount`. This one I did **not** finish transcribing coefficient‑for‑coefficient — see §6.
+**This is PSOLA (pitch-synchronous overlap-add), not a generic granular shifter.** The 631-line decompilation is heavily auto-vectorized (inner loops unrolled ×4 with pointer-aliasing guards), which hides a fairly ordinary three-stage algorithm. Two chart params: `mix` (clamp 0‑100, /100) and `amount` (semitones) → `ratio = pow(2.0, amount/12)` (double `pow` at `0x180769d80`).
+
+**Stage 1 — pitch-period detection by autocorrelation.** Each block, the DSP correlates the input (buffers `this+0x4d`/`this+0x4e`) against itself at every lag from **132 to 882 samples** (`0x84 .. 0x372`) — 50–334 Hz, an ordinary fundamental band — and keeps the highest-energy lag (`Σ x[i]·x[i+lag]`, running max). That lag becomes both the grain length and stage 2's write offset. This is how PSOLA finds pitch-synchronous grain boundaries instead of using a fixed window.
+
+**Stage 2 — build one grain, direction-dependent** (`ratio` tested right after the search):
+
+* **`ratio < 1` (pitch down).** The detected grain is resampled onto the accumulation ring buffers (`this+0x50`/`this+0x51`) with a **25-tap windowed-sinc kernel**, not a generic window function: for each output index the code walks source taps `k` from `floor(i·ratio) − 12` to `floor(i·ratio) + 12` and weights each by
+  ```
+  x = (i·ratio − k) · π
+  w = (x == 0) ? 1.0 : sinf(x) / x        # sinc(x) = sin(pi·x)/(pi·x), the RBJ-style ideal resampling kernel
+  out[write_pos] += w · grain[k]
+  ```
+  accumulated additively into the ring buffer — bandlimited interpolation, stretching the grain to fill the longer span a downward shift needs.
+* **`ratio >= 1` (pitch up or unison).** No resample: a **straight sample copy** of the grain into the same buffers. Pitch rises because successive grains are spaced *closer together* (`int(len/(ratio-1) + 0.5)`, versus `len·ratio/(1-ratio)` downward), not because any grain is stretched. This branch's index bookkeeping was not fully chased.
+
+**Stage 3 — crossfade to output.** On the next call, once enough grain data has accumulated, the two buffer generations are linearly crossfaded against the previous output using `mix` (`out = (1-mix)·history + mix·new`), then written back through the shared int16 stage.
+
+**What is solid vs. what is not.** The three-stage structure, the autocorrelation lag range, the sinc kernel and its 25-tap span, and the up/down asymmetry are read directly off the decompilation and are new since the last pass. Not yet pinned down: the exact grain-count/hop arithmetic that governs how densely grains overlap on the upward branch, and the ring-buffer index bookkeeping across calls (`this+0x49` / `this+0x4c` / `this+0x244` and friends) — those would need a slower, register-by-register pass through the vectorized code rather than the block-level read done here. No chart in the reference-capture corpus isolates Pitch Shift on its own long enough to score it against a cabinet recording (it is rare — 1283 occurrences chart-wide per the corpus scan below, and always layered with something else where it does appear), so this section is disassembly-only, same evidentiary standing as before.
 
 ---
 
@@ -371,7 +449,8 @@ The wrappers convert chart values to DSP arguments using the BPM at the effect's
 | Side Chain | `period` | **beats** → `sec = beats · 60/BPM` | `0x180632552` + tail |
 | Wobble | `period` | **beats** → `sec = beats · 60/BPM` | `0x180632ab2`–`0x180632aba` |
 | Flanger | `period` | **measures** → `rate = measures / secPerMeasure` | `0x180631f6b`–`0x180631f8d` |
-| Tape Stop | `duration` | already **seconds**, passed through | inline case 7 |
+| Tape Stop (id 4) | `duration` | already **seconds**, passed through | inline case 7 |
+| Tape Stop **Ex** (id 10) | `duration`, `preroll`, `window` | **beats** → `sec = beats · 60/BPM`, all three | `0x180632170`–`0x18063218a` |
 | Bit Crusher | `rate` | raw sample count, passed through | `0x180630d10` |
 | LPF / HPF | `freqLo/Hi` | Hz, plus the knob exponent of §4.2 | `0x180630110` |
 
@@ -424,7 +503,57 @@ The wrapper then does `snappedStart = notePos - offset` (`0x1806310ea`) and hand
 
 **How much this actually changes.** On `2229_kamui_tjhangneil` MXM: **nothing**. Its single Retrigger note lands exactly on a period boundary (`offset` = 0), and its 28 Echoes are note-locked anyway, so the render is bit-identical with and without the snap. The behaviour was verified instead on `0001_albida_muryoku` 1n, where 6 Retrigger notes are off-grid and 0.89 % of output samples change, first at 20.138 s.
 
+**Scored against captures, and confirmed.** With `scripts/shared/reference/ksh` expanded to 713 gameplay folders, 282 reference-matched charts have at least one off-grid Retrigger note on the same difficulty that was captured. Scoring Retrigger's exclusive-frame gain (`dry − render`, higher = closer to the reference) with the snap on versus `--no-grid-snap`, over the 14 best-aligned charts (align corr ≥ 0.15, ~3800 exclusive frames total — `1954_treajourney_chubay`, `2149_maxflavor_emocosine`, `2236_geneinoshousitsu_xceon`, `1948_endgame_yutaimai`, `2161_exlipxe_kameria`, `1799_mousa_ushiee`, `1694_2094_yutablack`, `2111_8vituniverse_lime`, `1763_azalea_blacky`, `1854_clamare_maxmaximizer`, `1842_sparkyspark_kamomesano`, `1710_thekingofred_hommarju`, `2123_allegrosaetta_amatsuka`, `1701_partystage_kayuki`):
+
+```
+chart                          snap ON   snap OFF   delta
+1954_treajourney_chubay         +2.887    +2.094    +0.793
+2149_maxflavor_emocosine        +2.920    +2.065    +0.855
+2236_geneinoshousitsu_xceon     +2.734    +1.728    +1.006
+1948_endgame_yutaimai           +3.274    +2.594    +0.680
+2161_exlipxe_kameria            +2.675    +1.722    +0.953   (see note)
+1799_mousa_ushiee               +4.311    +2.928    +1.383
+1694_2094_yutablack              +3.452    +2.345    +1.107
+2111_8vituniverse_lime           +2.749    +1.806    +0.943
+1763_azalea_blacky               +2.799    +2.144    +0.655
+1854_clamare_maxmaximizer        +3.720    +2.622    +1.098
+1842_sparkyspark_kamomesano      +3.731    +2.418    +1.314
+1710_thekingofred_hommarju       +4.392    +3.611    +0.781
+2123_allegrosaetta_amatsuka      +2.427    +1.856    +0.571
+1701_partystage_kayuki           +2.872    +2.662    +0.210
+
+mean delta: +0.882 dB, 14/14 charts favour snap ON, smallest margin +0.210
+```
+
+**All 14 independent charts prefer grid-snapping**, by a mean 0.88 dB on Retrigger's own exclusive frames — the model is confirmed, not merely "correct per the disassembly". (`1859_spiderdance_tobyfox`, which also has off-grid Retrigger notes, was excluded — its capture aligns at corr 0.056, too weak to trust.)
+
+`2161_exlipxe_kameria` was the lone exception (−1.895 / −1.881, a wash) until the `#BEAT RESOLUTION` bug of §5.3 was fixed — it is one of the 19 charts that bug affected. It now scores +2.675 / +1.722 and falls in line.
+
 One caveat that this exposed: the engine tracks positions in **integer samples** with a truncating `samplesPerBeat`, while `Timeline.samples()` converts through float seconds. On charts whose BPM does not divide 2646000 evenly the two drift apart, and the offsets that fall out are a few tens of samples where they should be zero. Inaudible, but it means `grid_snap_offset` can fire spuriously with a tiny value. Fixing it properly means giving `Timeline` an integer-sample clock.
+
+### 5.3 `#BEAT RESOLUTION` — cells per beat is per-chart, and assuming 48 corrupts an entire chart
+
+A `.vox` position is `measure,beat,cell`. **How many cells make a beat is a property of the chart**, declared by the optional `#BEAT RESOLUTION` tag, and it is not always 48:
+
+```
+#BEAT RESOLUTION   charts (of 8107)
+48 (tag absent)    8088
+144                   1
+240                  10
+480                   8
+```
+
+Only 19 charts — 0.2 % — but on those, a renderer assuming 48 gets **every time in the chart wrong by the ratio**, 10x on a 480 chart. Note starts, lengths, BPM boundaries and laser times all scale together, so this is not a subtle drift: every effect starts at the wrong moment and runs an order of magnitude too long.
+
+**Why it took so long to find.** To the metric it does not look like a timing bug — it looks like *every DSP failing at once on a few charts*. `1972_guinevere_penoreri` scored −6 to −10 dB on Echo, Flanger, Gate, SideChain and HPF alike, with its capture aligning fine (corr 0.607). Three separate experiments here flagged the same charts as outliers and worked around them. What identified it was **listening**: "an effect gets applied and never ends", pinned to the first FX-L hold at measure 15 — a one-beat (0.267 s) Gate being stretched to 2.667 s.
+
+Hence the rule in §0 of the handoff: the metric ranks, it does not diagnose. A chart broken by one wrong constant and a chart with several bad DSPs are indistinguishable to it, and excluding the outlier is the wrong reflex.
+
+**Blast radius.** Four of the nine affected folders have captures, and all four had reached experiment sets here — §8.1's laser-mode comparison (all four, three of them its worst results), the `#TRACK AUTO TAB` scoring (three, as its regressions), and §5.2's grid-snap table (`exlipxe_kameria`, its lone exception). All have been re-run; figures quoted from those sections before the fix are void.
+
+After the fix, `guinevere` scores positively on every effect region it contains **except Wobble**, which stays negative — matching the known, chart-independent Wobble defect (`HANDOFF.md` §2.1). A chart that was anomalous in every dimension now fails in precisely the one way every other chart does, which is the strongest evidence the fix is right.
+
+`scripts/shared/vox.py` (the notes and camera converters) has always read the tag correctly; only `apply_chart.py` hardcoded it. `Timeline` now takes the resolution from the chart, with `res=` as an override.
 
 ## 6. Reference implementation
 
@@ -448,20 +577,40 @@ Output defaults to Vorbis `.ogg`; the `-o` extension picks the container. The en
 It also reproduces the parts of the chain that live *outside* the effect generator: the device ParamEq that is the default laser sound, its 80 ms lag and its music duck (§7.1), and the layered SE (§6.1). The diagnostics that isolate each of those:
 
 ```
---no-peak        skip the device ParamEq entirely
---peak-delay S   knob lag before it reaches the EQ (default 0.08, the engine's value)
---peak-always    run the EQ during every laser, not only C4 = 0 ones
---peak-post-se   put the EQ after the SE are mixed instead of before
---no-duck        skip the music-voice duck; --duck-rate sets its ramp (default 0.33/s)
---duck-hold      freeze the duck target between lasers (rejected, see 6.1.4)
---slam-index N   which virtical_shot sample a slam plays (0 or 1)
---se-polyphonic  let overlapping slam samples sum instead of restarting one voice
---se-trim X      global multiplier on the header-derived SE gains (default 1.25)
---slam-gain X    override the slam level outright, ignoring its header and the trim
---se-gain X      the same for FX chip samples
+the device ParamEq (7.1)
+  --no-peak        skip it entirely
+  --peak-delay S   knob lag before it reaches the EQ (default 0.08, the engine's value)
+  --peak-always    run it during every laser, not only C4 = 0 ones
+  --peak-post-se   put it after the SE mix instead of before
+  --no-duck        skip the music-voice duck; --duck-rate sets its ramp (default 0.33/s)
+  --duck-hold      freeze the duck target between lasers (rejected, see 6.1.4)
+
+the layered SE (6.1)
+  --no-se          skip them
+  --slam-index N   which virtical_shot sample a slam plays (0 or 1)
+  --se-polyphonic  let overlapping slams sum instead of restarting one voice
+  --se-trim X      multiplier on the header-derived SE gains (default 1.2; the
+                   unexplained ~2 dB of 6.1.4 lives here)
+  --slam-gain X    override the slam level outright, bypassing header and trim
+  --se-gain X      the same for FX chip samples
+
+effect behaviour
+  --laser-mode M   chain | dry | add - how a laser combines with an FX hold (8.1)
+  --no-grid-snap   start Retrigger at the note instead of the grid boundary (5.2)
+  --no-persist     restart each effect's counter per note instead of resuming (4.9)
+  --no-auto-tab    skip #TRACK AUTO TAB spans (6.3)
+  --no-tapestop-ex leave Tape Stop Ex notes dry (4.6b)
+  --tapestop-ex-floor X   Tape Stop Ex envelope floor, the one fitted value (4.6b)
+  --mix-scale X    scale every effect's wet/dry mix parameter
+  --no-stage-clip  keep float precision between stages instead of int16 (8.1)
+
+output
+  -b, --block N    per-block coefficient/LFO update size (default 512)
+  --master-gain X  gain before the hard clip (6.2)
+  --dry PATH       also write the untouched decode
 ```
 
-Track layout in `.vox`: `#TRACK1` = VOL‑L, `#TRACK2` = **FX‑L**, `#TRACK3..6` = BT‑A..D, `#TRACK7` = **FX‑R**, `#TRACK8` = VOL‑R. Cell resolution is 48 per 1/4 note.
+Track layout in `.vox`: `#TRACK1` = VOL‑L, `#TRACK2` = **FX‑L**, `#TRACK3..6` = BT‑A..D, `#TRACK7` = **FX‑R**, `#TRACK8` = VOL‑R. Cell resolution is 48 per 1/4 note **unless the chart says otherwise** — see §5.3, and do not hardcode it.
 
 ```
 FX    C0 timing   C1 length(cells, 0=chip)   C2 chip:sample / hold:effect+2   C3 cells-per-chain
@@ -472,7 +621,7 @@ laser C0 timing   C1 position (v10 0..127, v12 0.0..1.0)   C2 node type (0 mid/1
 
 **C4 is the laser effect, not C7.** C7 is the curve type; both range 0..5 in practice, which made the mistake look plausible for a while. Using C7 put filters at the wrong times with the wrong indices over the whole chart.
 
-Not yet handled: `#TRACK AUTO TAB` (applies FX‑hold effects to lasers, with the parameter ramp from `#TAB PARAM ASSIGN INFO`) and `#TRACK ORIGINAL L/R`.
+Not yet handled: `#TRACK AUTO TAB` (applies FX‑hold effects to lasers, with the parameter ramp from `#TAB PARAM ASSIGN INFO`) and `#TRACK ORIGINAL L`/`#TRACK ORIGINAL R`. §6.3 has the corpus-wide usage numbers for both and a corrected read of how the two sections relate.
 
 Requires `numpy` (and optionally `scipy` for faster IIR), plus `ffmpeg` for `.s3v` decoding.
 
@@ -524,7 +673,7 @@ Index 0 is the only entry with a slow (228 ms) attack — everything else attack
 12 male "hey"          13 male "yeah"   14 fireworks
 ```
 
-On `2229_kamui` MXM that is **3 sampled chips out of 228** — 110 of 111 FX‑L chips carry C2 = 0. There is no "default sample" concept; an earlier revision of this document claimed one and was wrong.
+On `2229_kamui` MXM that is **3 sampled chips out of 228** — 110 of 111 FX‑L chips carry C2 = 0. There is no "default sample" concept.
 
 Index 1 (`fs01_virtical_se02`) is accounted for by this table: it is chip sample 1, "big snare (quiet)", noted as possibly unused.
 
@@ -707,7 +856,7 @@ What was ruled out for the missing 2 dB:
 
 The metric can only see the SE-to-music *ratio*, so a constant 0.8 on the music path would be indistinguishable from a constant 1.25 on the SE path. Nothing found so far puts one there.
 
-**How `apply_chart.py` uses this.** `load_s3p` now returns a 4th field per sample, its header gain (`s3v_gain`), and each SE is mixed at `header_gain * --se-trim`. The trim defaults to **1.25**, which is exactly the unexplained 2 dB and nothing else — set `--se-trim 1.0` to hear what the files literally say. `--slam-gain` / `--se-gain` still exist but are now *overrides* that bypass both. The slam's level is read from `virtical_shot.s3p` rather than from the `general_sampler` copy the audio is loaded from, because the two banks disagree on index 1.
+**How `apply_chart.py` uses this.** `load_s3p` returns each sample's header gain (`s3v_gain`), and every SE is mixed at `header_gain * --se-trim`. The trim carries the unexplained 2 dB and nothing else — `--se-trim 1.0` plays what the files literally say. `--slam-gain` / `--se-gain` are *overrides* that bypass both. The slam's level is read from `virtical_shot.s3p` rather than the `general_sampler` copy the audio loads from, because the two banks disagree on index 1.
 
 That split is deliberate: the ratio between samples is derived and should not be touched, while the one number that is still a fit sits in one place with its own flag. Scores are unchanged — `0.5513/0.2239 * 1.25` gives 1.796, the same as the old fitted `0.65/0.25`.
 
@@ -753,11 +902,43 @@ for each sample (SSE, 4 at a time):
     x = min(max(x, -limit), +limit)
 ```
 
-Despite the name there is no knee, no lookahead and no release — it is a **gain followed by a hard clip**. That matters for level decisions: the shipped game clips its own output, so mixing SE hot enough to occasionally clip is authentic, not a rendering artefact. An earlier revision of this document chose an SE level of 0.25 specifically to avoid clipping; that reasoning was wrong and made the slams inaudible. `--master-gain` exposes the same gain-then-clip stage.
+Despite the name there is no knee, no lookahead and no release — it is a **gain followed by a hard clip**. That matters for level decisions: the shipped game clips its own output, so mixing SE hot enough to occasionally clip is authentic rather than a rendering artefact — picking a level low enough to never clip makes the slams inaudible. `--master-gain` exposes the same gain-then-clip stage.
 
----
+### 6.3 `#TRACK AUTO TAB`, `#TAB PARAM ASSIGN INFO`, `#TRACK ORIGINAL L/R` — what they are and how common they are
 
-## 7. Calibration against a capture of the real game
+`#TRACK AUTO TAB` is now applied by `apply_chart.py` (on by default, `--no-auto-tab` disables) — worth **+1.07 dB** over the spans it covers, improving 11 of 11 capture-matched charts measured. Its companion parameter sweep and `#TRACK ORIGINAL L/R` remain unhandled. Corpus-wide usage (all 8107 charts in `data/music`, every difficulty):
+
+```
+#TRACK AUTO TAB          non-empty in 2738 charts (33.8 %)
+#TAB PARAM ASSIGN INFO   present (24 rows) in every chart, but only 431 charts (5.3 %) have any
+                         row whose param-index/bounds columns (C1-C3) are actually nonzero
+#TRACK ORIGINAL L/R      non-empty in 2488 charts (30.7 %)
+```
+
+**`#TAB PARAM ASSIGN INFO` has nothing to do with the ordinary tab-laser knob** (`#TAB EFFECT INFO`, C4 = 1..5), which is plain linear interpolation of laser position — see §4.2. It belongs to this mechanism only. Layout, from `voxread.c`'s section table and cross-checked against `0002_broken_iroha` 4i (the smallest chart with a nonzero row):
+
+```
+#TAB PARAM ASSIGN INFO, one row per #FXBUTTON EFFECT INFO slot (24 rows = 12 pairs x 2, always present):
+  C0  effect-pair index, 0-indexed (0..11) - a positional counter, never anything but
+      0,0,1,1,2,2,...,11,11 in any shipped chart
+  C1  index of the pair's own parameter to modulate (0 = none configured)
+  C2/C3  the bounds that parameter is swept between
+
+#TRACK AUTO TAB rows (tabsep, same track-note shape as an FX-button hold):
+  C0 timing   C1 length (cells)   C2 effect index, **2-INDEXED** - pair = C2 - 2,
+                                     exactly like an FX hold's own C2
+```
+
+**The two sections use different index bases**, which is the easy mistake here — `#TAB PARAM ASSIGN INFO`'s C0 is 0-indexed, `#TRACK AUTO TAB`'s C2 is 2-indexed. Two corpus checks settle the latter:
+
+* **Range.** Across the 2128 AUTO TAB rows in charts that also carry modulation, C2 spans **2..13** — twelve consecutive values for twelve pairs. A 0-indexed reading cannot place C2 = 12 or 13. (A stray `0` and five `254`s also occur, the latter looking like the FX chip column's 255 "none" sentinel.)
+* **Correlation.** Read as 2-indexed, a span lands on a pair carrying a modulation entry **40.7 %** of the time (867/2128); read as 0-indexed, **13.1 %** — about chance.
+
+Worked example: `0002_broken_iroha`'s single AUTO TAB row `021,03,00  96  8` selects pair `8-2` = **6**, which is exactly the pair its one nonzero assign row modulates (`6, 3, 3.00, 0.50` — param 3 of a Flanger, its period, swept 3.00 → 0.50 measures). The laser borrows a Flanger and sweeps its rate as the knob moves.
+
+Read together: **`#TRACK AUTO TAB` gives a laser span an effect pair to run; `#TAB PARAM ASSIGN INFO` optionally attaches "laser position drives this pair's Nth parameter between these bounds" to that same pair.** The ~59 % of spans landing on an unmodulated pair are the "run it at its authored parameters" case. The runtime consumer of the bounds was never located, so the sweep is documented but unimplemented.
+
+**`#TRACK ORIGINAL L`/`#TRACK ORIGINAL R` are very unlikely to matter for audio at all.** Per `vox_format.md`, these carry the same field layout as `#TRACK1`/`#TRACK8` but hold only the *un-interpolated control points* of a curved laser, where `#TRACK1`/`#TRACK8` already carry the game's own fully-interpolated point sequence. Since the audio engine (and `apply_chart.py`) only ever needs the interpolated curve the game itself will play — which is exactly what `#TRACK1`/`#TRACK8` already are — `#TRACK ORIGINAL L/R` reads as chart-editor authoring metadata (so a curve can be reloaded and re-edited from its original control points) rather than anything the playback path consumes. Recommend closing this one without implementation work unless a counter-example turns up.
 
 `scripts/audio/reference/kamui_goal.ogg` is a recording of the actual cabinet playing this chart. It is **not** a clean render — it is polarity‑inverted, Ogg‑coded, and its clock drifts against the game's audio by **+0.346 samples/second (7.9 ppm)**, i.e. +45 samples over the track. So no sample‑exact diffing: coherent averaging over 124 slams still gave correlations ≤ 0.06.
 
@@ -777,7 +958,7 @@ The idle column gets *worse* between the last two rows purely as a normalisation
 
 ### 7.1 The default laser filter — transcribed
 
-**This is now read out of the binary, not fitted.** The path the earlier revision could not find does not go through the SVO effect generator at all; it goes through the gameplay event dispatcher and the sound device.
+**Read out of the binary, not fitted.** This path does not go through the SVO effect generator at all — it goes through the gameplay event dispatcher and the sound device.
 
 `FUN_180407200` (`Game::GameAudio::Update`, vtable slot 1 @ `0x1808cb848`) walks a vector of 28‑byte gameplay events. The record is
 
@@ -873,11 +1054,11 @@ The two that matter most, both on the SE side (§6.1.1 has the detail):
 
 And the rest:
 
-* **Pitch Shift (`.vox` id 9)** and the **composite kind 14 (`.vox` id 13)** are identified but not transcribed to the sample level. Kind 14 re‑enters the dispatcher at `0x180633360`, i.e. it is the "parameters animate over the note" path rather than a distinct DSP. Observed chart ranges across all 8103 charts, if you want to probe it: id 13 uses `p1 ∈ [0,100]` (mix), `p2 ∈ [-24,24]`, `p3 ∈ {0, 0.5, 1, 2}` (316 occurrences); id 9 uses `p1 ∈ [4,100]`, `p2 ∈ [-12,100]` (1283 occurrences).
-* **Tape Stop Ex (`.vox` id 10, `0x180640c20`)** is structurally understood (pre‑roll + windowed slow‑down) but the exact envelope constants were not fully transcribed.
-* **The knob value feeding laser filters** comes from `#TAB PARAM ASSIGN INFO` and the laser segment interpolation; I documented the 0..127 → cutoff mapping but not the laser‑position → 0..127 assignment table.
-* Block size in the game is the audio device's callback size (`gen+0x1a0`). Since coefficients and LFO values update per block, output is *block‑size dependent*. `sdvx_fx.py` defaults to 64 frames (`--block`); pick the same value if you are diffing against a capture.
-* ~~The chart's first integer on Retrigger/Echo/Gate rows is consumed by the wrapper for musical grid snapping, not by the DSP.~~ **This was wrong on every count and is corrected in §5.2.** The leading integer on a Retrigger/Echo row is the repeat **count**, passed to the DSP verbatim (`mov [rsp+0x30], r13d` at `0x180631285`, loaded from the param vector at `0x1806311aa`). Gate rows have no leading integer at all — their first field is the mix. The grid snap is a separate thing that takes no chart field, and it applies to Retrigger alone.
+* **Pitch Shift (id 9)** — algorithm identified (PSOLA, §4.10) but **not implemented**. The upward-shift grain spacing and the cross-call ring-buffer indexing were not extracted.
+* **Composite kind 14 (id 13)** — partly transcribed. Setup case `0xd` in `FUN_18022db60` appends one 12-byte `{i32 tick, float value}` **keyframe** per definition into a dedicated vector at `this+400`, separate from §3's parameter-vector table. At playback it is dispatched through the ordinary per-block switch (`case 0xe`), so it behaves like a normal in-place effect rather than a meta-wrapper. Wrapper `FUN_180632c10` binary-searches that vector for the current note, then builds a `std::function<float(float)>` over the two neighbouring keyframes — constant if their values match within `FLT_EPSILON`, linear otherwise. **Unresolved:** what the interpolated value ultimately drives; the wrapper continues for hundreds of lines of closure machinery past that point. Chart ranges, if you want to keep probing: `p1 ∈ [0,100]` (mix), `p2 ∈ [-24,24]`, `p3 ∈ {0, 0.5, 1, 2}`, 316 occurrences. `p2` reads plausibly as semitones, making an animated pitch bend the leading guess — speculative until the consumer is traced.
+* **Tape Stop Ex (id 10)** — transcribed, implemented, scored (§4.6b). Its envelope floor (`this+0x46`) and a phase-tracking field (`this+0x224`) are untraced; the metric cannot pin the floor's value.
+* **Block size** in the game is the audio device's callback size (`gen+0x1a0`). Since coefficients and LFO values update per block, output is *block-size dependent*. `sdvx_fx.py` defaults to 64 frames (`--block`); match it when diffing against a capture.
+* **The leading integer on a Retrigger/Echo row is the repeat `count`**, passed to the DSP verbatim (`0x180631285`, loaded at `0x1806311aa`) — not a grid-snap field. Gate rows have no leading integer at all; their first field is the mix. The grid snap takes no chart field and applies to Retrigger alone (§5.2).
 
 ### 8.1 Effect combination — what stacks, what overwrites
 
@@ -909,9 +1090,48 @@ and the laser dispatcher `FUN_18062ea60` then runs against that restored source 
 
 Against the capture that model loses. `chain` scores best and is the default; `dry` and `add` were both measurably worse. So `apply_chart.py` ships the model the binary appears to contradict.
 
-**The per-model scores were never written down** — only the verdict. That is a gap in this document, not a missing experiment: re-run `--laser-mode chain|dry|add` through `tools/metric.py` and record the three numbers here. Until then, treat "chain wins" as a measured claim whose margin is unknown.
+**The per-model scores, now recorded.** `2229_kamui` MXM, whole-track `metric.py` (mean |dB|, lower = closer):
 
-Possible resolutions, none of them checked: the restore may apply only to the FX sub-chain and not to the laser stage; `param_2` may already point at the FX result rather than the original track by the time it is restored; or the overlap on this one chart may be too small to separate the models cleanly, in which case the measurement is weaker than it looks. Anyone reopening this should start by counting how many frames of `2229_kamui` actually have an FX hold and a C4 = 1..5 laser live simultaneously — `tools/blendfit.py` already reports the FX+laser and FX-L+FX-R overlap cases for exactly this reason.
+```
+chain   1.822   <- shipped default
+add     1.829
+dry     1.834
+```
+
+`chain` does win on this chart, but only just, and `blendfit.py`'s overlap count explains why the margin is thin: of kamui's 6429 active frames, only **30** (0.47 % of the track, 13.3 % of its 226 tab-laser frames) have an FX-button hold and a C4 = 1..5 laser live at once. That confirms the suspicion in the paragraph above — on this one chart the measurement is too small to mean much, and the whole-track number is mostly noise on the question this section is actually about.
+
+**Scored properly, across the corpus.** With the expanded `scripts/shared/reference/ksh` (713 folders), the overlap the kamui capture couldn't supply is easy to find elsewhere — 343 of 357 reference-matched charts have *some* FX-hold/tab-laser overlap, 35564 frames (~826 s) total. Rendering the 20 charts with the most overlap in all three modes and scoring the overlap frames themselves (not exclusive-of-overlap, since the overlap *is* the question) against each chart's own capture, with low-confidence alignments (corr < 0.15) dropped:
+
+```
+chart                              overlap n   chain     dry      add
+1972_guinevere_penoreri                77     +2.923   +2.491   +0.436
+2240_explore_haruichiban               43     +3.018   +1.286   +1.262
+2225_waltzofdahlia_penoreri            80     +2.786   +2.339   +1.077
+2161_exlipxe_kameria                   68     +2.685   +2.141   +0.022
+2154_entropicenhancement_chubay       529     +2.955   +2.297   +1.108
+2051_birth_yuasahina                  459     +1.660   +1.762   -0.017
+1835_shera_myukke                     415     +4.090   +1.885   +2.014
+2119_circuitsurfer_korsk              402     +3.046   +2.141   +1.329
+2244_kakugoseyo_makishiukyou          353     +2.414   +2.246   +1.582
+2177_lichtsaule_kameriaphquase        350     +4.293   +2.798   +3.108
+2135_villain_kaname                   349     +2.179   +1.278   +1.414
+1471_helloplanet_sasakure             324     +3.980   +3.817   -0.298
+2190_solareclipse_yutayvya            325     +0.585   +0.062   +0.542
+2059_perfecteater_pon                 299     +1.272   +1.435   +0.531
+2050_bliss_mihairukkey                298     +2.064   +2.601   -0.477
+2112_cumulonimbus_hidra               285     +3.354   +2.962   +0.682
+
+16 charts, 4656 overlap frames:
+  chain  mean +2.706   frame-weighted +2.696   wins 13/16
+  dry    mean +2.096   frame-weighted +2.098   wins  3/16
+  add    mean +0.895   frame-weighted +0.978   wins  0/16
+```
+
+* **`chain` wins on every framing** — mean, frame-weighted mean, and 13 of 16 charts. The three preferring `dry` (`birth`, `perfect_eater`, `bliss`) do so by 0.1–0.5 dB, inside the spread.
+* **`add` is dead.** Zero wins of 16, ~1.8 dB behind `chain`. Parallel combination is ruled out.
+* **Measurement is now the stronger evidence, so the binary reading is what needs re-examining** — specifically whether the source-pointer restore applies only to the FX sub-chain, or whether `param_2` already points at the FX result by the time it is restored.
+
+These numbers postdate the §5.3 fix. Four charts here (`guinevere`, `explore_haruichiban`, `waltz_of_dahlia`, `exlipxe_kameria`) were affected by it, and while broken they scored −8.4 to −1.2, which made `chain` appear to lose on mean and turned this into an apparent coin-flip. Any figure quoted from this section before that fix is void.
 
 **Two consequences that apply whenever effects do stack.**
 

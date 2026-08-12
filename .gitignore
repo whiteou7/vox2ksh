@@ -31,3 +31,7 @@ venv/
 *.swp
 Thumbs.db
 desktop.ini
+
+*.ksh
+*.png
+*.jpg

@@ -518,6 +518,127 @@ def fx_tapestop(L, R, mix, speed, dur_sec, block=64):
 
 
 # --------------------------------------------------------------------------
+# 4.6b  tape stop ex
+# --------------------------------------------------------------------------
+
+# The envelope floor Tape Stop Ex ramps up FROM. In the engine this is a struct
+# field (this+0x46), not a chart column, and what writes it was never traced -
+# so this is the one value in this effect that is FITTED rather than transcribed.
+#
+# Swept against 13 capture-matched charts (audio_engine.md 4.6b). What the data
+# actually supports is narrow: running the effect at all beats not running it by
+# ~2 dB, and a floor of 0.0 is clearly wrong (+1.92 vs +3.2). It does NOT pick a
+# value in between - 0.4/0.5/0.6/0.75 score +3.159/+3.217/+3.234/+3.205, a 0.08
+# dB spread that is noise, and individual charts disagree in opposite directions
+# (steelneedle wants 0.4, pureruby wants 1.0). 0.5 is the middle of a plateau,
+# not a fitted optimum; do not tune it further without new evidence.
+TAPESTOP_EX_FLOOR = 0.5
+
+
+def fx_tapestop_ex(L, R, mix, speed, dur_sec, preroll_sec, window_sec,
+                   floor=None, block=64, lookahead=None):
+    """4.6b Tape Stop Ex - FUN_180640c20. NOT the same shape as fx_tapestop.
+
+    Plain Tape Stop fades OUT to silence while slowing down. This one runs the
+    other way: it ramps UP from `floor` to full level while the playback rate
+    ACCELERATES back to normal, i.e. a spin-up into the beat rather than a
+    grind to a halt. Three phases, gated per block on the note-relative
+    position (the engine keeps it at this+0x214 and adds the block length each
+    call, so the decision uses the position at the END of the block):
+
+        pos <= preroll            untouched dry
+        preroll < pos <= preroll+window   the spin-up (below)
+        pos > preroll + window    (1-m)*dry, wet contribution finished
+
+    `duration` cannot actually gate anything: the engine's lower bound is
+    min(preroll, duration), which is never above preroll, and the active branch
+    separately requires pos > preroll. So the column is inert here whatever it
+    holds - kept in the signature because the chart carries it.
+
+    On first activation the engine snapshots the dry signal into a record
+    buffer and plays THAT back, so the wet path is a recording of the audio at
+    the effect's start, not the live input.
+
+    That snapshot is taken from the TRACK, not from the note, and it is up to
+    `window` long - which routinely runs past the note's own end. Pass
+    `lookahead=(fullL, fullR, offset)` (the caller's whole track plus where this
+    slice starts in it) so the recording can extend past the slice the way the
+    engine's does. Without it the tail of the recording repeats one clamped
+    sample, which on a short note is a DC buzz rather than audio.
+    """
+    m = mixof(mix)
+    speed = clampf(float(speed), 1.0, 10.0)
+    window = clampf(float(window_sec), 0.1, 2.0) * SR
+    preroll = int(max(float(preroll_sec), 0.0) * SR)
+    floor = TAPESTOP_EX_FLOOR if floor is None else float(floor)
+
+    n = L.size
+    outL, outR = L.copy(), R.copy()
+    if window <= 0.0 or n <= 0:
+        return outL, outR
+
+    # Pre-pass: how many recorded samples the whole window will consume. The
+    # engine runs this once, before the first output sample, purely to get the
+    # total (it is what positions the read head below). Note it integrates the
+    # rate ramp in the opposite direction from the main loop - the totals match
+    # either way, which is why the engine can get away with it.
+    frac, total = 0.0, 0
+    i = 0
+    while i < window:
+        if frac < 1.0:
+            total += 1
+            frac += (i * speed) / window + 1.0
+        frac -= 1.0
+        i += 1
+
+    rec_l = rec_r = None
+    base = 0            # read head: the playback ENDS on the window boundary
+    frac, phase, written = 0.0, 0, 0
+
+    for i0, i1 in blocks(n, block):
+        pos = i1                        # position at the end of this block
+        if pos <= preroll:
+            continue                    # dry, untouched
+        if pos > preroll + window:
+            outL[i0:i1] = (1.0 - m) * L[i0:i1]
+            outR[i0:i1] = (1.0 - m) * R[i0:i1]
+            continue
+
+        if rec_l is None:               # one-shot snapshot (this+0x45 flag)
+            cap = int(window) + 1
+            if lookahead is not None:
+                fl, fr, off = lookahead
+                a = off + i0
+                rec_l = fl[a:a + cap].copy()
+                rec_r = fr[a:a + cap].copy()
+            else:
+                rec_l = L[i0:i0 + cap].copy()
+                rec_r = R[i0:i0 + cap].copy()
+            base = int(window) - total
+
+        for i in range(i0, i1):
+            env = (written / window) * (1.0 - floor) + floor
+            if env > 1.0:
+                env = 1.0
+            if frac < 1.0:
+                phase += 1
+                frac += (window - written) * speed / window + 1.0
+                if frac <= 1.0:
+                    frac = 1.0
+            frac -= 1.0
+            s = base + phase
+            if s < 0:
+                s = 0
+            elif s >= rec_l.size:
+                s = rec_l.size - 1
+            outL[i] = (1.0 - m) * L[i] + m * env * rec_l[s]
+            outR[i] = (1.0 - m) * R[i] + m * env * rec_r[s]
+            written += 1
+
+    return outL, outR
+
+
+# --------------------------------------------------------------------------
 # 4.7  side chain
 # --------------------------------------------------------------------------
 
@@ -656,6 +777,7 @@ EFFECTS = {
     "gate":          (fx_gate,           "mix,steps,periodSec"),
     "flanger":       (fx_flanger,        "mix,delayMs,rate,depthPct,stages"),
     "tapestop":      (fx_tapestop,       "mix,speed,durSec"),
+    "tapestop_ex":   (fx_tapestop_ex,    "mix,speed,durSec,prerollSec,windowSec"),
     "sidechain":     (fx_sidechain,      "mix,periodSec,attack,hold,release"),
     "wobble":        (fx_wobble,         "mix,filterType,waveType,freqA,freqB,periodSec,Q"),
     "bitcrush":      (fx_bitcrush,       "mix,rate"),

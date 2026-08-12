@@ -103,6 +103,16 @@ Exactly what it sounds like: the record player being switched off.
 
 The game records the incoming audio into a buffer, then plays it back progressively slower — the pitch drops as the playback rate decays — while simultaneously fading the volume to zero over the given duration. Unlike most other effects, its duration is given in **plain seconds**, not beats.
 
+### Tape Stop Ex — the same name, the opposite motion
+
+There is a second Tape Stop in the format, and assuming it's "Tape Stop with extra knobs" is wrong twice over.
+
+It runs **backwards** relative to the first one. Where Tape Stop slows to a halt and fades *out*, Tape Stop Ex starts slow and quiet and **speeds up into full volume** — a turntable spinning *up* to speed rather than winding down. It also waits a while before doing anything at all (a "preroll"), then does its spin-up over a set window, then stops contributing.
+
+And its times are in **beats**, where the original Tape Stop's are in seconds. That mismatch is nastier than it sounds: read this effect's numbers as seconds and, on any reasonably fast song, the waiting period outlasts the note itself — so the effect never gets to start, produces silence, and reports no error. It just quietly does nothing. That is exactly what happened here the first time, and it was caught only because a quality score came back *suspiciously unchanged*.
+
+One detail is still guesswork: how quiet it starts. Comparing against real arcade recordings says "not from silence" fairly clearly, but can't pin down whether it starts at half volume or simply never changes volume at all.
+
 ### Side Chain
 
 The rhythmic "pumping" you hear in dance music, where everything ducks on each kick drum.
@@ -395,7 +405,9 @@ python scripts/audio/apply_chart.py data/music/2229_kamui_tjhangneil -d 5m -o ka
 
 Being honest about the edges:
 
-- **Pitch Shift is not implemented.** Charts that use it will report it as skipped.
-- **Tape Stop Ex** (a variant with a pre-roll) falls back to nothing; it's identified but its envelope constants aren't fully transcribed.
-- **This is not sample-exact.** Getting bit-identical output would need the same block size the arcade cabinet's sound card uses, and the game's grid-snapping (it nudges each effect's start backwards to land on a musical beat). Ours starts effects exactly where the chart says. It sounds right; it won't diff to zero.
+- **Pitch Shift is not implemented.** Charts that use it will report it as skipped. We now know *how* it works — it's a standard technique that finds the natural repeating cycle in the sound and overlaps copies of it — but knowing the method isn't the same as having written it.
+- **Tape Stop Ex is implemented now**, and measurably closer to the real thing than leaving it out. One number in it (how quiet it starts) is still fitted against recordings rather than read out of the game.
+- **The composite "keyframed" effect isn't implemented.** We can see it stores a list of time/value checkpoints and smoothly blends between them, but not what the resulting number actually controls.
+- **Lasers borrowing button effects** (the game lets a laser sweep run an FX-button effect for a while) is implemented but **off by default** — the half we understand helps on some songs and hurts on others, and the other half, where the laser's position also slides one of that effect's settings, isn't worked out.
+- **This is not sample-exact.** Getting bit-identical output would need the same block size the arcade cabinet's sound card uses. It sounds right; it won't diff to zero. (Grid-snapping — the game nudging an effect's start backwards onto a musical beat — *is* now implemented, and confirmed against recordings.)
 - **We assume perfect play.** The real game only applies an effect while you're actually holding the button.
