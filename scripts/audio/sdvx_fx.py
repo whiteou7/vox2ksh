@@ -328,10 +328,17 @@ PEAK_DUCK_SLOPE = 0.0025274728          # per knob step over 4..94
 PEAK_DUCK_RAMP = 0.33                   # gain units per second (FUN_1806a2520)
 
 
-def paramq_from_knob(knob):
+def paramq_from_knob(knob, gain_scale=1.0, max_gain_db=None):
     """int knob 0..127 -> (fCenter, fBandwidth semitones, fGain dB).
 
     Transcribed from FUN_1805c7a00 @ 0x1805c7a00.
+
+    `gain_scale`/`max_gain_db` are NOT part of the transcription - the game
+    always uses gain_scale=1.0, max_gain_db=None. They exist so a converter
+    can deliberately tame the default laser sound's resonant boost (reported:
+    audibly loud/distracting "whoosh" at some knob positions) without
+    touching the authentic model everything else measures against. Left at
+    their defaults, this function is bit-identical to the plain transcription.
     """
     v = int(knob)
     v = 0 if v < 0 else (127 if v > 127 else v)
@@ -349,6 +356,9 @@ def paramq_from_knob(knob):
         gain = 15.0 - (fc - 1000.0) * 0.0005      # 15.0 ..  7.5
     if v < PEAK_KNOB_DEADZONE:
         gain = 0.0
+    gain *= gain_scale
+    if max_gain_db is not None and gain > max_gain_db:
+        gain = max_gain_db
     return fc, bw, gain
 
 
@@ -367,11 +377,13 @@ def peak_duck_target(knob):
     return PEAK_DUCK_MAX
 
 
-def fx_laser_peak(L, R, knob=None, block=64, knob_per_block=None):
+def fx_laser_peak(L, R, knob=None, block=64, knob_per_block=None,
+                   gain_scale=1.0, max_gain_db=None):
     """Run the device ParamEq over L/R with a knob curve.
 
     `knob` is the usual list of (seconds, value 0..127) breakpoints;
     `knob_per_block` overrides it with a ready-made per-block array.
+    `gain_scale`/`max_gain_db` tame the resonant boost - see paramq_from_knob.
     """
     nb = (L.size + block - 1) // block
     if knob_per_block is None:
@@ -382,7 +394,7 @@ def fx_laser_peak(L, R, knob=None, block=64, knob_per_block=None):
     sl, sr_ = _new_iir_state(), _new_iir_state()
     outL, outR = L.copy(), R.copy()
     for bi, (i, j) in enumerate(blocks(L.size, block)):
-        fc, bw, gain = paramq_from_knob(kvals[bi])
+        fc, bw, gain = paramq_from_knob(kvals[bi], gain_scale, max_gain_db)
         c = peaking_coeffs_bw(fc, bw, gain)
         outL[i:j] = _iir_run(L[i:j], c, sl)
         outR[i:j] = _iir_run(R[i:j], c, sr_)

@@ -612,6 +612,10 @@ the device ParamEq (7.1)
   --peak-post-se   put it after the SE mix instead of before
   --no-duck        skip the music-voice duck; --duck-rate sets its ramp (default 0.33/s)
   --duck-hold      freeze the duck target between lasers (rejected, see 6.1.4)
+  --peak-gain-scale  multiplies the EQ's resonant gain (default 0.8 - NOT the engine's
+                     1.0; see the deviation note at the end of 7.1)
+  --peak-max-gain    hard ceiling in dB on that gain, applied after the scale above
+                     (default 8 - NOT the engine's unclamped up-to-+15 dB)
 
 the layered SE (6.1)
   --no-se          skip them
@@ -1048,6 +1052,12 @@ Three things the capture confirms independently of the disassembly:
 | the music duck exists | `--no-duck` | 1.924 → **2.195** |
 
 The old fitted curve (`fc(x) = 180·(8400/180)^x`, +4 dB, Q ≈ 1.0) was a fair reconstruction of the table's middle: the table's top entry really is 8400 Hz at knob 122, and 15 semitones of bandwidth is Q ≈ 1.12. It underestimated the gain badly (+4 dB vs +15 dB) because the measurement was a median over smoothed bands, and it missed the dead zone, the delay and the duck entirely.
+
+**Deliberate deviation: the CLI's default gain is now tamed, not authentic.** Everything measured above — 1.924, every row of the delay/duck sweep table, all of §9 — was scored against the plain transcription: `paramq_from_knob`'s own function defaults are still `gain_scale=1.0, max_gain_db=None` (i.e. up to the transcribed +15 dB, unclamped), and that is still what `--peak-gain-scale 1.0`/an unset `--peak-max-gain` mean. But `apply_chart.py`'s CLI now defaults `--peak-gain-scale` to `0.8` and `--peak-max-gain` to `8`, so a plain `apply_chart.py` run renders a *dampened* EQ out of the box, not the transcribed one.
+
+This was a deliberate product choice, not a modelling correction. Investigating a reported "loud, distracting whoosh" at some knob positions (rightmost VOL-L on `2393_alive_dadadaizu` MXM was the reported case) confirmed the boost is authentic — an ablation against the trusted `2229_kamui` capture showed removing/reducing it made kamui's render measurably *worse*, not better, so the transcription is not in doubt. It is simply unpleasant enough for chart-conversion listening that the project chose to trade a bounded amount of authenticity for comfort by default, while keeping the untamed model one flag away.
+
+**Consequence for anyone re-measuring:** `xcheck.py`/`masscheck.py` invoke `apply_chart.py` without passing `--peak-gain-scale`/`--peak-max-gain`, so a fresh corpus run now scores the dampened default, not the transcribed model this section's numbers describe. Pass `--extra="--peak-gain-scale 1.0 --peak-max-gain 15"` to reproduce the authentic numbers above (any `--peak-max-gain` ≥ 15 is equivalent to unclamped, since the transcribed model never exceeds +15 dB).
 
 ### 7.2 SE levels
 

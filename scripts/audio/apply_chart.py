@@ -807,6 +807,19 @@ def main():
                          "round-tripping through int16 as the engine does")
     ap.add_argument("--no-peak", action="store_true",
                     help="skip the default (C4=0) laser peak filter")
+    ap.add_argument("--peak-gain-scale", type=float, default=0.8,
+                    help="NOT authentic - multiplies the default laser EQ's resonant "
+                         "boost (default %(default)g; the transcribed engine value is "
+                         "1.0, up to +15 dB - pass --peak-gain-scale 1.0 for that). The "
+                         "default peak filter can produce a loud, distracting 'whoosh' "
+                         "at some knob positions; this tames it for listening comfort. "
+                         "Everything in specs/audio_engine.md §7.1/§9 was measured at "
+                         "1.0 - see that section's 'deliberate deviation' note")
+    ap.add_argument("--peak-max-gain", type=float, default=8,
+                    help="NOT authentic - hard ceiling in dB on the default laser EQ's "
+                         "boost (default %(default)g dB; the transcribed engine is "
+                         "unclamped up to +15 dB - pass --peak-max-gain 15 to disable "
+                         "the cap in practice). Applied after --peak-gain-scale")
     ap.add_argument("--master-gain", type=float, default=1.0,
                     help="output gain before the hard clip (the game's "
                          "CGainWithHardLimiter stage). Use e.g. 0.9 to buy headroom")
@@ -1165,7 +1178,9 @@ def main():
               % (active, nb, active * args.block / float(sr), int(peak_kb.max())))
 
     if peak_kb is not None and not args.peak_post_se:
-        L[:], R[:] = FX.fx_laser_peak(L, R, block=args.block, knob_per_block=peak_kb)
+        L[:], R[:] = FX.fx_laser_peak(L, R, block=args.block, knob_per_block=peak_kb,
+                                      gain_scale=args.peak_gain_scale,
+                                      max_gain_db=args.peak_max_gain)
         peak_kb = None
 
     # ---------------- layered SE: laser slams and FX chip notes -------------
@@ -1261,7 +1276,9 @@ def main():
             print()
 
     if peak_kb is not None:      # --peak-post-se only
-        L[:], R[:] = FX.fx_laser_peak(L, R, block=args.block, knob_per_block=peak_kb)
+        L[:], R[:] = FX.fx_laser_peak(L, R, block=args.block, knob_per_block=peak_kb,
+                                      gain_scale=args.peak_gain_scale,
+                                      max_gain_db=args.peak_max_gain)
 
     # Output stage, matching BMSoundLib2017::CGainWithHardLimiter (0x18069f090):
     # multiply by a gain, then hard-clip to +-limit. No knee, no lookahead - the
