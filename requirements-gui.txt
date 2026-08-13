@@ -1,0 +1,8 @@
+# Runtime deps for the Tkinter app (gui/), on top of what scripts/ already
+# needs (numpy - see the top-level README's Requirements section).
+# tkinter itself ships with the standard python.org Windows installer; it is
+# not pip-installable and is not listed here.
+numpy
+
+# Build-only (not needed to just run gui/main.py from source) - see build/README.md.
+# pyinstaller

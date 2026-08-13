@@ -28,6 +28,13 @@ lane-spin tokens computed by ../camera/camera.py into the same grid. Off by
 default so every existing caller (notably notes/xcheck.py) keeps its exact
 prior output; see specs/camera.md for what's approximate about the camera
 values themselves - this module only places them, it doesn't compute them.
+
+`meta`, if given, is a dict of real track metadata (title/artist/effect/
+jacket/illustrator/difficulty/level/m) that overrides the placeholders
+_header() would otherwise write - see its docstring for the exact keys. This
+is how a caller with an actual data source (music_db.xml, for the GUI) gets
+a real header instead of "artist=" left blank; every existing caller passes
+nothing and gets the old placeholder behaviour unchanged.
 """
 
 import argparse
@@ -152,7 +159,7 @@ DIFF_MAP = {"1n": "light", "2a": "challenge", "3e": "extended",
             "4i": "infinite", "5m": "infinite"}
 
 
-def convert(vox_path, out_path, camera=False):
+def convert(vox_path, out_path, camera=False, meta=None):
     chart = vox.load(vox_path)
     tl = chart.tl
 
@@ -236,7 +243,7 @@ def convert(vox_path, out_path, camera=False):
     beat_by_measure = {mm: (num, den) for (mm, num, den) in beat_changes}
 
     lines = []
-    lines.extend(_header(chart, bpm_changes, beat_changes))
+    lines.extend(_header(chart, bpm_changes, beat_changes, meta=meta))
 
     cur_num, cur_den = None, None
 
@@ -307,10 +314,17 @@ def _fmt_bpm(bpm):
     return s if s else "0"
 
 
-def _header(chart, bpm_changes, beat_changes):
+def _header(chart, bpm_changes, beat_changes, meta=None):
+    """`meta` keys, all optional, override the corresponding placeholder:
+    title, artist, effect (chart author, ksh_format.md's name for it),
+    jacket (filename), illustrator, difficulty (light/challenge/extended/
+    infinite - overrides the DIFF_MAP guess from the filename suffix),
+    level (difnum, 1..20), m (audio filename, overrides "dummy.ogg").
+    """
+    meta = meta or {}
     base = os.path.splitext(os.path.basename(chart.path))[0]
     diff_suffix = base.rsplit("_", 1)[-1] if "_" in base else ""
-    difficulty = DIFF_MAP.get(diff_suffix, "infinite")
+    difficulty = meta.get("difficulty") or DIFF_MAP.get(diff_suffix, "infinite")
 
     bpms = sorted(set(b for _t, b in bpm_changes)) or [120.0]
     if len(bpms) == 1:
@@ -320,17 +334,17 @@ def _header(chart, bpm_changes, beat_changes):
     num0, den0 = (beat_changes[0][1], beat_changes[0][2]) if beat_changes else (4, 4)
 
     h = [
-        "title=%s" % base,
-        "artist=",
-        "effect=",
-        "jacket=",
-        "illustrator=",
+        "title=%s" % meta.get("title", base),
+        "artist=%s" % meta.get("artist", ""),
+        "effect=%s" % meta.get("effect", ""),
+        "jacket=%s" % meta.get("jacket", ""),
+        "illustrator=%s" % meta.get("illustrator", ""),
         "difficulty=%s" % difficulty,
-        "level=1",
+        "level=%s" % meta.get("level", "1"),
         "t=%s" % t_val,
         "to=0",
         "beat=%d/%d" % (num0, den0),
-        "m=dummy.ogg",
+        "m=%s" % meta.get("m", "dummy.ogg"),
         "mvol=100",
         "o=0",
         "bg=desert",

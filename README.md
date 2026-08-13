@@ -38,7 +38,14 @@ The scripts locate the game install relative to this directory (`vox2ksh/..`), s
 
 ## Quick start
 
-A Tkinter application is the current work; until it lands, the scripts are the interface.
+The GUI (`gui/`) is the batch/end-user interface: point it at a game or update folder and an output folder, pick songs and difficulties, convert. See [`gui/README.md`](gui/README.md) to run it from source and [`build/README.md`](build/README.md) to package it into an exe.
+
+```bash
+pip install -r requirements-gui.txt
+python gui/main.py
+```
+
+For one chart at a time, or for the diagnostic flags the GUI's Advanced panel exposes, the scripts are still the direct interface:
 
 ```bash
 python scripts/audio/sdvx_fx.py --list

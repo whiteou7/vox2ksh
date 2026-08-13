@@ -25,6 +25,14 @@ venv/
 *.ogg
 !scripts/audio/reference/*.ogg
 
+# GUI build artifacts - regenerable via build/build_assets.py + build/build.py.
+# gui/assets/ holds the staged SE bank + ffmpeg binary (see build_assets.py's
+# docstring for why those are the only two things fetched from outside the repo).
+gui/assets/
+build/dist/
+build/work/
+build/*.log
+
 # Editor / OS
 .vscode/
 .idea/

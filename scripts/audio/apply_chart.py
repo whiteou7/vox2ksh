@@ -610,6 +610,13 @@ def mix_in(L, R, pos, sample, gain, cut=None):
 
 
 def find_ffmpeg():
+    # Checked first so a frozen GUI build can point this at a bundled binary
+    # without needing it on PATH - scripts/shared/_paths.py's find_ffmpeg()
+    # already honours this env var; this module has its own copy (no
+    # scripts/shared import here) so it needs the same check.
+    env = os.environ.get("FFMPEG")
+    if env and os.path.exists(env):
+        return env
     for c in ("ffmpeg", "ffmpeg.exe"):
         p = shutil.which(c)
         if p:
@@ -620,6 +627,17 @@ def find_ffmpeg():
             if "ffmpeg.exe" in fns:
                 return os.path.join(dp, "ffmpeg.exe")
     return None
+
+
+# A GUI build has no console of its own (PyInstaller console=False), and on
+# Windows every subprocess.run of a console program (ffmpeg here) otherwise
+# pops a new console window into existence for the instant it runs - one per
+# call, and a single render calls this a lot (the track, every SE sample in
+# the bank, the final encode), which is what "clicking Convert flashes a lot
+# of terminal windows" was. CREATE_NO_WINDOW suppresses that allocation; it's
+# a no-op when run from an actual terminal (the CLI use case), since there's
+# nothing to additionally hide there.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def decode_audio(src=None, blob=None, what="audio"):
@@ -637,7 +655,8 @@ def decode_audio(src=None, blob=None, what="audio"):
         [ff, "-hide_banner", "-loglevel", "error",
          "-i", src if blob is None else "pipe:0",
          "-f", "s16le", "-ar", str(SR), "-ac", "2", "pipe:1"],
-        input=blob, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        input=blob, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        creationflags=_NO_WINDOW)
     if r.returncode != 0:
         raise SystemExit("ffmpeg failed to decode the %s:\n%s"
                          % (what, r.stderr.decode("utf8", "replace").strip()))
@@ -663,7 +682,7 @@ def encode_pcm(frames, out, sr, quality=6):
         cmd += ["-c:a", "libvorbis", "-q:a", str(quality)]
     cmd += ["-y", out]
     try:
-        subprocess.run(cmd, input=frames.tobytes(), check=True)
+        subprocess.run(cmd, input=frames.tobytes(), check=True, creationflags=_NO_WINDOW)
     except subprocess.CalledProcessError:
         raise SystemExit("ffmpeg failed to encode %s (is libvorbis available in "
                          "this build?). Write a .wav instead." % os.path.basename(out))
@@ -684,11 +703,18 @@ def write_audio(path, L, R, sr, quality=6):
 
 # --------------------------------------------------------------------------
 
-def main():
+def build_arg_parser():
+    """Split out of main() so a caller (the GUI's argspec.py) can introspect
+    the option list - defaults, help text, per-chart vs global - without
+    duplicating it or invoking main() itself."""
     ap = argparse.ArgumentParser()
     ap.add_argument("folder", help="e.g. data/music/2229_kamui_tjhangneil")
     ap.add_argument("-d", "--difficulty", default=None,
                     help="chart suffix: 1n 2a 3e 4i 5m (default: hardest present)")
+    ap.add_argument("-a", "--audio", default=None,
+                    help="path to the .s3v to render (default: <folder>/<song>.s3v). "
+                         "Set this when the chart came from an update that didn't "
+                         "reship its (unchanged) audio - see HANDOFF.md item 1")
     ap.add_argument("-o", "--output", default=None,
                     help="output file; the extension picks the container "
                          "(default <song>_fx.ogg). Use a .wav name for a "
@@ -762,6 +788,12 @@ def main():
                          "picks the container, same as --output")
     ap.add_argument("--no-se", action="store_true",
                     help="skip the layered hit sounds (laser slams / FX chips)")
+    ap.add_argument("--se-bank-dir", default=None,
+                    help="directory holding general_sampler.s3p and virtical_shot.s3p "
+                         "(default: <folder>/../../sound/ver5, i.e. resolved relative "
+                         "to the chart the same way the game install lays it out). Set "
+                         "this when `folder` comes from an update that does not carry "
+                         "the sample bank itself")
     ap.add_argument("--se-gain", type=float, default=None,
                     help="override the level for FX chip samples. By default each "
                          "sample uses the gain in its own S3V0 header (-13.00 dB "
@@ -836,7 +868,11 @@ def main():
                     help="override the level for the laser slam sample. By default "
                          "it is virtical_shot[N]'s own header gain (-5.17 dB -> "
                          "0.5513 for index 0) times --se-trim")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_arg_parser().parse_args()
 
     MODE[0] = args.laser_mode
     STAGE_CLIP[0] = not args.no_stage_clip
@@ -866,7 +902,12 @@ def main():
         vox = next((v for d in order for v in voxes if v.endswith("_%s.vox" % d)), voxes[0])
     vox_path = os.path.join(folder, vox)
 
-    s3v = os.path.join(folder, base + ".s3v")
+    # A chart-only game update can patch a song's .vox without reshipping its
+    # (unchanged) audio - see gui/music_db.py's load_library and HANDOFF.md
+    # item 1. --audio lets a caller supply that .s3v from wherever it actually
+    # found one (typically a fuller/older install) instead of requiring it
+    # sit next to the chart.
+    s3v = args.audio or os.path.join(folder, base + ".s3v")
     if not os.path.exists(s3v):
         raise SystemExit("missing " + s3v)
 
@@ -1191,8 +1232,15 @@ def main():
     #   index 2..14 fs02_shot01..fs14_shot13 -> FX chip notes
     # An FX chip's 3rd chart column selects the sample; 255 / -1 means "default".
     if not args.no_se:
-        s3p = os.path.join(os.path.dirname(os.path.dirname(folder)),
-                           "sound", "ver5", "general_sampler.s3p")
+        # A game-update folder (as opposed to a full install) carries new/changed
+        # data/music entries but not the SE sample bank, which rarely changes -
+        # see HANDOFF.md item 1. --se-bank-dir lets a caller (the GUI) point
+        # straight at wherever it resolved general_sampler.s3p/virtical_shot.s3p
+        # (a bundled copy, or a separate full install) instead of requiring
+        # them next to the chart folder.
+        bank_dir = args.se_bank_dir or os.path.join(
+            os.path.dirname(os.path.dirname(folder)), "sound", "ver5")
+        s3p = os.path.join(bank_dir, "general_sampler.s3p")
         if not os.path.exists(s3p):
             print("note: %s not found, skipping layered SE" % s3p)
         else:
