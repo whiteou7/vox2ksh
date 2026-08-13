@@ -4,7 +4,7 @@ Scope: lane tilt, spin/swing, and top/bottom zoom - the `.vox` tracks that move 
 
 **Status: converter exists. Zoom sign/direction and spin kind/direction are solid; spin length and the zoom scale factor are approximations.** Read [`specs/camera.md`](../../specs/camera.md) first - it explains which pieces are solid and which are honest guesses. **Pretilt (KSM tilting in anticipation of an upcoming laser) is out of scope by direction**: it's triggered by any laser at all, not something the chart data can selectively detect, so it's a game-engine problem rather than a `.vox` -> `.ksh` mapping problem - this converter doesn't attempt to cancel or reproduce it. See specs/camera.md's "Tilt" section.
 
-**Next task, by direction (see [`HANDOFF.md`](../../HANDOFF.md) §2.9)**: re-derive spin length for all seven `roll_type` values from scratch, by regression against `scripts/shared/reference/ksh`'s hand charts - not by trusting `vox_format.md`'s inherited per-type default-duration names, which are already known wrong for at least two types. Treat the vox spec as a hypothesis to verify, the same way the kind mapping and direction rule were independently confirmed at 100% each, rather than assumed.
+**Next task, by direction (see [`specs/camera.md`](../../specs/camera.md), "Spin/swing: length")**: re-derive spin length for all seven `roll_type` values from scratch, by regression against `scripts/shared/reference/ksh`'s hand charts - not by trusting `vox_format.md`'s inherited per-type default-duration names, which are already known wrong for at least two types. Treat the vox spec as a hypothesis to verify, the same way the kind mapping and direction rule were independently confirmed at 100% each, rather than assumed.
 
 | file | what it does |
 |---|---|

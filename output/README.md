@@ -10,8 +10,8 @@ The one input that is *not* regenerable lives elsewhere on purpose — `scripts/
 
 | path | what it is | regenerate with |
 |---|---|---|
-| `work/kamui_dry.wav` | The song's own audio, decoded from `.s3v`. | ffmpeg — see `HANDOFF.md` §5 |
-| `work/goal.wav` | The cabinet capture, decoded from `reference/kamui_goal.ogg`. | ffmpeg — see `HANDOFF.md` §5 |
+| `work/kamui_dry.wav` | The song's own audio, decoded from `.s3v`. | ffmpeg — see [`../scripts/shared/_paths.py`](../scripts/shared/_paths.py) |
+| `work/goal.wav` | The cabinet capture, decoded from `reference/kamui_goal.ogg`. | ffmpeg — see [`../scripts/shared/_paths.py`](../scripts/shared/_paths.py) |
 | `work/best.wav` | Whatever render is currently being scored. Copy a render here. | `apply_chart.py -o` |
 | `work/gs/` | The `general_sampler` bank decoded to individual WAVs. | `python scripts/audio/s3p_decode.py ../data/sound/ver5/general_sampler.s3p output/work/gs` |
 | `*_fx.ogg` | Chart renders (Vorbis by default; pass a `.wav` name for lossless). | `python scripts/audio/apply_chart.py <song folder> -o output/<name>.ogg` |
