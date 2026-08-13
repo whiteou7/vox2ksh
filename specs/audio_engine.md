@@ -415,6 +415,8 @@ The effect's LFO counter is an object member that runs continuously across notes
 
 **Not implemented**, and two pieces are missing for anyone who wants to: the grain-count/hop arithmetic governing overlap density on the upward branch, and the ring-buffer index bookkeeping across calls (`this+0x49` / `this+0x4c` / `this+0x244`). No chart in the reference corpus isolates Pitch Shift long enough to score it, so this section is disassembly-only.
 
+The independent reimplementation of §9 does render this effect, but not by reimplementing the engine's PSOLA — it shells out to a generic pitch-shift library (`librosa` by default, optionally `pyrubberband`/Rubber Band). That is a different kind of approximation, not a second trace of the same DSP, so it neither corroborates nor contradicts anything above and does not appear in §9's agreement/disagreement tables.
+
 ---
 
 ## 5. Chart → DSP parameter conversion
