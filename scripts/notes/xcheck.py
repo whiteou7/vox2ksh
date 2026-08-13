@@ -28,36 +28,15 @@ import convert
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared"))
 from _paths import MUSIC, SCRIPTS, ensure_work
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "audio"))
+from masscheck import match_songs, DIFF_SUFFIX  # noqa: F401 - re-exported below
+
 REF = os.path.join(SCRIPTS, "shared", "reference", "ksh")
 
-# ksh reference filenames -> vox difficulty suffix. inf/grv/hvn/vvd/xcd are
-# all the same difficulty *slot* (the one above EXH) under different
-# game-version skins - see masscheck.py's DIFF_ORDER.
-DIFF_SUFFIX = {
-    "nov": "1n", "adv": "2a", "exh": "3e",
-    "inf": "4i", "grv": "4i", "hvn": "4i", "vvd": "4i", "xcd": "4i",
-    "mxm": "5m",
-}
-
-
-def match_songs():
-    """reference folder name -> data/music folder name, by substring match
-    on the slug with underscores stripped (identical to masscheck.py).
-    """
-    music = {}
-    for d in sorted(os.listdir(MUSIC)):
-        m = re.match(r"^(\d+)_(.*)$", d)
-        if m:
-            music.setdefault(m.group(2).replace("_", ""), d)
-    out = {}
-    for r in sorted(os.listdir(REF)):
-        if not os.path.isdir(os.path.join(REF, r)):
-            continue
-        key = r.replace("_", "")
-        cand = [v for k, v in music.items() if k.startswith(key) or key.startswith(k)]
-        if cand:
-            out[r] = cand[0]
-    return out
+# match_songs / DIFF_SUFFIX now come from scripts/audio/masscheck.py (imported
+# above) rather than being duplicated here. The duplicate had the same
+# ambiguous-title bug masscheck.py's own match_songs used to have - e.g.
+# "akasha" resolving to the wrong same-named song - fixed once, in one place.
 
 
 def find_pairs():

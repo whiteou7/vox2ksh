@@ -18,14 +18,16 @@ Chart -> DSP parameter conversions (all verified against the DLL's wrappers):
     Retrigger / Echo   length  is in BEATS      -> sec = beats * 60/BPM
     Gate               period  is in BEATS      -> sec = beats * 60/BPM
     Side Chain         period  is in BEATS      -> sec = beats * 60/BPM
-    Wobble             period  is in BEATS      -> sec = beats * 60/BPM
+    Wobble             rate    is CYCLES/BEAT   -> sec = (60/BPM) / rate   (reciprocal!)
     Flanger            period  is in MEASURES   -> rate = measures / secPerMeasure
-    Tape Stop          duration is already in SECONDS (no conversion)
+    Tape Stop (id 4)   duration is already in SECONDS (no conversion)
+    Tape Stop Ex (10)  duration/preroll/window are in BEATS
     Bit Crusher        rate is a raw sample count (no conversion)
 """
 
 import argparse
 import collections
+import math
 import os
 import shutil
 import struct
@@ -231,6 +233,66 @@ def parse_fx_pairs(sec):
     return pairs
 
 
+def parse_param_assign(sec):
+    """#TAB PARAM ASSIGN INFO -> {pair_index: [(param_idx, lo, hi), (param_idx, lo, hi)]}.
+
+    Always 24 rows (12 FXBUTTON pairs x 2 chain slots), present whether used
+    or not - unlike #FXBUTTON EFFECT INFO's rows, an all-zero row here is a
+    real "no parameter assigned" entry, not padding to skip. C0 is a
+    positional counter (0,0,1,1,2,2,...), C1 is the 1-based chart-column
+    index of the parameter to sweep (0 = none), C2/C3 the bounds. See
+    audio_engine.md 6.3 / 9.2.
+    """
+    out = collections.defaultdict(list)
+    for line in sec.get("#TAB PARAM ASSIGN INFO", []):
+        parts = [p.strip() for p in line.replace("\t", ",").split(",") if p.strip() != ""]
+        try:
+            vals = [float(p) for p in parts]
+        except ValueError:
+            continue
+        if len(vals) < 4:
+            continue
+        pair = int(vals[0])
+        out[pair].append((int(vals[1]), vals[2], vals[3]))
+    return out
+
+
+def param_assign_curve(sec, tl, n):
+    """Per-sample (value 0..1, active) laser curve from C4=6 laser segments -
+    the #TAB PARAM ASSIGN INFO control source, distinct from the ordinary
+    laser position feeding #TAB EFFECT INFO filters. audio_engine.md 9.2.
+    """
+    values = np.zeros(n, np.float32)
+    active = np.zeros(n, bool)
+    for trk, mir in (("#TRACK1", False), ("#TRACK8", True)):
+        pts = []
+        for line in sec.get(trk, []):
+            f = line.split()
+            if len(f) < 7:
+                continue
+            tick = tl.tick_of(f[0])
+            pos = float(f[1])
+            if pos > 1.0:
+                pos /= 127.0
+            pts.append((tick, pos, int(f[2]), int(f[4])))
+        pts.sort(key=lambda x: x[0])
+        for i in range(len(pts) - 1):
+            a, b = pts[i], pts[i + 1]
+            if a[2] == 2 or a[3] != 6:         # a[3] is C4; only C4==6 drives this
+                continue
+            i0, i1 = max(0, tl.samples(a[0])), min(n, tl.samples(b[0]))
+            if i1 <= i0:
+                continue
+            va = (1.0 - a[1]) if mir else a[1]
+            vb = (1.0 - b[1]) if mir else b[1]
+            seg = np.linspace(va, vb, i1 - i0, endpoint=False, dtype=np.float32)
+            cur = values[i0:i1]
+            upd = (~active[i0:i1]) | (seg > cur)
+            cur[upd] = seg[upd]
+            active[i0:i1][upd] = True
+    return values, active
+
+
 def parse_effects(sec, key):
     """Rows of #FXBUTTON EFFECT INFO / #TAB EFFECT INFO -> [[type, p1, ...], ...]"""
     out = []
@@ -338,6 +400,38 @@ MIXSCALE = [1.0]        # diagnostic: scale every effect's wet/dry mix parameter
 # implementation can be A/B'd against doing nothing. See audio_engine.md 4.6b.
 TAPESTOP_EX = [True]
 
+# Diagnostic: read Wobble's C6 as a period in beats (the old, wrong reading)
+# instead of a rate in cycles per beat. See run_fx and audio_engine.md 4.9.
+WOBBLE_LEGACY = [False]
+
+# Diagnostics for the cross-check against Rosemoe/sdvx-sfx-renderer,
+# audio_engine.md 9.3 - each A/B's a point where the two independent traces
+# disagree. Off by default (ours); flip to try theirs.
+GATE_HARD_BINARY = [False]      # Gate: plain 50% duty cycle instead of the table
+BITCRUSH_CONTINUOUS = [False]   # BitCrusher: one grid for the whole segment
+LASER_EASING = [False]          # apply the laser's C7 curve to the knob, not just position
+TAPESTOP_EX_3PHASE = [False]    # Tape Stop Ex: attack/hold/release instead of preroll/spin-up
+PARAM_ASSIGN_SWEEP = [True]     # #TAB PARAM ASSIGN INFO laser-driven parameter sweep
+PARAM_ASSIGN_BLOCK = 512        # refresh interval, matching the source's own constant
+
+
+def _laser_ease(phase, curve):
+    """Reshape a 0..1 event-local phase per vox_format.md's C7 curve type.
+
+    Only the two sine cases are modelled - types 1 (unknown, no examples) and
+    2 (cubic Hermite, needs slope data the format does not carry) are left
+    linear, matching what an independent reimplementation also does. Anchored
+    to vox_format.md's behavioural description, not to variable names in that
+    other codebase, which turned out to label the two the other way round:
+        C7 = 4  sine ease OUT (start fast, end slow) -> sin(phase*pi/2)
+        C7 = 5  sine ease IN  (start slow, end fast)  -> sin((phase-1)*pi/2)+1
+    """
+    if curve == 4:
+        return math.sin(phase * math.pi / 2.0)
+    if curve == 5:
+        return math.sin((phase - 1.0) * math.pi / 2.0) + 1.0
+    return phase
+
 # Tape Stop Ex's envelope floor is a struct field in the engine (this+0x46) that
 # was never traced to whatever writes it, so unlike every other constant in this
 # file it is fitted rather than transcribed. Kept on its own flag, the same way
@@ -367,7 +461,8 @@ def run_fx(L, R, eff, tl, tick, block, knob=None, lookahead=None):
         return FX.fx_retrigger(L, R, mix, ln * spb, fb, cnt, gt, rel, block=block)
     if t == 2:                                          # Gate
         mix, steps, per = p[0], int(p[1]), p[2]
-        return FX.fx_gate(L, R, mix, steps, per * spb, block=block)
+        return FX.fx_gate(L, R, mix, steps, per * spb, block=block,
+                          hard_binary=GATE_HARD_BINARY[0])
     if t == 3:                                          # Flanger
         mix, delay_ms, per_meas, depth, stages = p[0], p[1], p[2], int(p[3]), p[4]
         return FX.fx_flanger(L, R, mix, delay_ms, per_meas / spm, depth, stages,
@@ -378,19 +473,31 @@ def run_fx(L, R, eff, tl, tick, block, knob=None, lookahead=None):
         mix, per, a, h, rl = p[0], p[1], int(p[2]), int(p[3]), int(p[4])
         return FX.fx_sidechain(L, R, mix, per * spb, a, h, rl, block=block)
     if t == 6:                                          # Wobble
-        ftype, wtype, mix, fa, fb_, per, q = (int(p[0]), int(p[1]), p[2],
-                                              p[3], p[4], p[5], p[6])
-        return FX.fx_wobble(L, R, mix, ftype, wtype, fa, fb_, per * spb, q,
+        # C6 is a RATE in cycles per beat, not a period in beats: the wrapper
+        # takes its RECIPROCAL before scaling by the beat (`fVar19 = 1.0/field`
+        # then `fVar19 * (60.0/BPM)` at 0x180632aa0-ab6), so
+        #     periodSec = (60/BPM) / field
+        # Multiplying instead made the ubiquitous `4.00` row 16x too slow - one
+        # sweep per 4 beats instead of 4 wobbles per beat. audio_engine.md 4.9.
+        ftype, wtype, mix, fa, fb_, rate, q = (int(p[0]), int(p[1]), p[2],
+                                               p[3], p[4], p[5], p[6])
+        period = (float(rate) * spb if WOBBLE_LEGACY[0]
+                  else spb / max(float(rate), 1e-6))
+        return FX.fx_wobble(L, R, mix, ftype, wtype, fa, fb_, period, q,
                             block=block,
                             state=FXSTATE.setdefault(t, {}) if t in PERSIST else None)
     if t == 7:                                          # Bit Crusher
-        return FX.fx_bitcrush(L, R, p[0], int(p[1]), block=block)
+        return FX.fx_bitcrush(L, R, p[0], int(p[1]), block=block,
+                              continuous=BITCRUSH_CONTINUOUS[0])
     if t == 10 and TAPESTOP_EX[0]:                      # Tape Stop Ex
         # mix, speed, then duration/preroll/window in BEATS - NOT seconds. Plain
         # Tape Stop (id 4) really is seconds, but this one goes through wrapper
         # 0x1806320d0, which multiplies all three by 60/BPM at 0x180632170-8a
         # before the call. Reading them as seconds makes preroll outrun every
         # note on a fast chart and the effect silently never fires.
+        if TAPESTOP_EX_3PHASE[0]:
+            return FX.fx_tapestop_ex_3phase(L, R, p[0], p[1], p[2] * spb, p[3] * spb,
+                                            p[4] * spb, block=block, lookahead=lookahead)
         return FX.fx_tapestop_ex(L, R, p[0], p[1], p[2] * spb, p[3] * spb,
                                  p[4] * spb, block=block, lookahead=lookahead,
                                  floor=TSE_FLOOR[0])
@@ -610,6 +717,32 @@ def main():
                          "struct field nothing was traced to, so it is the one "
                          "fitted number in that effect rather than a "
                          "transcribed one - see audio_engine.md 4.6b")
+    ap.add_argument("--wobble-legacy-period", action="store_true",
+                    help="diagnostic: treat Wobble's C6 as a period in beats "
+                         "rather than a rate in cycles per beat. The wrapper "
+                         "takes its reciprocal, so this is the wrong model - it "
+                         "exists to A/B the difference")
+    ap.add_argument("--gate-hard-binary", action="store_true",
+                    help="diagnostic: Gate as a plain 50%% duty cycle instead "
+                         "of the transcribed 16-entry pattern table (audio_engine.md 9.3)")
+    ap.add_argument("--bitcrush-continuous", action="store_true",
+                    help="diagnostic: BitCrusher's hold grid runs once across "
+                         "the whole segment instead of realigning every block "
+                         "(audio_engine.md 9.3)")
+    ap.add_argument("--laser-easing", action="store_true",
+                    help="diagnostic: apply the laser's C7 curve type to the "
+                         "knob value, not just linear interpolation of "
+                         "position (audio_engine.md 9.3)")
+    ap.add_argument("--tapestop-ex-3phase", action="store_true",
+                    help="diagnostic: model Tape Stop Ex as attack/hold/release "
+                         "instead of this project's preroll/spin-up "
+                         "(audio_engine.md 9.3)")
+    ap.add_argument("--no-param-assign-sweep", action="store_true",
+                    help="skip #TAB PARAM ASSIGN INFO's laser-driven parameter "
+                         "sweep on #TRACK AUTO TAB spans (a C4=6 laser drives "
+                         "one parameter of the borrowed effect). On by default: "
+                         "+0.698 dB mean over 16 charts, 5 improved/3 worsened/8 "
+                         "unaffected (audio_engine.md 9.5)")
     ap.add_argument("--no-tapestop-ex", action="store_true",
                     help="diagnostic: leave Tape Stop Ex (.vox id 10) notes dry, "
                          "which is what this renderer did before 4.6b was "
@@ -697,6 +830,12 @@ def main():
     MIXSCALE[0] = args.mix_scale
     TAPESTOP_EX[0] = not args.no_tapestop_ex
     TSE_FLOOR[0] = args.tapestop_ex_floor
+    WOBBLE_LEGACY[0] = args.wobble_legacy_period
+    GATE_HARD_BINARY[0] = args.gate_hard_binary
+    BITCRUSH_CONTINUOUS[0] = args.bitcrush_continuous
+    LASER_EASING[0] = args.laser_easing
+    TAPESTOP_EX_3PHASE[0] = args.tapestop_ex_3phase
+    PARAM_ASSIGN_SWEEP[0] = not args.no_param_assign_sweep
     if args.no_persist:
         PERSIST.clear()
     folder = os.path.abspath(args.folder)
@@ -818,10 +957,21 @@ def main():
     # On by default (--no-auto-tab disables): worth +1.07 dB over the spans it
     # covers, improving 11 of 11 charts measured. It was off while three charts
     # appeared to regress; those turned out to be the #BEAT RESOLUTION bug of
-    # audio_engine.md 5.3, not this feature. #TAB PARAM ASSIGN INFO's
-    # laser-driven parameter sweep is still NOT implemented (its direction was
-    # never resolved), so each borrowed effect runs at its authored parameters -
-    # right for the ~59% of spans with no modulation, incomplete for the rest.
+    # audio_engine.md 5.3, not this feature.
+    #
+    # #TAB PARAM ASSIGN INFO's laser-driven sweep (--no-param-assign-sweep
+    # disables): a C4=6 laser segment drives one parameter of whichever effect
+    # an AUTO TAB span borrows, refreshed every 512 samples - the direction and
+    # formula were resolved by comparison against an independent
+    # reimplementation, then confirmed by measurement: +0.698 dB mean over 16
+    # charts, 5 improved/3 worsened/8 unaffected (no assignment active on that
+    # span). See parse_param_assign / param_assign_curve above and
+    # audio_engine.md 9.5.
+    assign_table = parse_param_assign(sec) if PARAM_ASSIGN_SWEEP[0] else {}
+    assign_curve = assign_val = assign_active = None
+    if PARAM_ASSIGN_SWEEP[0]:
+        assign_val, assign_active = param_assign_curve(sec, tl, n)
+
     if not args.no_auto_tab:
         for line in sec.get("#TRACK AUTO TAB", []):
             f = line.split()
@@ -840,24 +990,60 @@ def main():
             i0, i1 = max(0, tl.samples(t0)), min(n, tl.samples(t0 + length))
             if i1 - i0 < 16:
                 continue
-            for eff in fxdefs[di]:
+            for chain_index, eff in enumerate(fxdefs[di]):
                 if eff is None:
                     continue
-                snap = 0
-                if (not args.no_grid_snap and int(eff[0]) in GRID_LOCKED
-                        and len(eff) > 3):
-                    snap = grid_snap_offset(tl, t0, eff[3])
-                j0 = max(0, i0 - snap)
-                pre = i0 - j0
-                res = run_fx(L[j0:i1].copy(), R[j0:i1].copy(), eff, tl, t0,
-                             args.block, lookahead=(L, R, j0))
                 name = FX_NAMES.get(int(eff[0]), "?")
-                if res is None:
-                    skipped[name] = skipped.get(name, 0) + 1
+
+                assign = None
+                if PARAM_ASSIGN_SWEEP[0] and chain_index < len(assign_table.get(di, [])):
+                    pidx, lo, hi = assign_table[di][chain_index]
+                    if pidx > 0 and pidx < len(eff) and np.any(assign_active[i0:i1]):
+                        assign = (pidx, lo, hi)
+
+                if assign is None:
+                    snap = 0
+                    if (not args.no_grid_snap and int(eff[0]) in GRID_LOCKED
+                            and len(eff) > 3):
+                        snap = grid_snap_offset(tl, t0, eff[3])
+                    j0 = max(0, i0 - snap)
+                    pre = i0 - j0
+                    res = run_fx(L[j0:i1].copy(), R[j0:i1].copy(), eff, tl, t0,
+                                 args.block, lookahead=(L, R, j0))
+                    if res is None:
+                        skipped[name] = skipped.get(name, 0) + 1
+                        continue
+                    L[i0:i1], R[i0:i1] = stage(res[0][pre:]), stage(res[1][pre:])
+                    key = "%s (AUTO TAB)" % name
+                    applied[key] = applied.get(key, 0) + 1
                     continue
-                L[i0:i1], R[i0:i1] = stage(res[0][pre:]), stage(res[1][pre:])
-                key = "%s (AUTO TAB)" % name
-                applied[key] = applied.get(key, 0) + 1
+
+                # swept: re-render every 512 samples with that parameter
+                # interpolated from the laser value over the block (mean of
+                # active samples), falling back to the authored value where
+                # the laser curve is inactive. No grid-snap pre-roll here -
+                # combining both is not worth the complexity for a diagnostic.
+                pidx, lo, hi = assign
+                any_applied = False
+                for bs in range(i0, i1, PARAM_ASSIGN_BLOCK):
+                    be = min(bs + PARAM_ASSIGN_BLOCK, i1)
+                    blk_active = assign_active[bs:be]
+                    blk_eff = eff
+                    if np.any(blk_active):
+                        v = float(np.mean(assign_val[bs:be][blk_active]))
+                        v = max(0.0, min(1.0, v))
+                        blk_eff = list(eff)
+                        blk_eff[pidx] = lo + (hi - lo) * v
+                    res = run_fx(L[bs:be].copy(), R[bs:be].copy(), blk_eff, tl, t0,
+                                 args.block, lookahead=(L, R, bs))
+                    if res is None:
+                        skipped[name] = skipped.get(name, 0) + 1
+                        continue
+                    L[bs:be], R[bs:be] = stage(res[0]), stage(res[1])
+                    any_applied = True
+                if any_applied:
+                    key = "%s (AUTO TAB sweep)" % name
+                    applied[key] = applied.get(key, 0) + 1
 
     # ---------------- lasers: TRACK1 = VOL-L, TRACK8 = VOL-R ----------------
     #
@@ -887,16 +1073,19 @@ def main():
                 #   1..5  : index into #TAB EFFECT INFO, 1-indexed
                 #   6     : no effect
                 filt = int(f[4])
-                pts.append((tick, pos, flag, filt))
+                curve = int(f[7]) if len(f) > 7 else 0     # (v12) C7, absent on v10
+                pts.append((tick, pos, flag, filt, curve))
             pts.sort(key=lambda x: (x[0],))
 
-            # one event per adjacent pair, not crossing a section end (flag 2)
+            # one event per adjacent pair, not crossing a section end (flag 2).
+            # Curve type is taken from the pair's start point - same convention
+            # an independent reimplementation uses (audio_engine.md 9.3).
             events = []
             for i in range(len(pts) - 1):
                 a, b = pts[i], pts[i + 1]
                 if a[2] == 2:
                     continue
-                events.append((a[0], b[0], a[1], b[1], a[3]))
+                events.append((a[0], b[0], a[1], b[1], a[3], a[4]))
 
             # group into runs: contiguous in time and same filter index
             runs = []
@@ -911,13 +1100,19 @@ def main():
             # takes max(effective position) over every laser event, where the
             # effective position is `pos` for VOL-L and `1 - pos` for VOL-R.
             mir = (label == "VOL-R")
-            for (ta, tb, pa, pb, ef) in events:
+            for (ta, tb, pa, pb, ef, curve) in events:
                 i0, i1 = max(0, tl.samples(ta)), min(n, tl.samples(tb))
                 if i1 <= i0:
                     continue
                 va = (1.0 - pa if mir else pa) * 127.0
                 vb = (1.0 - pb if mir else pb) * 127.0
-                seg = np.linspace(va, vb, i1 - i0, endpoint=False, dtype=np.float32)
+                if LASER_EASING[0] and curve in (4, 5):
+                    phase = np.arange(i1 - i0, dtype=np.float64) / max(i1 - i0, 1)
+                    eased = np.sin(phase * math.pi / 2.0) if curve == 4 else \
+                        np.sin((phase - 1.0) * math.pi / 2.0) + 1.0
+                    seg = (va + (vb - va) * eased).astype(np.float32)
+                else:
+                    seg = np.linspace(va, vb, i1 - i0, endpoint=False, dtype=np.float32)
                 np.maximum(peak_knob[i0:i1], seg, out=peak_knob[i0:i1])
                 if ef != 0:
                     peak_off[i0:i1] = True
@@ -1122,8 +1317,20 @@ def _apply_run(L, R, dryL, dryR, run, tabdefs, tl, block, applied, skipped, labe
 
     base = tl.seconds(t0)
     knob = []
-    for (ta, tb, pa, pb, _f) in run:
-        knob.append((max(tl.seconds(ta) - base, 0.0), kv(pa)))
+    for (ta, tb, pa, pb, _f, curve) in run:
+        sa = max(tl.seconds(ta) - base, 0.0)
+        if LASER_EASING[0] and curve in (4, 5):
+            # densify so the DSP's per-block np.interp traces the curve
+            # instead of a straight line between the event's two endpoints -
+            # audio_engine.md 9.3.
+            sb = max(tl.seconds(tb) - base, 0.0)
+            dur = sb - sa
+            nsteps = max(2, int(dur * SR / max(block, 1)))
+            for k in range(nsteps):
+                phase = _laser_ease(k / float(nsteps), curve)
+                knob.append((sa + dur * (k / float(nsteps)), kv(pa) + (kv(pb) - kv(pa)) * phase))
+        else:
+            knob.append((sa, kv(pa)))
     knob.append((max(tl.seconds(run[-1][1]) - base, 0.0), kv(run[-1][3])))
 
     # Which signal does a laser effect read, and how does its result combine with

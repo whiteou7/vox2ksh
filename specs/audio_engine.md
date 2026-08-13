@@ -106,7 +106,11 @@ Which of the five a laser node uses comes from **`#TRACK1`/`#TRACK8` column C4**
 ```
 C4 = 0     peak filter  (the DEFAULT laser sound - see below)
 C4 = 1..5  index into #TAB EFFECT INFO, 1-indexed
-C4 = 6     no effect
+C4 = 6     no filter of its own - but not inert, see §9.2/6.3: an independent
+           reimplementation reads this as the #TAB PARAM ASSIGN INFO control
+           source, i.e. this laser drives a parameter sweep on whichever
+           effect a #TRACK AUTO TAB span is running, rather than applying a
+           laser filter itself
 ```
 
 This matches `FUN_18062ea60`, which keys its map on `noteField[4] - 1`, so C4 1..5 becomes map key 0..4 = the five `#TAB EFFECT INFO` slots.
@@ -413,7 +417,13 @@ counter += N ; if counter >= period: counter -= period
 filterType 0 -> LPF(0x18063df40), 1 -> HPF(0x18063e500), 2 -> BPF(0x18063eb10)
 ```
 
-`6, 0, 3, 80.00, 500.00, 18000.00, 4.00, 1.40` = LPF, log‑triangle, 80 % wet, 500↔18000 Hz, a **4 beat** period, Q = 1.4. The period is in beats like every other period field (`xmm6 = (60/BPM) * period` at `0x180632ab6`), not seconds — at 248 BPM the two readings differ 4x.
+**C6 is a RATE in cycles per beat, not a period** — the one place a period field is inverted. The wrapper takes its **reciprocal** before scaling by the beat (`fVar19 = 1.0 / field[5]` at `0x180632aa0`, then `fVar19 * (60.0 / BPM)` at `0x180632ab6`), so:
+
+```
+periodSec = (60 / BPM) / C6
+```
+
+`6, 0, 3, 80.00, 500.00, 18000.00, 4.00, 1.40` = LPF, log‑triangle, 80 % wet, 500↔18000 Hz, **4 wobbles per beat**, Q = 1.4 — not a 4-beat sweep. Reading it as a period makes that ubiquitous row **16x too slow**, which is what made Wobble the project's one measurably-failing effect for so long: the DSP was correct, the sweep rate was not. See §5.4.
 
 ### 4.10 Pitch Shift — `0x1806429b0`
 
@@ -447,7 +457,7 @@ The wrappers convert chart values to DSP arguments using the BPM at the effect's
 | Retrigger / Echo | `length` | **beats** → `sec = beats · 60/BPM` | `0x180631198`, args at `0x180631271` |
 | Gate | `period` | **beats** → `sec = beats · 60/BPM` | `0x180631bb2`–`0x180631bbb` |
 | Side Chain | `period` | **beats** → `sec = beats · 60/BPM` | `0x180632552` + tail |
-| Wobble | `period` | **beats** → `sec = beats · 60/BPM` | `0x180632ab2`–`0x180632aba` |
+| Wobble | `rate` | **cycles per beat** → `sec = (60/BPM) / rate` — **reciprocal** | `0x180632aa0`, `0x180632ab6` |
 | Flanger | `period` | **measures** → `rate = measures / secPerMeasure` | `0x180631f6b`–`0x180631f8d` |
 | Tape Stop (id 4) | `duration` | already **seconds**, passed through | inline case 7 |
 | Tape Stop **Ex** (id 10) | `duration`, `preroll`, `window` | **beats** → `sec = beats · 60/BPM`, all three | `0x180632170`–`0x18063218a` |
@@ -554,6 +564,24 @@ Hence the rule in §0 of the handoff: the metric ranks, it does not diagnose. A 
 After the fix, `guinevere` scores positively on every effect region it contains **except Wobble**, which stays negative — matching the known, chart-independent Wobble defect (`HANDOFF.md` §2.1). A chart that was anomalous in every dimension now fails in precisely the one way every other chart does, which is the strongest evidence the fix is right.
 
 `scripts/shared/vox.py` (the notes and camera converters) has always read the tag correctly; only `apply_chart.py` hardcoded it. `Timeline` now takes the resolution from the chart, with `res=` as an override.
+
+### 5.4 Wobble's rate — the fix for the long-standing Wobble defect
+
+For most of this project's life Wobble was the one effect that measurably *failed*: it moved the audio more than any other DSP and moved it away from the recording, scoring around +0.02 exclusive gain where every other effect bought +1.3 to +4.1. The DSP transcription (§4.9) was right the whole time. The bug was one line of unit conversion — C6 read as a period in beats instead of a rate in cycles per beat, making the effect run 16x too slow on the standard `4.00` row.
+
+Scored across every capture-matched chart that uses Wobble, on frames where Wobble is the only FX running:
+
+```
+                  mean     median   charts
+rate  (correct)  +0.955    +0.954    13
+period (old)     +0.077    +0.215    13
+
+mean delta +0.878 dB, 13/13 charts improved, none worse (3247 exclusive frames)
+```
+
+The old +0.077 matches the +0.024 previously recorded over a smaller set, so this is the same defect, now closed. Wobble still sits below the other effects in absolute terms, which is expected — it is a resonant sweep and the metric is unforgiving about resonance placement — but it now buys real ground instead of none.
+
+**Credit**: the reciprocal was found by comparing against [`Rosemoe/sdvx-sfx-renderer`](https://github.com/Rosemoe/sdvx-sfx-renderer), an independent IDA-based reimplementation which names the field `frequency` and divides by it. Confirmed in our own disassembly before adopting; `--wobble-legacy-period` restores the old behaviour for A/B.
 
 ## 6. Reference implementation
 
@@ -936,7 +964,7 @@ Despite the name there is no knee, no lookahead and no release — it is a **gai
 
 Worked example: `0002_broken_iroha`'s single AUTO TAB row `021,03,00  96  8` selects pair `8-2` = **6**, which is exactly the pair its one nonzero assign row modulates (`6, 3, 3.00, 0.50` — param 3 of a Flanger, its period, swept 3.00 → 0.50 measures). The laser borrows a Flanger and sweeps its rate as the knob moves.
 
-Read together: **`#TRACK AUTO TAB` gives a laser span an effect pair to run; `#TAB PARAM ASSIGN INFO` optionally attaches "laser position drives this pair's Nth parameter between these bounds" to that same pair.** The ~59 % of spans landing on an unmodulated pair are the "run it at its authored parameters" case. The runtime consumer of the bounds was never located, so the sweep is documented but unimplemented.
+Read together: **`#TRACK AUTO TAB` gives a laser span an effect pair to run; `#TAB PARAM ASSIGN INFO` optionally attaches "laser position drives this pair's Nth parameter between these bounds" to that same pair.** The ~59 % of spans landing on an unmodulated pair are the "run it at its authored parameters" case. The runtime consumer of the bounds was never located in our own disassembly, but the sweep is now implemented and on by default (`--no-param-assign-sweep` to disable), formula and direction taken from an independent reimplementation and confirmed by measurement — +0.698 dB mean over 16 charts. See §9.2/§9.5.
 
 **`#TRACK ORIGINAL L`/`#TRACK ORIGINAL R` are very unlikely to matter for audio at all.** Per `vox_format.md`, these carry the same field layout as `#TRACK1`/`#TRACK8` but hold only the *un-interpolated control points* of a curved laser, where `#TRACK1`/`#TRACK8` already carry the game's own fully-interpolated point sequence. Since the audio engine (and `apply_chart.py`) only ever needs the interpolated curve the game itself will play — which is exactly what `#TRACK1`/`#TRACK8` already are — `#TRACK ORIGINAL L/R` reads as chart-editor authoring metadata (so a curve can be reloaded and re-edited from its original control points) rather than anything the playback path consumes. Recommend closing this one without implementation work unless a counter-example turns up.
 
@@ -1138,3 +1166,82 @@ These numbers postdate the §5.3 fix. Four charts here (`guinevere`, `explore_ha
 *Mix compounds rather than averages.* Every effect computes `out = (1-mix)·dry + mix·wet` against **its own input**, not against the original track. Two effects at 50 % leave the original at 25 %, not 50 %.
 
 *There is an int16 requantisation between stages.* `FUN_18063dc40` writes each result back as clamped, truncated int16 before the next stage reads it through `FUN_18063d9e0` (§2). So a chain can clip **mid-chain**, not only at the output stage — a resonant filter feeding a boosting effect will hard-clip at the boundary in a way an all-float implementation would not reproduce. `apply_chart.py --no-stage-clip` disables it for comparison; the engine does clip, so the default keeps it.
+
+---
+
+## 9. Cross-check against `Rosemoe/sdvx-sfx-renderer`
+
+An independent reimplementation of the same engine (`https://github.com/Rosemoe/sdvx-sfx-renderer`, credited to IDA Pro, ~4000 lines Python). Scope differs: it renders effects and optional click/knob/shot sounds over the song, and does **not** model the SE bank levels, the music duck, or the peak filter's queue delay. Compared here because two independent traces of the same binary agreeing is much stronger evidence than either alone — and where they disagree, at least one is wrong.
+
+### 9.1 Independent agreement
+
+Reached separately, and now corroborated:
+
+* **The device ParamEq (§7.1)** — identical 128-entry centre-frequency table, identical `[80, 16000]` clamp, identical piecewise bandwidth/gain curves, identical `knob < 4` dead zone, and the same `bandwidth / 12` semitones→octaves reading that §7.1 flagged as a documented-behaviour *assumption*. That assumption is now corroborated.
+* **The effect-id table (§3)** — agrees on 11 of 13 ids, including both corrections to the inherited community notes (id 3 is a Flanger, not a Phaser; id 12 is a High Pass Filter, not a Flanger).
+* **Wobble's five waveform cases and its `(1 − Q·0.04)` trim** (§4.9), and its column layout `filterType, waveType, mix, freqA, freqB, rate, Q` — which §2.1 of the handoff had listed as *inferred, not verified*. Now independently confirmed.
+* **Laser value handling** — VOL-R mirrored as `1 − pos`, VOL-L raw, and `max()` across both lasers into one accumulator (§7.1).
+* **`#TRACK AUTO TAB`'s effect column is 2-indexed** (`effect_index - 2`), matching §6.3.
+* **A tab-laser effect reads the FX-button result**, not the dry track — their laser stage filters the already-effected buffer. That is the `chain` model §8.1 measured and the disassembly appeared to contradict. Independent agreement on the *measured* answer strengthens the case that the source-pointer-restore reading is what is wrong.
+* **Tape Stop (id 4) duration in seconds**, and `#BEAT RESOLUTION` honoured per chart (§5.3).
+
+### 9.2 What it answered
+
+* **Wobble's rate field — the project's one measured defect, now closed.** Their code names C6 `frequency` and divides by it. Confirmed in our own disassembly (`1.0 / field[5]`, §4.9) and adopted: 13/13 charts improved, +0.878 dB. Full detail §5.4. This alone justified the comparison.
+* **Composite id 13 is a Pitch Shift variant.** They type it `PITCH_SHIFT_EX` with fields `(mix, semitones, ex_param)`. §8 had reached "an animated pitch bend is the leading guess — speculative until the consumer is traced"; an independent trace landing on the same reading upgrades that from guess to probable. Still not transcribed at the sample level by either side.
+* **A concrete model for the `#TAB PARAM ASSIGN INFO` sweep**, whose direction we could not resolve: they interpolate `min + (max − min) · laserValue` with `laserValue` clamped to 0‥1, select `param1`/`param2` by which effect of the pair is being rendered, and refresh every 512 samples. **Adopted and confirmed**: +0.698 dB mean over 16 charts, on by default now. §9.5.
+* **`C4 = 6` is not "no effect".** They define `FILTER_TYPE_PARAM_ASSIGN = 6`: a laser with C4 = 6 applies no filter of its own but *is* the control source for the param-assign sweep. `vox_format.md` documents C4 = 6 as "no effect", which is right about the laser's own output and wrong about the laser being inert.
+
+### 9.3 Where the two disagreed, and what the corpus decided
+
+Every disagreement in the previous revision of this section has now been A/B'd against the (fixed, expanded) reference corpus rather than left as an open question — `--gate-hard-binary`, `--bitcrush-continuous`, `--tapestop-ex-3phase`, `--laser-easing`, `--param-assign-sweep`, `--no-stage-clip` isolate each one:
+
+| topic | ours | theirs | verdict (16 charts each) |
+|---|---|---|---|
+| **Gate step table** | 16-entry int32 table at `struct+0x10`, default `{32,4}×8`, gain `= table[i]·0.0322` → alternates **1.0304 / 0.1288** (−17.8 dB, not silence) | hard binary on/off, `1.0 / 0.0` | **ours wins, decisively.** −1.452 dB mean, 16/16 charts worse with theirs. The transcribed multiplier is real. |
+| **BitCrusher hold grid** | realigns at every **block** boundary (the counter is a function local — §4.3), so output is block-size dependent | one continuous grid across the whole segment | **ours wins, decisively.** −0.582 dB mean, 16/16 charts worse with theirs. |
+| **id 10 phase model** | two phases: preroll, then a spin-up over `window` | **three** phases: attack (slow down + fade out), hold (silence), release (inverse speed curve + restore volume) | see §9.5 |
+| **Laser easing** | knob curve is linear between points | applies the C7 curve type (`ease-in/out sine`) to the **audio** knob curve | see §9.5 |
+| **Sample domain** | raw int16 magnitudes with int16 requantisation between stages (§2, §8.1) | normalised float end-to-end | see §9.5 |
+| **`#TAB PARAM ASSIGN INFO` sweep** | static, authored parameters | laser-driven, 512-sample refresh | **theirs adopted**, see §9.5 |
+
+Gate and BitCrusher settle the same way for the same reason: both are decompiler transcriptions of specific struct fields and constants on our side, and both were simplifications on theirs with no cited derivation. The corpus agreed with the transcription in both cases, which is exactly what should happen and is worth recording as a sanity check on the method, not just on these two effects.
+
+### 9.4 Head-to-head score
+
+Same charts, same source audio, same recording, same alignment, same metric. `gain = dry − render`, higher is closer to the cabinet. Their renderer run with `--no-knob --no-shot` so neither side is adding sounds the other cannot; ours run twice — `--no-se` for a like-for-like effect-engine comparison, and default for the full mix.
+
+```
+12 charts, whole-track ALL frames
+
+              mean     median
+theirs       +0.122   +0.217
+ours --no-se +0.351   +0.435     effects-only: ours ahead on  9/12 charts
+ours full    +0.837   +0.889     full mix    : ours ahead on 11/12 charts
+```
+
+On `2229_kamui` specifically: dry 3.169, theirs 2.799, ours `--no-se` 2.498, ours full **1.808** — but kamui is this project's calibration chart, so that one is not evidence.
+
+**Caveats that matter for reading these numbers.** Charts were picked by alignment correlation, which unintentionally favours charts whose render differs *little* from dry — one selected chart (`1849_sasoribi_virkato`) scores +0.003 for all three renderers because it has almost no effects. That compresses every number toward zero and understates the spread; it does not favour either renderer, since both got the same charts. The full-mix column also is not a like-for-like comparison of effect engines: it includes the SE bank, per-sample header gains and the music duck, which their renderer does not attempt. The honest summary is the middle row — **on effect rendering alone, ours is ahead by roughly 0.23 dB mean and wins 9 of 12** — and the gap widens to 11 of 12 once the non-generator parts of the mix (§6.1, §7.1) are included, which is the part of the engine they do not model.
+
+### 9.5 The four remaining conflicts, resolved
+
+§9.3's `id 10 phase model`, `laser easing`, `sample domain` and `#TAB PARAM ASSIGN INFO sweep` rows were left as open questions. Each is now a diagnostic flag (`--tapestop-ex-3phase`, `--laser-easing`, `--no-stage-clip`, `--no-param-assign-sweep`), each was A/B'd against 16 capture-matched charts on the specific frames the change could plausibly affect (not the whole track), and each is settled:
+
+```
+                        mean(base)  mean(alt)   delta      frame-wtd   result (16 charts each)
+Gate hard-binary          +3.427     +1.975    -1.452       -1.474    ours, 16/16
+BitCrusher continuous     +2.476     +1.894    -0.582       -0.513    ours, 16/16
+Tape Stop Ex 3-phase      +2.908     +2.800    -0.108       -0.082    ours (mixed: 8 up / 6 down / 2 tied)
+Laser C7 easing           +1.744     +1.743    -0.001       -0.001    no measurable difference
+Sample domain (float)     +0.956     +0.955    -0.000       -0.000    no measurable difference
+Param-assign sweep        +0.454     +1.152    +0.698       +0.445    ADOPTED, 5 up / 3 down / 8 unaffected
+```
+
+**Adopted: the `#TAB PARAM ASSIGN INFO` sweep.** This is the one real win from the comparison beyond Wobble. On by default now (`--no-param-assign-sweep` to disable). The direction and formula came from their code (§9.2); the confirmation is ours: scored on the 148 charts where an AUTO TAB span actually overlaps an active C4=6 laser segment, the sweep beats running the borrowed effect at its static authored parameters on 5 of 8 charts where it changes anything at all (8 of the 16 sampled charts saw no active assignment on the specific span measured and scored identically either way — not a failure, just no assignment configured there). The wins are large when they land (`titanomachia` +5.165, `beautiful_receipt` +3.517, `kannagi` +2.617 and +2.810 on two different charts) and the losses are smaller (`toumeiseisai` −1.600, `xymatic_scope` −1.053, `chakra` −0.459), which is what drives the positive mean despite an even-looking 5/3 split.
+
+**Rejected: Tape Stop Ex's three-phase model.** Genuinely inconclusive rather than clearly wrong — 8 of 16 charts prefer it, 6 prefer ours, margins go as high as ±3–5 dB either way, and the mean (−0.108) and frame-weighted mean (−0.082) are both small enough to be noise. This did **not** resolve the envelope-floor mystery of §4.6b/§1.5: if the three-phase reading were the missing piece, adopting it should have moved the aggregate clearly, and it didn't. The floor stays a fitted, unexplained constant. `--tapestop-ex-3phase` is kept for anyone who wants to dig further, but the two-phase model remains the default.
+
+**Rejected: Gate's hard binary and BitCrusher's continuous grid**, both decisively (§9.3) — the two cases here that were direct decompiler transcriptions on our side beat the untraced simplifications on theirs by wide, unanimous margins. Worth stating plainly since it is easy to read a comparison like this as "find every difference and split them": most of the differences were not close.
+
+**No measurable difference: laser easing and sample domain.** Both hypotheses predict an effect only in a specific sub-condition (easing only changes anything when a segment actually uses C7 ∈ {4, 5}; the int16/float domain only diverges where two effects chain and one clips) — and both were scored on exactly the frames where that sub-condition holds, not diluted by the whole track. The float-domain flag does provably change output (confirmed directly, up to 61295 magnitude difference in raw samples on `2229_kamui`), so this is not a "the flag doesn't work" result; the divergence just doesn't move the spectral metric detectably even when isolated to the frames it could affect. Both stay off/on as they were (int16 stage-clipping remains the default, matching §8.1's reasoning that the engine really does clip; the laser knob remains linear).

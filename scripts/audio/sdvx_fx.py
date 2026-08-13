@@ -404,16 +404,26 @@ def fx_laser_bitcrush(L, R, mix, _rate_unused, knob=None, block=64):
 # 4.3  bit crusher
 # --------------------------------------------------------------------------
 
-def fx_bitcrush(L, R, mix, rate, block=64):
+def fx_bitcrush(L, R, mix, rate, block=64, continuous=False):
     """Sample-and-hold decimator.
 
     Note: in the DLL the phase counter is a *local* that restarts at 0 on every
     call, i.e. the hold grid realigns at each audio block boundary. Reproduced
     here, so output depends on `block` exactly as the game's does.
+
+    `continuous=True` is a diagnostic for audio_engine.md 9.3: an independent
+    reimplementation runs the hold grid once across the whole segment instead
+    of restarting it every block.
     """
     m = mixof(mix)
     rate = int(clampf(int(rate), 1, 30))
     outL, outR = L.copy(), R.copy()
+    if continuous:
+        loc = np.arange(L.size)
+        src = loc - (loc % rate)
+        outL[:] = (1.0 - m) * L + m * L[src]
+        outR[:] = (1.0 - m) * R + m * R[src]
+        return outL.astype(np.float32), outR.astype(np.float32)
     for i, j in blocks(L.size, block):
         loc = np.arange(j - i)
         src = i + (loc - (loc % rate))
@@ -464,19 +474,26 @@ def fx_retrigger(L, R, mix, length_sec, feedback, count, gate, release, block=64
 DEFAULT_GATE_PATTERN = [32, 4] * 8          # the constant at 0x180933e50
 
 
-def fx_gate(L, R, mix, steps, period_sec, pattern=None, block=64):
+def fx_gate(L, R, mix, steps, period_sec, pattern=None, block=64, hard_binary=False):
     m = mixof(mix)
     steps = int(clampf(int(steps), 1, 32))
     period = clampf(float(period_sec), 0.1, 4.0) * SR
     step_len = max(int(period) // steps, 1)
-    pat = np.array(pattern or DEFAULT_GATE_PATTERN, dtype=np.float64)
 
     n = L.size
     t = np.arange(n) % int(period)
     idx = t // step_len
     idx = np.where(idx > 15, idx - 16, idx)
-    idx = np.clip(idx, 0, len(pat) - 1)
-    g = (pat[idx] * 0.0322).astype(np.float32)
+
+    if hard_binary:
+        # diagnostic: plain 50% duty cycle, no table, no makeup gain - the
+        # simplification an independent reimplementation uses in place of
+        # transcribing struct+0x10. See audio_engine.md 4.5 / 9.3.
+        g = (idx % 2 == 0).astype(np.float32)
+    else:
+        pat = np.array(pattern or DEFAULT_GATE_PATTERN, dtype=np.float64)
+        idx = np.clip(idx, 0, len(pat) - 1)
+        g = (pat[idx] * 0.0322).astype(np.float32)
 
     outL = (1.0 - m) * L + m * L * g
     outR = (1.0 - m) * R + m * R * g
@@ -636,6 +653,122 @@ def fx_tapestop_ex(L, R, mix, speed, dur_sec, preroll_sec, window_sec,
             written += 1
 
     return outL, outR
+
+
+def fx_tapestop_ex_3phase(L, R, mix, speed, dur_sec, preroll_sec, window_sec,
+                          block=1024, lookahead=None):
+    """Diagnostic alternative to fx_tapestop_ex: THREE phases instead of two.
+
+    Ported from an independent reimplementation's `TapeScratch` (its name for
+    id 10), which reads attack/hold/release where this project reads
+    duration/preroll/window - same chart columns, same clamp ranges per
+    column (attack<->duration both [0.1,2.0]s, hold<->preroll both
+    unclamped-above, release<->window both [0.1,2.0]s), different claimed
+    shape. See audio_engine.md 9.3.
+
+        attack:  play a cached copy of the input at an ACCELERATING read rate
+                 while fading OUT to silence, over `duration` seconds
+        hold:    silence (dry at (1-mix) only)
+        release: play a PREFETCHED copy of the original input (from where
+                 hold/release starts, not from attack) at a decelerating read
+                 rate while fading volume back IN, over `window` seconds
+        after:   fully dry, unattenuated - `mix` does not apply once release
+                 has finished, unlike this project's own model
+
+    This is a best-effort, not a byte-exact port: one edge case in the
+    source (the attack cache buffer is allocated at full `duration` length
+    but may only ever be filled up to `min(duration, preroll)` samples if
+    preroll cuts the attack phase short - the common case in real chart data,
+    since preroll is usually much shorter than duration - so a fast-forwarding
+    read head can run past what was actually cached) is simplified here to
+    cap the read head at what is actually filled, avoiding reading unwritten
+    zeros. Everything else follows the source directly enough to compare
+    line-for-line.
+    """
+    m = mixof(mix)
+    dry = 1.0 - m
+    speed = clampf(float(speed), 1.0, 10.0)
+    attack_n = max(1, int(clampf(float(dur_sec), 0.1, 2.0) * SR))
+    hold_n = max(0, int(max(float(preroll_sec), 0.0) * SR))
+    release_n = max(1, int(clampf(float(window_sec), 0.1, 2.0) * SR))
+
+    n = L.size
+    outL, outR = L.copy(), R.copy()
+    if n <= 0:
+        return outL, outR
+
+    # ---------------- attack ----------------
+    ae = min(min(attack_n, hold_n), n)
+    if ae > 0:
+        cacheL, cacheR = L[:ae].copy(), R[:ae].copy()
+        idxs = np.empty(ae, dtype=np.int64)
+        read_index, phase = 0, 0.0
+        for i in range(ae):
+            if phase < 1.0:
+                ri = read_index
+                read_index += 1
+                phase += 1.0 + ri * speed / attack_n
+            idxs[i] = min(read_index - 1, ae - 1)
+            phase -= 1.0
+        gains = 1.0 - np.arange(ae, dtype=np.float64) / attack_n
+        idxs = np.clip(idxs, 0, ae - 1)
+        outL[:ae] = cacheL[idxs] * (m * gains) + L[:ae] * dry
+        outR[:ae] = cacheR[idxs] * (m * gains) + R[:ae] * dry
+
+    # ---------------- hold ----------------
+    he = min(hold_n, n)
+    if he > ae:
+        outL[ae:he] = L[ae:he] * dry
+        outR[ae:he] = R[ae:he] * dry
+
+    # ---------------- release ----------------
+    rs = max(hold_n, he)
+    re_ = min(hold_n + release_n, n)
+    if re_ > rs:
+        if lookahead is not None:
+            fullL, fullR, off = lookahead
+            a = off + rs
+            relL, relR = np.zeros(release_n), np.zeros(release_n)
+            avail = min(release_n, fullL.size - a)
+            if avail > 0:
+                relL[:avail], relR[:avail] = fullL[a:a + avail], fullR[a:a + avail]
+        else:
+            relL, relR = np.zeros(release_n), np.zeros(release_n)
+            avail = min(release_n, n - rs)
+            if avail > 0:
+                relL[:avail], relR[:avail] = L[rs:rs + avail], R[rs:rs + avail]
+
+        # dry-run to find how many read-head advances the full release takes -
+        # the source does this once per release, not once per sample
+        step_count, ph = 0, 0.0
+        for s in range(release_n):
+            if ph < 1.0:
+                step_count += 1
+                ph += 1.0 + s * speed / release_n
+            ph -= 1.0
+
+        attack_gain_end = (1.0 - ae / attack_n) if attack_n else 1.0
+        m_rel = re_ - rs
+        idxs2 = np.empty(m_rel, dtype=np.int64)
+        read_index2, phase2 = 0, 0.0
+        for i in range(m_rel):
+            if phase2 < 1.0:
+                read_index2 += 1
+                phase2 = max(phase2 + 1.0 + (release_n - i) * speed / release_n, 1.0)
+            ridx = read_index2 + release_n - step_count
+            idxs2[i] = max(0, min(ridx, release_n - 1))
+            phase2 -= 1.0
+        elapsed = np.arange(m_rel, dtype=np.float64)
+        rel_gain = np.minimum(attack_gain_end + (elapsed / release_n) * (1.0 - attack_gain_end), 1.0)
+        outL[rs:re_] = relL[idxs2] * (m * rel_gain) + L[rs:re_] * dry
+        outR[rs:re_] = relR[idxs2] * (m * rel_gain) + R[rs:re_] * dry
+
+    # ---------------- after release: fully dry, mix does not apply ----------
+    if re_ < n:
+        outL[re_:] = L[re_:]
+        outR[re_:] = R[re_:]
+
+    return outL.astype(np.float32), outR.astype(np.float32)
 
 
 # --------------------------------------------------------------------------

@@ -285,7 +285,7 @@ Original purpose unknown; currently empty for all charts.
         + Default side low, opposite side high
     + `1`-`5`: Index of effect in `#TAB EFFECT INFO` (1-indexed)
         + Low/high sides depend on filter type
-    + `6`: No effect — [verified], the inherited `(?)` can be dropped
+    + `6`: No filter of its own — but **not inert**: [corrected]. An independent reimplementation defines this value as the *param-assign source* — a C4 = 6 laser drives the `#TAB PARAM ASSIGN INFO` parameter sweep on whichever FX effect a `#TRACK AUTO TAB` span is running, rather than applying a laser filter. So the inherited "No effect (?)" is right about the laser's own output and wrong about the laser doing nothing. Not yet confirmed against our own trace or against captures — see [`audio_engine.md`](audio_engine.md) §9.2.
     + **[verified]** — this whole column is confirmed at the dispatcher, which keys its effect map on `noteField[4] - 1`, so C4 `1..5` becomes map key `0..4` = the five `#TAB EFFECT INFO` slots, and C4 `0` lands on a "nothing" sentinel.
     + **`0` (peak filter) is not an entry in `#TAB EFFECT INFO` and is not produced by the effect engine at all** — [added]. It is a DirectSound parametric-EQ living in the *sound device*, driven straight from the gameplay event dispatcher, lagging the knob by 80 ms and ducking the music while it runs. It is also the overwhelmingly common case in practice (870 of 894 laser nodes on the chart measured). Full transcription in [`audio_engine.md`](audio_engine.md) §7.1.
     + **Do not confuse this column with C7.** Both range 0–5 in practice, so mixing them up looks plausible and silently applies the wrong filters across an entire chart. C4 is the effect; C7 is the curve shape.
@@ -369,7 +369,7 @@ Original purpose unknown; currently empty for all charts.
 
 (Tabsep) This track is used to apply FX hold effects to lasers.
 
-**Used by 2738 of 8107 charts (33.8 %)** — [verified], which is more common than several effects that get far more attention. This project's audio renderer applies these spans (worth +1.07 dB); the parameter sweep described under `#TAB PARAM ASSIGN INFO` is not implemented.
+**Used by 2738 of 8107 charts (33.8 %)** — [verified], which is more common than several effects that get far more attention. This project's audio renderer applies these spans (worth +1.07 dB) and, since the sweep direction was resolved (see `#TAB PARAM ASSIGN INFO` below), also applies the parameter sweep by default (+0.698 dB mean where it changes anything). See [`audio_engine.md`](audio_engine.md) §9.5.
 
 + C0: Timing
 + C1: Effect length in cells

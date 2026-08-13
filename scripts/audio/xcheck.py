@@ -184,6 +184,11 @@ def main():
     ap.add_argument("-b", "--block", type=int, default=512)
     ap.add_argument("--render", default=None,
                     help="reuse an existing render instead of making one")
+    ap.add_argument("--work-tag", default=None,
+                    help="disambiguate the render filename (default: the difficulty). "
+                         "Needed when multiple xcheck.py runs for the same song folder "
+                         "(different difficulties) may be in flight at once, e.g. from "
+                         "masscheck.py -j - otherwise they'd race on the same temp WAV.")
     ap.add_argument("--extra", default="",
                     help="extra flags passed through to apply_chart.py")
     ap.add_argument("--quiet", action="store_true",
@@ -210,7 +215,8 @@ def main():
     ensure_work()
     render = args.render
     if render is None:
-        render = os.path.join(WORK, base + "_xcheck.wav")
+        tag = args.work_tag or args.difficulty or "auto"
+        render = os.path.join(WORK, "%s_%s_xcheck.wav" % (base, tag))
         cmd = [sys.executable, os.path.join(_HERE, "apply_chart.py"), folder,
                "-o", render, "-b", str(args.block)]
         if args.difficulty:
