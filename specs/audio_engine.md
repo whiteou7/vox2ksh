@@ -396,26 +396,72 @@ The effect's LFO counter is an object member that runs continuously across notes
 
 ### 4.10 Pitch Shift — `0x1806429b0`
 
-**PSOLA (pitch-synchronous overlap-add), not a generic granular shifter.** The 631-line decompilation is heavily auto-vectorized, which hides an ordinary three-stage algorithm. Two chart params: `mix` (clamp 0-100, /100) and `amount` (semitones) → `ratio = pow(2.0, amount/12)` (double `pow` at `0x180769d80`).
+**SOLA splice + sinc resample, not a grain-respacing shifter.** The 631-line decompilation is heavily auto-vectorized, which hides an ordinary three-stage algorithm. The real signature takes **five** arguments — `(this, blockLen, blockOffsetFrames, mix, amount)` — with `amount` arriving on the stack at `[rsp+0x160]`; Ghidra types the function as four params and drops it, which is why an earlier reading of this section could not see where the shift ratio came from.
 
-**Stage 1 — pitch-period detection by autocorrelation.** Each block the DSP correlates the input (buffers `this+0x4d`/`this+0x4e`) against itself at every lag from **132 to 882 samples** (`0x84 .. 0x372`, i.e. 50–334 Hz) and keeps the highest-energy lag (`Σ x[i]·x[i+lag]`, running max). That lag becomes both the grain length and stage 2's write offset.
+**Parameter conditioning** (`0x180642a2a`–`0x180642a9c`), none of which the chart's column range advertises:
 
-**Stage 2 — build one grain, direction-dependent** (`ratio` tested right after the search):
+```
+mix    = (mix >= 0 ? min(mix, 100) : 0) * 0.01
+amount: if (amount >= -12) { a = min(amount, 12); if (a < 0) a = min(a, -1); }
+        else                 a = -12
+        if (0 < a && a < 1)  a = 1
+ratio  = pow(2.0, a/12)                         # double pow @ 0x180769d80
+```
 
-* **`ratio < 1` (pitch down).** The grain is resampled onto the accumulation ring buffers (`this+0x50`/`this+0x51`) with a **25-tap windowed-sinc kernel**: for each output index the code walks source taps `k` from `floor(i·ratio) − 12` to `floor(i·ratio) + 12` and weights each by
-  ```
-  x = (i·ratio − k) · π
-  w = (x == 0) ? 1.0 : sinf(x) / x
-  out[write_pos] += w · grain[k]
-  ```
-  accumulated additively — bandlimited interpolation, stretching the grain to fill the longer span a downward shift needs.
-* **`ratio >= 1` (pitch up or unison).** No resample: a straight sample copy of the grain into the same buffers. Pitch rises because successive grains are spaced *closer together* (`int(len/(ratio-1) + 0.5)`, versus `len·ratio/(1-ratio)` downward), not because any grain is stretched.
+So the shift is clamped to **±12 semitones**, and any *nonzero* magnitude below one semitone is pushed **out** to ±1 rather than rounded toward zero. Exactly 0 survives and takes a unison passthrough branch. Both clamps are live in shipped charts: `amount = 12` occurs (sitting exactly on the limit), alongside 0, 2, 4 and 5.
 
-**Stage 3 — crossfade to output.** On the next call, once enough grain data has accumulated, the two buffer generations are linearly crossfaded against the previous output using `mix` (`out = (1-mix)·history + mix·new`), then written back through the shared int16 stage.
+**Object layout**, from the constructor `FUN_18063d5d0` @ `0x18063d5d0`. All three buffer pairs are `PS_BUFLEN` floats:
 
-**Not implemented**, and two pieces are missing for anyone who wants to: the grain-count/hop arithmetic governing overlap density on the upward branch, and the ring-buffer index bookkeeping across calls (`this+0x49` / `this+0x4c` / `this+0x244`). No chart in the reference corpus isolates Pitch Shift long enough to score it, so this section is disassembly-only.
+| byte offset | meaning |
+|---|---|
+| `0x00` | int16 interleaved source |
+| `0x38` / `0x40` | dry input float L/R, filled by `FUN_18063d9e0` at the top of each call |
+| `0x58` / `0x60` | output float L/R |
+| `0x244` | **441** — autocorrelation window (10 ms @ 44100) |
+| `0x248` | output-accumulator cursor; the only state persisting across calls |
+| `0x24c` | **17640** — input buffer length (400 ms) |
+| `0x250` / `0x258` | grain buffer L/R |
+| `0x260` | 17640 — input load count |
+| `0x268` / `0x270` | input window float L/R |
+| `0x278` | 17640 — accumulator capacity |
+| `0x280` / `0x288` | output accumulator L/R |
 
-The independent reimplementation of §9 does render this effect, but not by reimplementing the engine's PSOLA — it shells out to a generic pitch-shift library (`librosa` by default, optionally `pyrubberband`/Rubber Band). That is a different kind of approximation, not a second trace of the same DSP, so it neither corroborates nor contradicts anything above and does not appear in §9's agreement/disagreement tables.
+**Stage 1 — pitch period by autocorrelation.** Each pass reloads the whole 17640-frame input window from the running source cursor, then correlates **441 samples of the left channel only** against itself at every lag from **132 to 882 samples** (`0x84 .. 0x372`, i.e. 50–334 Hz), keeping a running max in a `double`. The winning lag is applied to both channels. Ties keep the **earlier** lag — the update is on a strict increase (`if (dVar53 <= dVar55) keep old`), so a flat or silent window resolves to 132, not to the last lag tried.
+
+The int16 loader has a quirk worth reproducing: wherever the **left** sample is exactly 0 it writes 0 to *both* channels and never reads the right one (`0x180642b43`). `FUN_18063d9e0` does the same, so it is a loader convention rather than something specific to this effect.
+
+**Stage 2 — assemble one grain (SOLA splice).** A triangular crossfade over `lag` samples between the window and itself one `lag` later, then a plain copy tail:
+
+```
+grain[j]     = ((lag-j)/lag)·in[c+j] + (j/lag)·in[c+lag+j]      j in [0, lag)
+grain[lag..] = in[c+lag..]                                       bounded by the 17640 limit
+hop = int(lag / (1/ratio - 1) + 0.5)   if ratio < 1     # == lag·ratio/(1-ratio)
+    = int(lag / (ratio - 1) + 0.5)     if ratio > 1
+```
+
+This is the step that changes **duration** without a discontinuity. It is *not* what shifts the pitch.
+
+**Stage 3 — resample the grain through a 25-tap windowed sinc**, accumulating into `0x280`/`0x288`:
+
+```
+for i in [0, count):                       # count = hop+lag (down) / hop (up)
+    c = int(i·ratio)                       # truncation, cvttss2si
+    for k in [c-12, c+12]:
+        if k < 0: skip
+        x = (i·ratio − k) · π
+        w = (x == 0) ? 1.0 : sinf(x) / x
+        acc[cursor + i] += w · grain[k]
+```
+
+**This runs on both shift directions** — `0x180643337` on the up branch, `0x180643a73` on the down branch, byte-identical loops. It is what actually moves the pitch; the direction-specific code before it only assembles the grain and picks the hop. (An earlier reading of this section had the up branch doing "no resample, a straight sample copy", with pitch rising because grains were spaced closer together. That mistook the stage-2 grain copy for the output stage; both are present, and only stage 3 touches pitch.)
+
+**Stage 4 — mix.** Once the accumulator holds a full block: `out = (1-mix)·dry + mix·acc`, a **plain dry/wet mix** against the `0x38`/`0x40` buffers that `FUN_18063d9e0` filled at the top of *this same call*. No history and no crossfade against previous output are involved. The accumulator is then consumed, `memmove`d down by the block length and zero-filled behind.
+
+**Implemented** in `sdvx_fx.fx_pitchshift` (`.vox` id 9, `--no-pitchshift` restores the old do-nothing behaviour). Measured over the 8 capture-matched charts that carry scorable Pitch Shift regions: **+0.983 → +1.929 dB exclusive mean, delta +0.946 (+1.057 frame-weighted), 7 charts improved / 0 regressed**, with every other effect flat to within 0.002 dB. Earlier claims that "no chart in the reference corpus isolates Pitch Shift long enough to score it" were an artifact of the small corpus of the time — the current reference set carries 61 FX-button Pitch Shift notes across 12 capture-matched charts, the longest 2.82 s.
+
+**One reading was settled by measurement rather than by disassembly.** The pass tail at `0x180643472` (`lea esi, [rsi + r12*2]`) advances the source cursor, and `r12` at that point holds a running *total* of hops rather than the current pass's hop — read literally, the input read position accelerates through a held note. That is what the register dataflow appears to say, but it renders badly (`-0.815` dB against the per-pass hop over the same 8 charts, and a +12 semitone shift collapses to near-silence because the cursor outruns the note). The per-pass hop is therefore the default; `--pitchshift-legacy-cursor` reproduces the accelerating reading. The likeliest explanation is a misattribution of which spilled stack slot `r12` is reloaded from across the vectorized tail, not an engine bug — but that has not been proven instruction-by-instruction, so it stays flagged here.
+
+The independent reimplementation of §9 also renders this effect, but not by reimplementing the engine's algorithm — it shells out to a generic pitch-shift library (`librosa` by default, optionally `pyrubberband`/Rubber Band). That is a different kind of approximation, not a second trace of the same DSP, so it neither corroborates nor contradicts anything above and does not appear in §9's agreement/disagreement tables.
 
 ---
 

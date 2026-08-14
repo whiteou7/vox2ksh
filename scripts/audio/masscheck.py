@@ -176,7 +176,9 @@ def run_pair(i, ref_name, folder, ref, suffix, args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-n", "--limit", type=int, default=0, help="only the first N (chart, capture) pairs")
-    ap.add_argument("--only", default=None, help="substring filter on the song name")
+    ap.add_argument("--only", default=None,
+                    help="substring filter on the song name; comma-separated for "
+                         "several (a pair is kept if it matches any of them)")
     ap.add_argument("--extra", default="", help="flags passed through to apply_chart.py")
     ap.add_argument("-b", "--block", type=int, default=512)
     ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4,
@@ -209,7 +211,8 @@ def main():
 
     pairs = find_pairs()
     if args.only:
-        pairs = [p for p in pairs if args.only in p[0]]
+        keys = [k for k in args.only.split(",") if k]
+        pairs = [p for p in pairs if any(k in p[0] for k in keys)]
     if args.limit:
         pairs = pairs[:args.limit]
     n_folders = len(set(p[0] for p in pairs))

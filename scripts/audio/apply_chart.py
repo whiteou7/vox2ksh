@@ -396,6 +396,18 @@ PERSIST = {6}           # effect types whose state is threaded (6 = Wobble)
 
 MIXSCALE = [1.0]        # diagnostic: scale every effect's wet/dry mix parameter
 
+# Pitch Shift was unimplemented until the PSOLA transcription landed; this
+# restores that so the implementation can be A/B'd against doing nothing, the
+# same way --no-tapestop-ex does. See audio_engine.md 4.10.
+PITCHSHIFT = [True]
+
+# Which reading of the input-cursor advance to use. A first pass through the
+# disassembly read it as advancing by a running TOTAL of hops (the read position
+# accelerating through a held note); measurement rejected that decisively, so
+# the per-pass hop is the default and the accelerating reading is kept only as
+# an opt-in diagnostic. See audio_engine.md 4.10.
+PITCHSHIFT_LEGACY_CURSOR = [False]
+
 # Tape Stop Ex was unimplemented for a long time; this restores that so the
 # implementation can be A/B'd against doing nothing. See audio_engine.md 4.6b.
 TAPESTOP_EX = [True]
@@ -489,6 +501,12 @@ def run_fx(L, R, eff, tl, tick, block, knob=None, lookahead=None):
     if t == 7:                                          # Bit Crusher
         return FX.fx_bitcrush(L, R, p[0], int(p[1]), block=block,
                               continuous=BITCRUSH_CONTINUOUS[0])
+    if t == 9 and PITCHSHIFT[0]:                        # Pitch Shift
+        # C1 is mix%, C2 the shift in SEMITONES - no BPM scaling, the DSP
+        # takes the amount raw and conditions it itself (FX.ps_ratio clamps
+        # to +-12 and pushes any nonzero |amount| < 1 out to +-1).
+        return FX.fx_pitchshift(L, R, p[0], p[1], block=block,
+                                legacy_cursor=PITCHSHIFT_LEGACY_CURSOR[0])
     if t == 10 and TAPESTOP_EX[0]:                      # Tape Stop Ex
         # mix, speed, then duration/preroll/window in BEATS - NOT seconds. Plain
         # Tape Stop (id 4) really is seconds, but this one goes through wrapper
@@ -505,7 +523,7 @@ def run_fx(L, R, eff, tl, tick, block, knob=None, lookahead=None):
         return FX.fx_laser_lpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block)
     if t == 12:                                         # High Pass Filter
         return FX.fx_laser_hpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block)
-    return None                                         # 9, 13 -> not implemented
+    return None                                         # 13 -> not implemented
 
 
 def run_tab(L, R, eff, knob, block):
@@ -773,6 +791,17 @@ def build_arg_parser():
                     help="diagnostic: leave Tape Stop Ex (.vox id 10) notes dry, "
                          "which is what this renderer did before 4.6b was "
                          "transcribed. Exists to A/B the implementation")
+    ap.add_argument("--no-pitchshift", action="store_true",
+                    help="diagnostic: leave Pitch Shift (.vox id 9) notes dry, "
+                         "which is what this renderer did before 4.10 was "
+                         "transcribed. Exists to A/B the implementation")
+    ap.add_argument("--pitchshift-legacy-cursor", action="store_true",
+                    help="diagnostic: advance Pitch Shift's input cursor by a "
+                         "running TOTAL of hops rather than the current pass's "
+                         "hop, an early misreading of the disassembly that "
+                         "makes the read position accelerate through a held "
+                         "note. Measured -0.8 dB against the default over 8 "
+                         "charts; kept only to reproduce that (audio_engine.md 4.10)")
     ap.add_argument("--no-auto-tab", action="store_true",
                     help="skip #TRACK AUTO TAB spans, where a laser borrows an "
                          "FX-button effect pair (33.8%% of charts use this). "
@@ -879,6 +908,8 @@ def main():
     MIXSCALE[0] = args.mix_scale
     TAPESTOP_EX[0] = not args.no_tapestop_ex
     TSE_FLOOR[0] = args.tapestop_ex_floor
+    PITCHSHIFT[0] = not args.no_pitchshift
+    PITCHSHIFT_LEGACY_CURSOR[0] = args.pitchshift_legacy_cursor
     WOBBLE_LEGACY[0] = args.wobble_legacy_period
     GATE_HARD_BINARY[0] = args.gate_hard_binary
     BITCRUSH_CONTINUOUS[0] = args.bitcrush_continuous

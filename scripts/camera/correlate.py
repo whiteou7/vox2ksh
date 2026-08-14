@@ -228,11 +228,13 @@ def outgoing_dirsign(lst, i, max_lookahead=5):
     return None
 
 
-def collect_spin_pairs(chart, ev, out_rows):
-    """out_rows: (roll_type, roll_length, side, dirsign, token). dirsign is
-    the sign of the slam/movement immediately following the roll-tagged
-    point (see outgoing_dirsign) - a candidate discriminator for
+def collect_spin_pairs(chart, ev, out_rows, label=None):
+    """out_rows: (roll_type, roll_length, side, dirsign, token, extra).
+    dirsign is the sign of the slam/movement immediately following the
+    roll-tagged point (see outgoing_dirsign) - a candidate discriminator for
     @( vs @) / @< vs @> since vox's roll_type alone doesn't encode direction.
+    `extra` is (label, version, cells_per_chain, ksh_len), carried for the
+    length analysis in spin_length_report.
     """
     for (tick, lchar, rchar, token) in ev.spin:
         best = None
@@ -242,10 +244,12 @@ def collect_spin_pairs(chart, ev, out_rows):
                     d = abs(p.tick - tick)
                     if best is None or d < best[4]:
                         dirsign = outgoing_dirsign(lst, i)
-                        best = (side, p.roll_type, p.roll_length, dirsign, d)
+                        best = (side, p.roll_type, p.roll_length, dirsign, d, p.cells_per_chain)
         if best:
-            side, roll_type, roll_length, dirsign, d = best
-            out_rows.append((roll_type, roll_length, side, dirsign, token))
+            side, roll_type, roll_length, dirsign, d, c9 = best
+            ksh_len = int(re.search(r"(\d+)", token).group(1))
+            out_rows.append((roll_type, roll_length, side, dirsign, token,
+                             (label, chart.version, c9, ksh_len)))
 
 
 def laser_pos_at(lst, tick):
@@ -365,7 +369,7 @@ def main():
         collect_camera_pairs(chart, ev, "cam_radi", "zoom_bottom", song_radi, radi_samples, args.dump)
         rotx_pairs.extend(song_rotx)
         radi_pairs.extend(song_radi)
-        collect_spin_pairs(chart, ev, spin_rows)
+        collect_spin_pairs(chart, ev, spin_rows, label)
         collect_tilt_vs_laser(chart, ev, tilt_laser_rows)
         per_song_zoom.append((label, ksh_ver(ksh_path), song_rotx, song_radi))
 
@@ -431,7 +435,7 @@ def main():
 
     print("\n==== spin: roll_type kind (roll/swing) vs ksh symbol kind (full/half) ====")
     kind_tab = collections.Counter()
-    for (rt, rl, side, ds, tok) in spin_rows:
+    for (rt, rl, side, ds, tok, _x) in spin_rows:
         base = re.match(r"[@S][()<>]", tok).group(0)
         symkind = "full" if base in FULL_CHARS else ("half" if base in HALF_CHARS else "other:" + base)
         kind_tab[(ROLL_KIND.get(rt, "?%d" % rt), symkind)] += 1
@@ -442,7 +446,7 @@ def main():
           "right-to-left slam [dirsign=-1] = clockwise = @( or @<;  left-to-right [dirsign=+1] "
           "= counterclockwise = @) or @>)")
     dir_tab = collections.Counter()
-    for (rt, rl, side, ds, tok) in spin_rows:
+    for (rt, rl, side, ds, tok, _x) in spin_rows:
         if ds is None:
             continue
         base = re.match(r"[@S][()<>]", tok).group(0)
@@ -463,7 +467,7 @@ def main():
 
     print("\n  spin token length(192nds) distribution by roll_type:")
     lens_by_type = collections.defaultdict(collections.Counter)
-    for (rt, rl, side, ds, tok) in spin_rows:
+    for (rt, rl, side, ds, tok, _x) in spin_rows:
         mlen = re.search(r"(\d+)", tok)
         if mlen:
             lens_by_type[rt][int(mlen.group(1))] += 1
@@ -472,12 +476,114 @@ def main():
 
     print("\n  spin token length(192nds) distribution by kind (roll vs swing):")
     lens_by_kind = collections.defaultdict(collections.Counter)
-    for (rt, rl, side, ds, tok) in spin_rows:
+    for (rt, rl, side, ds, tok, _x) in spin_rows:
         mlen = re.search(r"(\d+)", tok)
         if mlen:
             lens_by_kind[ROLL_KIND.get(rt, "?")][int(mlen.group(1))] += 1
     for k in sorted(lens_by_kind):
         print("   %s: %s" % (k, dict(lens_by_kind[k].most_common(15))))
+
+    spin_length_report(spin_rows)
+
+
+# --------------------------------------------------------------------------
+# spin length
+# --------------------------------------------------------------------------
+
+def spin_length_report(spin_rows):
+    """The evidence behind camera.py's BEAT_TO_KSH192 / TYPE67_UNIT_TO_KSH192
+    and DEFAULT_BEATS, printed from the reference set - specs/camera.md's
+    "Spin/swing: length" is the prose version of this output.
+
+    The one thing that makes this analysis work is controlling for the
+    *charter*: the reference conversions are hand-made, and a given song's
+    charter applies one scale consistently across that song's spins, but
+    different charters picked different ones (24 ksh-192nds per vox quarter
+    note dominates; 32, 36 and 48 all recur). Pooling raw lengths mixes those
+    scales together and hides the law - conditioning on songs whose explicit-
+    C8 rows measure exactly 24 exposes it, and the type-vs-type ratio test at
+    the end confirms it without needing any scale at all.
+    """
+    import collections
+    import statistics
+
+    def vox_quarter_notes(rt, c8, c9, ver):
+        """The vox-declared roll duration in quarter notes, per camera.py."""
+        if rt in (6, 7):
+            units = (c9 if ver >= 13 and c9 else c8 or c9) or 0
+            return units / 8.0          # C8/C9 count 1/32 notes for these
+        return float(c8) if c8 else float(camera_defaults.get(rt, 3))
+
+    camera_defaults = {1: 6, 2: 2, 3: 3, 4: 12, 5: 3}
+
+    rows = []
+    for (rt, c8, side, ds, tok, extra) in spin_rows:
+        label, ver, c9, ksh_len = extra
+        rows.append((label, rt, c8, c9, ver, ksh_len, vox_quarter_notes(rt, c8, c9, ver)))
+    if not rows:
+        print("\n==== spin length ====  no samples")
+        return
+
+    print("\n==== spin length: ksh_len / vox quarter note, per song (the charter's scale) ====")
+    bysong = collections.defaultdict(list)
+    for (label, rt, c8, c9, ver, ksh_len, qn) in rows:
+        if c8 and qn:                      # explicit lengths only - defaults are what we're solving for
+            bysong[label].append(ksh_len / qn)
+    scale = {}
+    for label, v in bysong.items():
+        scale[label] = collections.Counter(round(x, 3) for x in v).most_common(1)[0][0]
+    print("   modal scale per song: %s" % dict(collections.Counter(scale.values()).most_common(8)))
+    print("   -> %d/%d songs sit at exactly 24" % (
+        sum(1 for s in scale.values() if s == 24.0), len(scale)))
+
+    print("\n   exact-match rate of `ksh_len = SCALE * vox quarter notes`:")
+    for s in (24, 32):
+        hit = sum(1 for r in rows if abs(r[5] - s * r[6]) < 1e-6)
+        print("     SCALE=%-3d %d/%d = %.1f%%" % (s, hit, len(rows), 100.0 * hit / len(rows)))
+    print("   ratio of observed to predicted at SCALE=24 (residual is charter style):")
+    rat = collections.Counter(round(r[5] / (24.0 * r[6]), 3) for r in rows if r[6])
+    for v, c in rat.most_common(6):
+        print("     x%-6s n=%-4d (%4.1f%%)  = scale %g" % (v, c, 100.0 * c / len(rows), 24 * v))
+
+    print("\n   per roll_type, split by explicit C8 vs C8=0 default:")
+    for rt in sorted(set(r[1] for r in rows)):
+        for tag, sel in (("explicit", [r for r in rows if r[1] == rt and r[2]]),
+                         ("default ", [r for r in rows if r[1] == rt and not r[2]])):
+            if not sel:
+                continue
+            hit = sum(1 for r in sel if abs(r[5] - 24 * r[6]) < 1e-6)
+            print("     rt=%d %s n=%-4d exact@24=%-4d (%5.1f%%)  median ratio=%.3f" % (
+                rt, tag, len(sel), hit, 100.0 * hit / len(sel),
+                statistics.median([r[5] / (24.0 * r[6]) for r in sel])))
+
+    print("\n==== C8=0 defaults, in songs whose explicit-C8 scale is exactly 24 ====")
+    print("   (the implied vox default duration, in quarter notes - compare vox_format.md's names)")
+    n24 = {k for k, v in scale.items() if v == 24.0}
+    for rt in sorted(set(r[1] for r in rows)):
+        sel = [r for r in rows if r[1] == rt and not r[2] and r[0] in n24]
+        if not sel:
+            continue
+        imp = collections.Counter(r[5] / 24.0 for r in sel)
+        print("   rt=%-2d name=%-3s n=%-4d median=%.2f  observed: %s" % (
+            rt, camera_defaults.get(rt, "?"), len(sel),
+            statistics.median([r[5] / 24.0 for r in sel]), dict(imp.most_common(5))))
+
+    print("\n==== scale-free cross-check: ratio between two types' defaults in the SAME song ====")
+    print("   (needs no charter scale at all - it cancels; names predict 6:2:3:3 for rt 1:2:3:5)")
+    d = collections.defaultdict(list)
+    for (label, rt, c8, c9, ver, ksh_len, qn) in rows:
+        if not c8:
+            d[(label, rt)].append(ksh_len)
+    med = {k: statistics.median(v) for k, v in d.items()}
+    songs = {k[0] for k in med}
+    for (a, b) in ((3, 5), (1, 5), (1, 3), (2, 5)):
+        pr = [(med[(s, a)], med[(s, b)]) for s in songs if (s, a) in med and (s, b) in med]
+        if not pr:
+            continue
+        exp = camera_defaults[a] / float(camera_defaults[b])
+        print("   rt%d/rt%d  names predict %.3f   n_songs=%-3d median=%.3f   %s" % (
+            a, b, exp, len(pr), statistics.median([x / y for x, y in pr]),
+            dict(collections.Counter(round(x / y, 3) for x, y in pr).most_common(4))))
 
 
 if __name__ == "__main__":

@@ -185,31 +185,40 @@ def compute_zoom_events(chart, rotx_scale=ROTX_TO_ZOOM_TOP, radi_scale=RADI_TO_Z
 # in every reference chart even for genuine vox swings - specs/camera.md.
 SWING_ROLL_TYPE = 5
 
-# vox_format.md's named default duration per roll_type, in "beats" - used
-# only when C8 (roll_length) is 0, i.e. vox says "use this type's normal
-# length". Types 6/7 aren't named this way (6 gives its length in 1/32
-# notes instead, and is never 0 in observed data; 7 is undocumented) so
-# they aren't in this table - see compute_spin_tokens.
+# vox_format.md's named default duration per roll_type, in quarter notes -
+# used only when C8 (roll_length) is 0, i.e. vox says "use this type's
+# normal length". All four types with reference coverage (1, 2, 3, 5)
+# confirm their name against the hand charts once the per-song charter
+# scale is controlled for; type 4 has one sample and is unvalidated. Types
+# 6/7 aren't named this way - they always carry an explicit length in C8
+# (or C9 in v13) - so they aren't in this table; see compute_spin_tokens.
 DEFAULT_BEATS = {1: 6, 2: 2, 3: 3, 4: 12, 5: 3}
 
-# ksh 192nds per vox "beat" unit, fit against scripts/camera/correlate.py's
-# roll_type=1 samples with an explicit C8 (3,6,9 all landed on an exact
-# multiple of this - see specs/camera.md "Spin/swing: length"). Applied
-# uniformly to every roll_type except 6, which vox_format.md documents as
-# using 1/32-note units instead (-> 192/32 = 6 ksh-192nds per unit).
-BEAT_TO_KSH192 = 32
-TYPE6_UNIT_TO_KSH192 = 6   # 1/32 note, in a 4/4 measure
+# The spin-length law, fit against 1354 reference samples by
+# scripts/camera/correlate.py's --spin report: a ksh spin token's length is
+# exactly HALF the duration vox declares, expressed in ksh 192nds.
+#
+# vox states roll lengths in quarter notes and its number covers the whole
+# motion *including the overshoot*, where ksh's number covers only the part
+# before the overshoot (vox_format.md C3) - and the overshoot turns out to
+# take exactly as long as the rotation it follows. So one vox quarter note
+# = 48 ksh-192nds of declared duration -> 24 ksh-192nds of ksh spin length.
+BEAT_TO_KSH192 = 24
 
-# roll_type=6/7's C8 is 0 (i.e. "no length") on chart-format-13 charts
-# specifically - confirmed corpus-wide: 76/80 type-6/7 rows in a 148-chart
-# v13 sample have C8=0, vs essentially never in the v10/v12 corpus. On
-# those rows C9 (cells_per_chain elsewhere) holds the real length instead,
-# in 1/16-note units - found by hand on 2393_alive_dadadaizu (itself v13),
-# track8 measure 79 of the 5m chart. See vox_format.md's "Format version
-# 13" and specs/camera.md's "Spin/swing: length" for the full survey. No
-# version check needed here: v10/v12 rows essentially never have C8=0 for
-# these types, so this fallback is naturally inert on them.
-TYPE6_FALLBACK_UNIT_TO_KSH192 = 12   # 1/16 note, in a 4/4 measure
+# Types 6/7 are the "8x speed" rolls: their length column counts 1/32
+# notes, i.e. 1/8 of a quarter note, so the same law lands on 24/8 = 3.
+# This one is not a modal estimate - the reference charts transcribe type 6
+# machine-exactly (C8 of 13/17/23/33/37 -> ksh 39/51/69/99/111, numbers no
+# charter picks by feel), 61/64 exact.
+TYPE67_UNIT_TO_KSH192 = 3   # 1/32 note
+
+# In chart format 13 the types-6/7 length simply MOVED from C8 to C9: the
+# two distributions are the same quantity in the same unit (v12 C8 vs v13
+# C9 for type 6: quartiles [5,12,15,25,135] vs [3,12,15,25,35], means 17.7
+# vs 18.2), so no separate scale factor applies - see specs/camera.md. C9
+# on types 1-5 is the unrelated "cells per chain" (median 3) and must not
+# be read as a length, which is why this path is restricted to 6/7.
+
 
 
 def _outgoing_dirsign(lst, i, max_lookahead=5):
@@ -223,6 +232,31 @@ def _outgoing_dirsign(lst, i, max_lookahead=5):
         if lst[j].pos != base:
             return (lst[j].pos > base) - (lst[j].pos < base)
     return None
+
+
+def _spin_length(chart, p):
+    """A laser point's ksh spin length in 192nds, per the law above.
+
+    Types 6/7 read their length from C9 instead of C8 on format-13 charts,
+    where the column moved. The four v13 rows that carry *both* are the
+    reason this prefers C9 outright rather than "C8 if present": their C8
+    is 1 or 2 (a 3-to-6 tick spin, i.e. nothing) next to a C9 of 10-30,
+    squarely in the normal length range - C8 is vestigial there. The
+    version test is what keeps that preference off v12, where the only
+    rows carrying both are one charter's (`littleredridinghood`) genuine
+    cells-per-chain C9=3 alongside a real C8 length of 7-15.
+    """
+    if p.roll_type in (6, 7):
+        units = (p.cells_per_chain if chart.version >= 13 and p.cells_per_chain
+                 else p.roll_length or p.cells_per_chain)
+        # No corpus row reaches the fallback: every 6/7 row in every version
+        # carries a length in one column or the other.
+        length = (units or 0) * TYPE67_UNIT_TO_KSH192
+    elif p.roll_length:
+        length = p.roll_length * BEAT_TO_KSH192
+    else:
+        length = DEFAULT_BEATS.get(p.roll_type, 3) * BEAT_TO_KSH192
+    return max(1, int(round(length)))
 
 
 def compute_spin_tokens(chart):
@@ -247,18 +281,7 @@ def compute_spin_tokens(chart):
             else:
                 base = "@(" if dirsign < 0 else "@)"
 
-            if p.roll_length:
-                if p.roll_type == 6:
-                    length = p.roll_length * TYPE6_UNIT_TO_KSH192
-                else:
-                    length = p.roll_length * BEAT_TO_KSH192
-            elif p.roll_type in (6, 7) and p.cells_per_chain:
-                length = p.cells_per_chain * TYPE6_FALLBACK_UNIT_TO_KSH192
-            elif p.roll_type in (6, 7):
-                length = 0
-            else:
-                length = DEFAULT_BEATS.get(p.roll_type, 3) * BEAT_TO_KSH192
-            length = max(1, int(round(length)))
+            length = _spin_length(chart, p)
 
             tokens.setdefault(p.tick, (side_idx, "%s%d" % (base, length)))
     return tokens

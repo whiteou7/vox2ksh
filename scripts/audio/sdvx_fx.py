@@ -913,6 +913,199 @@ def fx_wobble(L, R, mix, filter_type, wave_type, freq_a, freq_b,
 
 
 # --------------------------------------------------------------------------
+# 4.10  pitch shift
+# --------------------------------------------------------------------------
+
+# Constants written by the constructor FUN_18063d5d0 @ 0x18063d5d0. All three
+# buffer pairs (input window, grain, output accumulator) are PS_BUFLEN floats.
+PS_CORRLEN = 441        # 0x244: autocorrelation window, 10 ms @ 44100
+PS_BUFLEN = 17640       # 0x24c / 0x260 / 0x278: 400 ms @ 44100
+PS_LAG_MIN = 132        # 0x84   -> 334 Hz
+PS_LAG_MAX = 882        # 0x372  -> 50 Hz
+PS_TAPS = 12            # sinc kernel half-width; 25 taps total
+
+
+def ps_ratio(amount):
+    """Chart `amount` (semitones) -> resample ratio, exactly as the DLL's
+    prologue conditions it (0x180642a2a-0x180642a9c).
+
+    Two clamps the .vox column range does not advertise: the value is limited
+    to +-12 semitones, and any NONZERO magnitude below one semitone is pushed
+    OUT to +-1 rather than rounded toward zero. Exactly 0 survives as 0 and
+    takes the unison passthrough branch.
+    """
+    a = float(amount)
+    if a >= -12.0:
+        a = min(a, 12.0)
+        if a < 0.0:
+            a = min(a, -1.0)
+    else:
+        a = -12.0
+    if 0.0 < a < 1.0:
+        a = 1.0
+    return math.pow(2.0, a / 12.0)
+
+
+def _ps_best_lag(win):
+    """Pitch period by autocorrelation, over lags PS_LAG_MIN..PS_LAG_MAX.
+
+    Correlates PS_CORRLEN samples of the LEFT channel only (the DLL reads
+    buffer 0x268 for both the reference and the delayed copy, then applies the
+    winning lag to both channels), keeping a running max. Ties keep the
+    EARLIER lag: the DLL updates its best only on a strict increase
+    (`if (dVar53 <= dVar55) keep old`), so a flat/silent window resolves to
+    PS_LAG_MIN rather than to the last lag tried.
+    """
+    ref = win[:PS_CORRLEN]
+    if ref.size < PS_CORRLEN:
+        ref = np.pad(ref, (0, PS_CORRLEN - ref.size))
+    need = PS_LAG_MAX + PS_CORRLEN
+    src = win[:need]
+    if src.size < need:
+        src = np.pad(src, (0, need - src.size))
+    # corr[k] = sum_i ref[i] * src[i + lag_min + k], accumulated in float64 as
+    # the DLL does (its running sum is a double even though the taps are float)
+    lags = np.arange(PS_LAG_MIN, PS_LAG_MAX + 1)
+    idx = lags[:, None] + np.arange(PS_CORRLEN)[None, :]
+    corr = (src.astype(np.float64)[idx] * ref.astype(np.float64)[None, :]).sum(1)
+    return int(lags[int(np.argmax(corr))])
+
+
+def _ps_sinc_into(acc, cursor, grain, count, ratio):
+    """The output stage: resample `grain` by `ratio` with a 25-tap windowed
+    sinc and ADD it into `acc` at `cursor` (0x180643337 up / 0x180643a73 down).
+
+    out[i] = sum over k in [int(i*r)-12, int(i*r)+12] of sinc(i*r - k)*grain[k]
+
+    This runs on BOTH shift directions - it is what actually moves the pitch.
+    The direction-specific code before it only assembles the grain and picks
+    the hop, i.e. it fixes the DURATION that this resample would otherwise
+    change. Note `int(i*r)` truncates (cvttss2si) and taps at negative source
+    indices are skipped, not clamped.
+    """
+    if count <= 0:
+        return
+    i = np.arange(count, dtype=np.float64)
+    pos = i * ratio
+    centre = pos.astype(np.int64)                # truncation toward zero
+    k = centre[:, None] + np.arange(-PS_TAPS, PS_TAPS + 1)[None, :]
+    x = (pos[:, None] - k) * 3.1415927
+    w = np.where(x == 0.0, 1.0, np.sin(x) / np.where(x == 0.0, 1.0, x))
+    ok = (k >= 0) & (k < grain.size)
+    contrib = np.where(ok, w * grain[np.clip(k, 0, grain.size - 1)], 0.0)
+    end = min(cursor + count, acc.size)
+    take = end - cursor
+    if take > 0:
+        acc[cursor:end] += contrib.sum(1)[:take].astype(np.float32)
+
+
+def fx_pitchshift(L, R, mix, amount, block=512, legacy_cursor=False):
+    """PSOLA pitch shift - FUN_1806429b0 @ 0x1806429b0.
+
+    Three stages per pass, all inside one `while accumulated < blockLen` loop:
+
+      1. reload a PS_BUFLEN-frame window of the dry track from the running
+         input cursor, and find its pitch period by autocorrelation;
+      2. assemble a grain: a triangular crossfade over `lag` samples between
+         the window and itself one `lag` later (the SOLA splice that changes
+         duration without a discontinuity), then a plain copy tail;
+      3. resample that grain by `ratio` through the 25-tap sinc above,
+         accumulating into a persistent output buffer.
+
+    Once the accumulator holds a full block it is mixed against the dry input
+    - `out = (1-mix)*dry + mix*acc`, a PLAIN dry/wet mix, not a crossfade
+    against previous output - consumed, and shifted down.
+
+    `legacy_cursor` selects how the input cursor advances between passes. The
+    tail at 0x180643472 (`lea esi, [rsi + r12*2]`) first read as advancing by a
+    running TOTAL of hops rather than by this pass's hop, which would make the
+    read position accelerate through a held note. Measurement rejected that
+    outright (-0.815 dB against the per-pass hop over 8 charts, and a +12
+    semitone shift degenerates to near-silence), so the per-pass hop is the
+    default and the accelerating reading survives only as a diagnostic.
+    See audio_engine.md 4.10.
+    """
+    m = mixof(mix)
+    ratio = ps_ratio(amount)
+    n = L.size
+    outL, outR = np.empty(n, np.float32), np.empty(n, np.float32)
+
+    if ratio == 1.0:                       # unison: the DLL copies straight
+        return L.astype(np.float32), R.astype(np.float32)
+
+    accL = np.zeros(PS_BUFLEN, np.float64)
+    accR = np.zeros(PS_BUFLEN, np.float64)
+    have = 0                               # 0x248, persists across blocks
+    in_cur = 0                             # source frame the window starts at
+    hop_total = 0                          # the running sum legacy_cursor uses
+
+    for i0, i1 in blocks(n, block):
+        want = i1 - i0
+        guard = 0
+        while have < want:
+            guard += 1
+            if guard > 64 or in_cur >= n:  # ran off the note; pad with silence
+                have = want
+                break
+            win_l = L[in_cur:in_cur + PS_BUFLEN].astype(np.float64)
+            win_r = R[in_cur:in_cur + PS_BUFLEN].astype(np.float64)
+            if win_l.size < PS_BUFLEN:
+                win_l = np.pad(win_l, (0, PS_BUFLEN - win_l.size))
+                win_r = np.pad(win_r, (0, PS_BUFLEN - win_r.size))
+            # the int16 loader zeroes BOTH channels wherever the LEFT sample is
+            # exactly 0 and never reads the right one (0x180642b43); shared with
+            # FUN_18063d9e0, so it is a loader convention, not a pitch quirk
+            zero = win_l == 0.0
+            win_r = np.where(zero, 0.0, win_r)
+
+            lag = _ps_best_lag(win_l)
+            if ratio > 1.0:
+                hop = int(lag / (ratio - 1.0) + 0.5)
+                count = hop
+            else:
+                hop = int(lag / (1.0 / ratio - 1.0) + 0.5)
+                count = hop + lag
+            hop = max(hop, 1)
+
+            # stage 2: SOLA splice, then the plain copy tail
+            span = max(hop, lag)
+            gl = np.zeros(span + PS_LAG_MAX, np.float64)
+            gr = np.zeros(span + PS_LAG_MAX, np.float64)
+            j = np.arange(lag)
+            wdn = (lag - j) / float(lag)
+            wup = j / float(lag)
+            gl[:lag] = wdn * win_l[:lag] + wup * win_l[lag:2 * lag]
+            gr[:lag] = wdn * win_r[:lag] + wup * win_r[lag:2 * lag]
+            if span > lag:
+                tail = min(span - lag, PS_BUFLEN - 2 * lag)
+                if tail > 0:
+                    gl[lag:lag + tail] = win_l[lag:lag + tail]
+                    gr[lag:lag + tail] = win_r[lag:lag + tail]
+
+            _ps_sinc_into(accL, have, gl, count, ratio)
+            _ps_sinc_into(accR, have, gr, count, ratio)
+
+            have = min(have + count, PS_BUFLEN)
+            hop_total += hop
+            in_cur += hop_total if legacy_cursor else hop
+
+        take = min(want, have)
+        outL[i0:i0 + take] = (1.0 - m) * L[i0:i0 + take] + m * accL[:take]
+        outR[i0:i0 + take] = (1.0 - m) * R[i0:i0 + take] + m * accR[:take]
+        if take < want:                    # accumulator underran: pass dry
+            outL[i0 + take:i1] = L[i0 + take:i1]
+            outR[i0 + take:i1] = R[i0 + take:i1]
+
+        have = max(have - want, 0)
+        accL[:have] = accL[want:want + have]
+        accR[:have] = accR[want:want + have]
+        accL[have:] = 0.0
+        accR[have:] = 0.0
+
+    return outL, outR
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
@@ -926,6 +1119,7 @@ EFFECTS = {
     "sidechain":     (fx_sidechain,      "mix,periodSec,attack,hold,release"),
     "wobble":        (fx_wobble,         "mix,filterType,waveType,freqA,freqB,periodSec,Q"),
     "bitcrush":      (fx_bitcrush,       "mix,rate"),
+    "pitchshift":    (fx_pitchshift,     "mix,amount"),
     "lpf":           (fx_lpf,            "mix,freq,Q"),
     "hpf":           (fx_hpf,            "mix,freq,Q"),
     "peak":          (fx_peak,           "mix,freq,Q"),
