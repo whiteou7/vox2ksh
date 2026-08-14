@@ -65,11 +65,18 @@ class Difficulty:
 
     @property
     def level_int(self):
-        """ksh_format.md's `level` field is an int, 1-20 - clamp the decimal
-        level into that range for the .ksh header rather than writing
-        something KSM won't accept. The UI shows level_display instead,
-        uncapped."""
-        return max(1, min(20, round(self.difnum / 10.0)))
+        """ksh_format.md's `level` field is an int, 1-20 - the decimal level
+        has to collapse into that range for the .ksh header rather than
+        writing something KSM won't accept. The UI shows level_display
+        instead, uncapped and with its decimal intact.
+
+        Rounds down, not to nearest: `round()` would send a difnum like 175
+        (17.5, and not rare - 407 charts carry it) to 18 via Python's
+        round-half-to-even, overstating the level by a full point. Truncating
+        via integer division matches how SDVX's own level display treats a
+        half-level - it's a "17" with a plus/star next to it, not a "17" or
+        "18" depending on parity of the whole number (user-reported)."""
+        return max(1, min(20, self.difnum // 10))
 
 
 @dataclass

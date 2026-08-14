@@ -94,6 +94,16 @@ RDP_TOL = 1.0 / 500
 # Default gap from a genuine same-tick vox slam's start to where its end lands in the ksh output, as a divisor of the whole note - 32 is a 32nd note, i.e. 1/8 of a beat, which is what the reference hand charts use in every time signature. Deliberately not a fraction of the local measure; see the module docstring's "true vox slam" paragraph for why that breaks outside 4/4. `build_runs(slam_gap_frac=0)` disables this and falls back to the old bare next-free-tick placement.
 SLAM_GAP_FRAC = 32
 
+# ksh's own slam-recognition cutoff (1/32-or-shorter reads as a slam - see
+# the module docstring's point 1) - a fixed engine constant, kept separate
+# from SLAM_GAP_FRAC even though they default to the same 32 by coincidence:
+# SLAM_GAP_FRAC is this project's tuning knob for how a genuine slam is
+# *drawn*, this is what the *engine* treats as the boundary. Used by
+# _slam_landing_tick to work out the least backoff that keeps the leg
+# *after* a slam landing from itself being misread as a second slam - see
+# its docstring.
+KSH_SLAM_CUTOFF_FRAC = 32
+
 
 def pos_to_char(pos):
     pos = 0.0 if pos < 0.0 else (1.0 if pos > 1.0 else pos)
@@ -284,20 +294,60 @@ def _bump_to_free_tick(t, used):
     return t + bump
 
 
-def _slam_landing_tick(start_t, used, gap, ceiling=None):
+def _slam_landing_tick(start_t, used, gap, ceiling=None, safe_gap=1, max_backoff=1):
     """Target tick for a genuine same-tick slam's second point: `gap` ticks
     after `start_t` (see SLAM_GAP_FRAC / the module docstring), backed off
     to fit when there isn't room for the full gap.
 
     `ceiling`, when given, is the tick of whatever point comes next in the
-    run (not yet placed itself) - the standard gap must land strictly
-    before it, or a dense slam chain would have this slam's end overlap the
-    next slam's start. No attempt is made to renegotiate room further back;
-    landing one tick before the collision is enough (see docstring).
+    run (not yet placed itself). Two different constraints both bear on
+    where the landing can go:
+
+    - Hard: the landing must not land on or past `ceiling` - two points
+      can't share a tick, and a dense slam chain can leave the standard
+      gap doing exactly that. This one is non-negotiable; the target backs
+      off as far as it takes (`ceiling - 1` at worst), same as always.
+
+    - Soft: the leg *from* the landing *to* `ceiling` should also clear
+      ksh's own slam-recognition cutoff (1/32-or-shorter,
+      KSH_SLAM_CUTOFF_FRAC - see the module docstring's "true vox slam"
+      paragraph) so it doesn't get misread as an unintended second slam
+      right on the heels of the real one. `safe_gap` is the least room
+      that clears it (one tick past the cutoff). Unlike the hard
+      constraint, this one is capped: the landing backs off *at most*
+      `max_backoff` ticks from its nominal position trying to satisfy it,
+      never more, even when that leaves the trailing leg still inside the
+      cutoff. Found and fixed against 2397_ultracharge_yutaimai_5m: at
+      measure 17, 12 ticks of total room meant a 1-tick backoff (nominal
+      6 -> 5) was already enough to clear the cutoff on the trailing leg,
+      no problem. But in the same chart's staircase slam chain at tick
+      7592, only 8 ticks of room separated that slam from the run's true
+      end - chasing the full `safe_gap` there backed the landing off by 5
+      ticks, crushing the slam itself down to a 1-tick hairline next to
+      its neighbours (user-reported: "too thin", "should only be deduced
+      by 1 tick"). Capping the backoff instead leaves the slam a normal
+      5 ticks and accepts that the trailing 3-tick leg may still read as a
+      second slam - the same unresolvable squeeze `Run.tight` already
+      exists to flag (module docstring point 3): with only 8 ticks between
+      a slam and the run's end, no split of that room gives both a
+      visible slam *and* a safely-clear tail, so the slam's own width
+      wins.
     """
-    target = start_t + max(1, gap)
-    if ceiling is not None and target >= ceiling:
-        target = ceiling - 1
+    nominal = start_t + max(1, gap)
+    target = nominal
+    if ceiling is not None:
+        hard_limit = ceiling - 1
+        if target > hard_limit:
+            target = hard_limit          # mandatory: never collide with ceiling
+        soft_limit = ceiling - max(1, safe_gap)
+        if target > soft_limit:
+            # capped relative to the *nominal* position, not wherever the
+            # hard-collision clamp above already left `target` - a dense
+            # chain that already forced a bigger-than-max_backoff reduction
+            # to avoid an outright collision shouldn't get squeezed further
+            # still chasing the softer non-slam-tail goal.
+            target = max(soft_limit, nominal - max_backoff, start_t + 1)
+            target = min(target, hard_limit)
     while target in used and target > start_t:
         target -= 1
     target = max(target, start_t + 1)
@@ -379,7 +429,13 @@ def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC):
                         ceiling = next_true_start - 1
                     else:
                         ceiling = None
-                    t = _slam_landing_tick(points[-1][0], used_ticks, gap, ceiling)
+                    meas, _ = tl.measure_of_tick(points[-1][0])
+                    # One tick past ksh's own slam cutoff - the least a
+                    # trailing leg can be and still be unambiguously *not*
+                    # a slam (see _slam_landing_tick's docstring for why
+                    # this isn't the more conservative min_gap_frac).
+                    safe_gap = max(1, tl.measure_length(meas) // KSH_SLAM_CUTOFF_FRAC) + 1
+                    t = _slam_landing_tick(points[-1][0], used_ticks, gap, ceiling, safe_gap)
                 else:
                     t = _bump_to_free_tick(t, used_ticks)
             else:
