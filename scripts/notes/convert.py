@@ -242,12 +242,25 @@ def convert(vox_path, out_path, camera=False, meta=None, slam_gap_frac=laser.SLA
             last_tick = max(last_tick, max(cam_spin))
     last_measure, _ = tl.measure_of_tick(last_tick)
 
-    # the initial tempo is already stated in the header's "t="; only changes
-    # after it need a body "t=" line. Time signature is different: KSM's own
-    # editor always restates "beat=" right after the first bar line even
-    # when it matches the header default, so measure 0 keeps its entry.
+    # When the chart only has one BPM the whole way through, the header's
+    # single-value "t=" already says it and no body line is needed. But the
+    # instant there's more than one, the header's "t=" becomes a "min-max"
+    # range (see _header) that doesn't by itself say which end the chart
+    # *starts* on - KSM's own editor always restates the actual starting
+    # tempo as a body "t=" right at measure 0 in that case (confirmed
+    # against every multi-BPM reference chart in scripts/shared/reference/
+    # ksh: single-BPM charts never get a measure-0 "t=", every multi-BPM one
+    # does). Skipping bpm_changes[0] unconditionally left that line out,
+    # so a chart's first measure(s) played back at whatever the engine
+    # defaults to instead of the vox's actual starting BPM - found against
+    # 2397_ultracharge_yutaimai_5m, whose "t=55-220" header did not by
+    # itself establish that the chart starts at 220 (user-reported).
+    # "beat=" doesn't have this problem: it's a single value in the header
+    # to begin with, so KSM's habit of restating it at measure 0 is just
+    # convention, not information the range-header case is missing here.
     bpm_by_measure = {}
-    for (tick, bpm) in bpm_changes[1:]:
+    multi_bpm = len(set(b for _t, b in bpm_changes)) > 1
+    for (tick, bpm) in bpm_changes if multi_bpm else bpm_changes[1:]:
         m, off = tl.measure_of_tick(tick)
         bpm_by_measure.setdefault(m, []).append((off, bpm))
     beat_by_measure = {mm: (num, den) for (mm, num, den) in beat_changes}
