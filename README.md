@@ -10,7 +10,7 @@ Conversion splits into three independent problems. They share the `.vox` parser 
 |---|---|---|
 | **audio** | The FX/laser effect engine, the device ParamEq, the music duck, the layered SE bank, the per-sample `S3V0` header gains. | **Largely done.** Every FX-button effect is implemented; composite kind 14 (id 13) is still only partly transcribed. |
 | **notes** | BT/FX/laser note data, timing, BPM and time-signature changes, slams, curve types, chip vs hold — the `.ksh` chart body. | **Done** |
-| **camera** | `#SPCONTROLER` track data: lane tilt, spin/swing, top/bottom zoom. `.ksh` expresses only a subset, so this needs mapping decisions on top of transcription. | **In progress.** Zoom top/bottom are reliable, and spin *kind* and *direction* verified at 100 % against the reference set. Spin *length* is still name-derived rather than fitted and needs a ground-up re-derivation; tilt needs review. |
+| **camera** | `#SPCONTROLER` track data: lane tilt, spin/swing, top/bottom zoom. `.ksh` expresses only a subset, so this needs mapping decisions on top of transcription. | **In progress.** Zoom top/bottom are reliable. Spin is settled: *kind* and *direction* verified against the reference set, and *length* re-derived by regression — one law, `ksh = 24 × (vox quarter notes)`, half the duration vox declares, covering every roll type except the two with no reference coverage (4 and 7). Tilt needs review. |
 
 ## The writeup
 

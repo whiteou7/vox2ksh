@@ -250,10 +250,11 @@ Empty for all charts; purpose unknown.
     + `2`: 2-beat roll
     + `3`: 3-beat roll
     + `4`: 12-beat triple roll
-    + `5`: 3-beat swing (or 2.5 beats?)
+    + `5`: 3-beat swing
     + `6`: (v12) 8x-speed roll (length from C8, or C9 in v13)
     + `7`: (v12) undocumented in the inherited notes but real: 49 rows across the corpus. Behaves like type `6`, with the same C8/C9 length mechanism.
-    + The per-type beat lengths are **names, not measurements** — they come from the inherited notes' own naming, and types `2` and `5` have observed defaults (72, and 72–96) that contradict the 64 and 96 their names imply. Only the *kind* mapping (roll vs swing) and the spin *direction* rule are verified against reference conversions; see "Open questions" and [`camera.md`](camera.md).
+    + The durations given for types `1`, `2`, `3` and `5` are confirmed against the reference conversions: each reproduces its stated length at medians of 6.00, 2.00, 3.00 and 3.00 quarter notes, holding a ratio of exactly 6:3:3 between types `1`, `3` and `5` within a single chart. Type `4`'s 12 beats is a name only — one reference sample, 25 rows corpus-wide.
+    + Because this column covers the overshoot and KSM's does not, a `.ksh` spin token's length is half the duration declared here: `24 * beats`, in ksh 192nds. See [`camera.md`](camera.md).
 
 + C4: Laser effect, applied until the timing of the next node
     + `0`: Peak filter, default side low, opposite side high
@@ -282,7 +283,8 @@ Empty for all charts; purpose unknown.
 
 + C9: (v12?) (Optional) Cells per chain — the number of cells per chain contributed by a laser segment. If unspecified, defaults to 12 for BPMs $< 255$ and 24 for BPMs $\geq 255$.
     + In v10/v12, C9 alongside a populated C8 is rare — isolated to two charters (`i_kuroma`/`madeinlove_kuroma` in v10, `littleredridinghood_roughsketch` in v12), holding small values (1-12) consistent with the chain meaning and unrelated to roll length.
-    + **(v13) C9 doubles as the roll length for types 6/7.** With `C8=0`, C9 stays small for types 1-5 (mean ≈4.3, mostly 1-8) but is consistently and substantially larger for 6/7 (mean ≈17.4, range 3-45) — including within the same chart: of 33 v13 charts carrying both a small-type and a 6/7 row, 31 show the 6/7 row's C9 clearly larger. The ksh-side conversion and its scale factor are in [`camera.md`](camera.md).
+    + **(v13) For roll types `6`/`7`, C9 holds the roll length** — the same value in the same unit as C8, relocated to this column. The two distributions coincide corpus-wide (quartiles `[min, q25, median, q75, max]`): type `6`, v12 C8 `[5, 12, 15, 25, 135]` mean 17.7 against v13 C9 `[3, 12, 15, 25, 35]` mean 18.2; type `7`, `[5, 7, 15, 25, 32]` mean 15.7 against `[10, 12, 18, 28, 45]` mean 20.4. The ksh conversion is `3 * C9`, identical to C8's. For types `1`-`5` this column keeps its cells-per-chain meaning and is an order smaller (`[1, 2, 3, 5, 21]`, mean 4.0); it is not a length there.
+    + A v13 row of type `6`/`7` can carry both columns (4 rows corpus-wide). C8 is `1` or `2` on all of them against a C9 of 10-30 — it is vestigial, and C9 is the length. See [`camera.md`](camera.md).
 
 ### `#TRACK2`/`#TRACK7`
 
@@ -441,7 +443,7 @@ Row shape is 8 fields for every control type, unchanged in v13.
 
 Things this document does not settle. Everything above is what the format does; this is what is still guessed at.
 
-+ **Roll/swing default lengths (C3/C8).** The per-type beat lengths are the inherited notes' naming, not measurements, and types 2 and 5 contradict them. C9-as-length for types 6/7 in v13 is inferred from magnitude and has never been confirmed against the renderer. Re-derivation method and current state: [`camera.md`](camera.md), "Spin/swing: length".
++ **Roll/swing lengths for types `4` and `7` (C3/C8).** Type `4`'s stated 12 beats is contradicted by the only reference sample carrying it, and type `7` has no reference coverage at all — its length behaviour is assumed identical to type `6`'s. Neither is confirmed against the renderer. See [`camera.md`](camera.md), "Spin/swing: length".
 + **Laser curve type `1`** — no known examples in any chart.
 + **BT tracks' C2** — non-zero (usually `2`) on holds, with no observed effect.
 + **`#BPM OPTION`'s two fields.** `ConstantScroll` plausibly means "use a constant visual scroll speed regardless of BPM changes", analogous to ksh's `scroll_speed`; `RepresentativeBpm` plausibly matches ksh's `to` or VOX's own default-BPM concept. Neither is confirmed against the renderer.

@@ -38,6 +38,6 @@ Where everything else is:
 # To-do
 
 * Implement Pitch Shift
-* Derive spin length using regression
+* ~~Derive spin length using regression~~ — done, `specs/camera.md` "Length". `ksh = 24 × (vox quarter notes)`, exactly half the duration vox declares; run `python scripts/camera/correlate.py` for the derivation. Types 4 and 7 still have no reference coverage.
 * "note: 2 camera event(s) past the chart's last real note were dropped" this shouldn't be a thing 
 * work on removing pretilt again??

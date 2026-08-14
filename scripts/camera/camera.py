@@ -195,8 +195,8 @@ SWING_ROLL_TYPE = 5
 DEFAULT_BEATS = {1: 6, 2: 2, 3: 3, 4: 12, 5: 3}
 
 # The spin-length law, fit against 1354 reference samples by
-# scripts/camera/correlate.py's --spin report: a ksh spin token's length is
-# exactly HALF the duration vox declares, expressed in ksh 192nds.
+# scripts/camera/correlate.py's spin_length_report: a ksh spin token's
+# length is exactly HALF the duration vox declares, in ksh 192nds.
 #
 # vox states roll lengths in quarter notes and its number covers the whole
 # motion *including the overshoot*, where ksh's number covers only the part
@@ -218,7 +218,6 @@ TYPE67_UNIT_TO_KSH192 = 3   # 1/32 note
 # vs 18.2), so no separate scale factor applies - see specs/camera.md. C9
 # on types 1-5 is the unrelated "cells per chain" (median 3) and must not
 # be read as a length, which is why this path is restricted to 6/7.
-
 
 
 def _outgoing_dirsign(lst, i, max_lookahead=5):
