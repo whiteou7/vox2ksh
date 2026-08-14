@@ -13,10 +13,10 @@ Conventions kept identical to the game:
   * coefficients / LFO values are recomputed once per block, not per sample
   * final writeback clamps to [-32768, 32767] and truncates toward zero
 
-Requires numpy. The biquad recursion (_iir_run) runs a pure-Python per-sample
-loop rather than a vectorised filter: its feedback path must clamp to int16
-every sample (see _iir_run's docstring), which is a nonlinearity no
-vectorised IIR routine can express.
+Requires numpy, and numpy only. The biquad recursion (_iir_run) runs a
+pure-Python per-sample loop rather than a vectorised filter because numpy has
+no IIR primitive and scipy is not a dependency; the recursion itself is linear
+(see _iir_run's docstring for why its feedback must not be requantised).
 """
 
 import argparse
@@ -131,25 +131,13 @@ def biquad_coeffs(kind, freq, q):
 def _iir_run(x, c, state):
     """y[n] = b0 x[n] + b1 x[n-1] + b2 x[n-2] - a1 y[n-1] - a2 y[n-2]
 
-    The feedback memory (y[n-1], y[n-2]) is clamped and truncated to int16
-    range every sample, not just at the end of the block. Per the module
-    docstring and README 6.2, the engine's scratch buffers are raw int16 with
-    no normalisation, and every effect writes its result back through that
-    clamped buffer before the next stage - or the next sample - reads it. A
-    resonant biquad reads its own history out of that same buffer, so its
-    feedback path saturates sample-by-sample on real hardware. Running the
-    recursion in full float precision and clamping only once per block (the
-    previous behaviour, and still what scipy's vectorised lfilter does) lets
-    a high-Q filter's internal state ring up far past +-32768 before a single
-    brutal truncation at the block boundary - measured on a real chart
-    (gryphone_etia 5m, measures 30-33: a fast laser wiggle through the tab
-    LPF at Q=5.0) to produce sustained full-scale clipping that the cabinet
-    capture of the same passage never comes close to. Clamping the feedback
-    every sample cut that window's clipped-sample count from 32 to 2 while
-    leaving passages that never approach the ceiling untouched, since the
-    clamp is then a no-op. This is necessarily the slow per-sample path -
-    the nonlinearity breaks scipy's vectorised lfilter - but it only runs
-    while a filter effect is actually active.
+    The recursion is linear: the feedback memory (y[n-1], y[n-2]) is plain float, neither clamped nor quantised. `FUN_18063e500` writes each filter output into the *float* history buffers at `gen+0x48` (L) and `gen+0x50` (R) and reads them back from there on the next sample, entirely separately from the mixed/trimmed result it writes to the wet buffers at `gen+0x58`/`gen+0x60`. The only int16 clamp-and-truncate in the chain is the writeback helper `FUN_18063dc40`, which runs once per stage, not per sample - so the inter-stage requantisation of audio_engine.md 8.1 is real and stays on, but it is downstream of this loop rather than inside it.
+
+    An earlier version clamped and truncated the feedback to int16 every sample, on the reading that the engine's scratch buffers are raw int16 and that the next *sample* therefore reads a requantised history. The decompiled leaf above rules that out, and the truncation is not harmless: it injects +-1 LSB into a recursion whose poles sit within 1e-3 of the unit circle at low cutoffs (9.5e-4 at 40 Hz), where the feedback is very nearly `2*y[n-1] - y[n-2]`. That drives a limit cycle. Measured on 0381_hyena_hommarju 4i, whose tab HPF (40-2000 Hz, Q 3) sweeps to its 40 Hz endpoint twice: the truncating version added +8.3 dB at 250-700 Hz and +6.9 dB at 700-2500 Hz over dry, which a 40 Hz highpass cannot do, and doubled RMS (6776 -> 14416 versus 8693 for the linear recursion). Audibly a broadband roar; the cabinet capture of that passage is flat across those bands. The artefact is confined to low cutoffs and is gone by ~200 Hz, which is why it surfaced as two bad laser runs rather than as a chart-wide problem.
+
+    What the truncation was introduced to suppress - gryphone_etia 5m measures 30-33, a fast laser wiggle through the tab LPF at Q=5.0 - is a separate, smaller issue that it only partly masked. Our render's level rises +1.9 dB over its own whole-track level in that window against the capture's +1.0 dB; the clamp took about 0.3 dB off that overshoot while manufacturing the much larger artefact above. See audio_engine.md 8.2.
+
+    Still a per-sample Python loop rather than a vectorised filter: numpy has no IIR primitive and scipy is not a dependency (requirements-gui.txt is numpy-only). It only runs while a filter effect is actually active.
     """
     b0, b1, b2, a1, a2 = c
     x1, x2, y1, y2 = state
@@ -159,13 +147,7 @@ def _iir_run(x, c, state):
         yn = b0 * xn + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
         y[i] = yn
         x2, x1 = x1, xn
-        yn_fb = yn
-        if yn_fb > 32767.0:
-            yn_fb = 32767.0
-        elif yn_fb < -32768.0:
-            yn_fb = -32768.0
-        yn_fb = float(int(yn_fb))          # truncate toward zero, like the engine
-        y2, y1 = y1, yn_fb
+        y2, y1 = y1, yn
     state[0], state[1], state[2], state[3] = x1, x2, y1, y2
     return y
 

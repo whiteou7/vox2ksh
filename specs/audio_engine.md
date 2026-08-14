@@ -154,6 +154,35 @@ BPF:        G = (Q <= 1) ? max(Q + 0.9, 0.1)
 
 The LPF/HPF trim `(1 - Q·0.04)` is applied to the **already mixed** signal, so it attenuates the dry path too — that is what makes SDVX laser sweeps duck slightly.
 
+**The feedback path is pure float, and must not be requantised.** `FUN_18063e500` writes each raw filter output into the *float* history buffers at `gen+0x48` (L) / `gen+0x50` (R) and reads them back from there on the next sample; the mixed-and-trimmed result goes to a separate pair of wet buffers at `gen+0x58`/`gen+0x60`. So `y[n-1]`/`y[n-2]` above are the unmixed, untrimmed, unclamped float outputs. The only int16 clamp-and-truncate in the chain is the writeback helper `FUN_18063dc40`, which runs once per *stage* — the inter-stage requantisation of §8.1 is real, but it sits downstream of the recursion, not inside it.
+
+This matters more than it looks. An earlier version of `sdvx_fx.py` clamped and truncated the feedback to int16 every sample, on the reading that the engine's scratch buffers are raw int16 and the next *sample* therefore reads a requantised history. The decompiled leaf rules that out, and the truncation is not a harmless approximation: it injects ±1 LSB into a recursion whose poles sit within 10⁻³ of the unit circle at low cutoffs (9.5·10⁻⁴ at 40 Hz), where the feedback is very nearly `2·y[n-1] − y[n-2]`. The result is a limit cycle. Measured on `0381_hyena_hommarju` 4i, whose tab HPF (40–2000 Hz, Q 3) sweeps to its 40 Hz endpoint twice — at m10 beat 2 and m12 beat 2:
+
+```
+static HPF @ 40 Hz, Q 3, on that chart's own audio
+
+band            dry dB   linear   truncating-feedback
+  20-  40 Hz     134.0     +5.4          +1.3
+  40-  60 Hz     145.2     +6.4          -3.3
+ 250- 700 Hz     145.3     +0.1          +8.3      <- a 40 Hz highpass cannot do this
+ 700-2500 Hz     146.1     +0.0          +6.9
+rms                6776     8693         14416
+```
+
+Audibly a broadband roar over the last third of each beat, plus 57 clipped samples; the cabinet capture of that passage is flat across those bands, and the two runs were the only cells in measures 10–17 where the render scored *worse* than doing nothing (3.168 → 3.712 and 3.134 → 3.924 against dry). The artefact is confined to low cutoffs — it is already gone by 200 Hz — which is why it surfaced as two bad laser runs rather than as a chart-wide problem, and why it survived so long. The device ParamEq (§7.1) shares the same recursion and clamps its centre frequency to `[80, 16000]`, so it was affected too, though less severely.
+
+**Measured, 40 (chart, capture) pairs, `-b 512`.** On the two hyena windows themselves the fix is worth **+1.23 dB** each (3.712 → 2.478, 3.924 → 2.702), and their clipped-sample count falls 110 → 6 — the ringing was *causing* that clipping, not restraining it. Across the corpus it is small and broad, because most laser frames are the ParamEq at centre frequencies where ±1 LSB barely matters:
+
+```
+                          before    after    delta   charts up/down
+laser region (12 pairs)   +1.387   +1.395   +0.008        10/2
+FX HighPassFilter          +4.256   +4.375   +0.119         3/2
+ALL (40 pairs)             +0.914   +0.918   +0.004
+every other effect row              unchanged, |delta| <= 0.004
+```
+
+`masscheck.py` drops the `laser` and `idle` regions from its CSV (they have no exclusive column), so its aggregate cannot see this change's main target at all — the laser row above was scored separately by re-rendering both ways. The `HighPassFilter` row is the FX-button filter (id 12) and is carried almost entirely by one chart (`aimai_chocolate` 5m, +0.551); read it as "not a regression" rather than as the win.
+
 ### 4.2 Laser / knob sweep (wrappers `0x180630110` LPF, `0x1806303f0`+`0x180630760` HPF)
 
 Chart params `{mix, freqLo, freqHi, Q}`. Per block:
@@ -1023,7 +1052,13 @@ Measurement says `chain`, decisively. Rendering the 20 charts with the most FX-h
 
 The three charts preferring `dry` do so by 0.1–0.5 dB, inside the spread; `add` is ruled out outright. An independent reimplementation reads the same path as `chain` (§9.1). So `chain` ships, and **the binary reading is what needs re-examining** — specifically whether `FUN_18062e3d0`'s source-pointer restore applies only to the FX sub-chain, or whether `param_2` already points at the FX result by the time it is restored.
 
-**Two consequences wherever effects stack.** *Mix compounds rather than averages*: every effect computes `out = (1-mix)·dry + mix·wet` against **its own input**, so two effects at 50 % leave the original at 25 %, not 50 %. And *there is an int16 requantisation between stages* (`FUN_18063dc40` → `FUN_18063d9e0`, §2), so a chain can clip **mid-chain** — a resonant filter feeding a boosting effect hard-clips at the boundary in a way an all-float implementation would not reproduce. `--no-stage-clip` disables it; the engine does clip, so the default keeps it.
+**Two consequences wherever effects stack.** *Mix compounds rather than averages*: every effect computes `out = (1-mix)·dry + mix·wet` against **its own input**, so two effects at 50 % leave the original at 25 %, not 50 %. And *there is an int16 requantisation between stages* (`FUN_18063dc40` → `FUN_18063d9e0`, §2), so a chain can clip **mid-chain** — a resonant filter feeding a boosting effect hard-clips at the boundary in a way an all-float implementation would not reproduce. `--no-stage-clip` disables it; the engine does clip, so the default keeps it. This is per *stage*, and is not licence to requantise inside a DSP leaf — §4.1 is what happens when that line gets crossed.
+
+### 8.2 High-Q laser filter passages run about 1 dB hot
+
+Unresolved, and smaller than it looks. On `2226_gryphone_etia` 5m measures 30–33 (a fast laser wiggle through the tab LPF at Q 5.0), the render's level rises **+1.9 dB** over its own whole-track level while the capture rises **+1.0 dB** over its own — an overshoot of roughly 0.9 dB, which shows up as 0.35 % of that window's samples clipping against the capture's clean equivalent. The spectral metric barely sees it (it is level-normalised per frame: the window scores 3.542 rendered versus 4.895 dry, and the overshoot moves that by 0.005), so this needs a level measurement, not the metric, to track.
+
+The truncating feedback of §4.1 used to mask about 0.3 dB of this, which is why it was originally introduced — it was treating this symptom, at the cost of manufacturing a far larger artefact at low cutoffs. Removing it makes the overshoot fully visible again rather than causing it. Candidates not yet separated: the tab LPF's resonance at Q 5 against its `(1 − Q·0.04)` trim, the device ParamEq stacking on top (§7.1), and the `chain` combination model (§8.1) compounding both. `CGainWithHardLimiter` (§6.2) is a plain gain-and-clip with no knee, so the game has nothing that would absorb an overshoot this size — the excess is ours.
 
 ---
 
