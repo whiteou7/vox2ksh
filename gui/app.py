@@ -157,6 +157,10 @@ class App:
         ttk.Checkbutton(filt, text="Advanced", variable=self.advanced_var,
                          command=self._apply_toggle_states).pack(side="left", padx=(6, 0))
 
+        self.slam_gap_var = tk.BooleanVar(value=bool(self.settings.get("standard_slam_gap", True)))
+        ttk.Checkbutton(filt, text="Standard slam gap", variable=self.slam_gap_var,
+                         command=self._save_slam_gap).pack(side="left", padx=(6, 0))
+
         ttk.Frame(filt, width=20).pack(side="left")
         ttk.Label(filt, text="Search:").pack(side="left")
         self.search_var = tk.StringVar()
@@ -165,6 +169,12 @@ class App:
 
     def _save_diff_filters(self):
         self.settings["difficulties"] = [k for k, v in self.diff_vars.items() if v.get()]
+        settings_store.save(self.settings)
+
+    def _save_slam_gap(self):
+        # notes_convert.convert()'s slam_gap_frac (laser.py's SLAM_GAP_FRAC when
+        # checked, 0 when unchecked - see convert_worker.run_job).
+        self.settings["standard_slam_gap"] = self.slam_gap_var.get()
         settings_store.save(self.settings)
 
     # ---------------------------------------------------------------- table
@@ -512,6 +522,7 @@ class App:
             se_bank_dir=self._resolve_se_bank_dir(),
             ffmpeg_path=self._resolve_ffmpeg(),
             render_audio=True,
+            standard_slam_gap=self.slam_gap_var.get(),
             advanced_values=self._read_advanced_values(),
         )
         self._log("=== starting: %d job(s) across %d song(s) -> %s ===" % (len(jobs), len(selected), out_dir))

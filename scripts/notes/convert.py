@@ -35,6 +35,10 @@ _header() would otherwise write - see its docstring for the exact keys. This
 is how a caller with an actual data source (music_db.xml, for the GUI) gets
 a real header instead of "artist=" left blank; every existing caller passes
 nothing and gets the old placeholder behaviour unchanged.
+
+`slam_gap_frac` is forwarded to laser.build_runs() - see its docstring and
+laser.py's module docstring ("true vox slam") for what it controls. CLI
+`--no-slam-gap` sets it to 0.
 """
 
 import argparse
@@ -160,13 +164,14 @@ DIFF_MAP = {"1n": "light", "2a": "challenge", "3e": "extended",
             "4i": "infinite", "5m": "infinite"}
 
 
-def convert(vox_path, out_path, camera=False, meta=None):
+def convert(vox_path, out_path, camera=False, meta=None, slam_gap_frac=laser.SLAM_GAP_FRAC):
     chart = vox.load(vox_path)
     tl = chart.tl
 
     bt_lanes = [HoldLane(notes) for notes in chart.bt]
     fx_lanes = [HoldLane(notes) for notes in chart.fx]
-    laser_lanes = [LaserLane(laser.build_runs(pts, tl)) for pts in chart.laser]
+    laser_lanes = [LaserLane(laser.build_runs(pts, tl, slam_gap_frac=slam_gap_frac))
+                   for pts in chart.laser]
 
     # camera: tick -> pending "option=value" line(s), and tick -> spin suffix.
     # Computed here (not passed in) since it needs the same VoxChart this
@@ -369,13 +374,28 @@ def _header(chart, bpm_changes, beat_changes, meta=None):
     return h
 
 
-def main():
+def build_arg_parser():
+    """Split out of main() so a caller (the GUI) can introspect the option
+    list without duplicating it or invoking main() itself - same reasoning
+    as apply_chart.py's build_arg_parser()."""
     ap = argparse.ArgumentParser()
     ap.add_argument("vox", help="path to a .vox chart")
     ap.add_argument("-o", "--output", default=None)
-    args = ap.parse_args()
+    ap.add_argument("--no-slam-gap", action="store_true",
+                     help="place a genuine same-tick vox slam's landing point on the "
+                          "very next free tick instead of ksh's standard 1/64-of-a-measure "
+                          "gap (laser.py's SLAM_GAP_FRAC). On by default, since the bare "
+                          "next-free-tick placement renders as a near-invisible hairline "
+                          "and can force a measure's grid down to near-native resolution "
+                          "to fit just one point - see laser.py's module docstring")
+    return ap
+
+
+def main():
+    args = build_arg_parser().parse_args()
     out = args.output or os.path.splitext(os.path.basename(args.vox))[0] + ".ksh"
-    path = convert(args.vox, out)
+    slam_gap_frac = 0 if args.no_slam_gap else laser.SLAM_GAP_FRAC
+    path = convert(args.vox, out, slam_gap_frac=slam_gap_frac)
     print("wrote %s" % path)
 
 

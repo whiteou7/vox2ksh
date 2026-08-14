@@ -52,10 +52,24 @@ The three problems named in HANDOFF.md 3.1:
 A true vox slam - two points at the identical tick - is different from all
 of the above: it is not a curve to approximate, it is a real instantaneous
 jump, and both values must survive untouched. Ksh has no "same row, two
-values" - the second point is pushed to the very next free tick, which
-forces that measure's grid down to full native resolution wherever it
-happens (see convert.py's resolution picker) and reproduces the jump as
-ksh's own 1/32-or-shorter slam rule expects.
+values" - the second point needs a tick of its own. By default it lands
+`SLAM_GAP_FRAC` (1/64 of the local measure) after the first, matching how
+real hand-charted slams are spaced and staying comfortably inside ksh's own
+1/32-or-shorter slam-recognition cutoff - not just the very next free tick,
+which technically works too but renders as a near-invisible hairline next
+to a normal hand-charted slam and forces that measure's grid down to
+near-native resolution just to place one point (see convert.py's resolution
+picker). A dense enough slam chain - 8 slams to a beat, i.e. 32nd-note
+spacing, is the densest this project has seen - can leave less than 1/64 of
+a measure between one slam's start and the next, in which case the standard
+gap would land the first slam's end on or past the second slam's start;
+`_slam_landing_tick` doesn't do anything clever about that, it just backs
+the end off to one tick before the collision. The visual difference between
+a slam landing 1/64 of a measure out and one tick out isn't perceptible,
+and one tick of separation is all ksh actually needs to parse the two
+points as distinct rows. `build_runs(..., slam_gap_frac=0)` - wired to the
+CLI's `--no-slam-gap` and the GUI's "Standard slam gap" checkbox - turns
+this off and goes back to the bare next-free-tick placement.
 
 The same "same row, two values" problem can also land on a *run boundary*
 instead of inside one run's own point list: vox flags one run's true end
@@ -90,6 +104,12 @@ N_STEPS = len(KSH_STEPS) - 1   # 50 - the top index
 # fit; re-sweep (see the sweep in this file's git history, or redo it
 # inline) if xcheck.py picks up more reference charts.
 RDP_TOL = 1.0 / 500
+
+# Default gap, as a fraction of the local measure, from a genuine same-tick
+# vox slam's start to where its end lands in the ksh output - see the module
+# docstring's "true vox slam" paragraph. `build_runs(slam_gap_frac=0)`
+# disables this and falls back to the old bare next-free-tick placement.
+SLAM_GAP_FRAC = 64
 
 
 def pos_to_char(pos):
@@ -273,6 +293,27 @@ def _bump_to_free_tick(t, used):
     return t + bump
 
 
+def _slam_landing_tick(start_t, used, gap, ceiling=None):
+    """Target tick for a genuine same-tick slam's second point: `gap` ticks
+    after `start_t` (see SLAM_GAP_FRAC / the module docstring), backed off
+    to fit when there isn't room for the full gap.
+
+    `ceiling`, when given, is the tick of whatever point comes next in the
+    run (not yet placed itself) - the standard gap must land strictly
+    before it, or a dense slam chain would have this slam's end overlap the
+    next slam's start. No attempt is made to renegotiate room further back;
+    landing one tick before the collision is enough (see docstring).
+    """
+    target = start_t + max(1, gap)
+    if ceiling is not None and target >= ceiling:
+        target = ceiling - 1
+    while target in used and target > start_t:
+        target -= 1
+    target = max(target, start_t + 1)
+    used.add(target)
+    return target
+
+
 def _bump_to_free_tick_before(t, used, floor):
     """Like _bump_to_free_tick but searches backward, never going past
     `floor` (exclusive) - the tick of whatever point precedes it.
@@ -287,40 +328,74 @@ def _bump_to_free_tick_before(t, used, floor):
     return new_t
 
 
-def build_runs(laser_points, tl, min_gap_frac=24):
+def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC):
     """vox LaserPoint stream (one lane, already tick-sorted) -> [Run, ...].
 
     `min_gap_frac`: minimum point spacing enforced during decimation, as a
     fraction of the *local* measure length (1/24 by default - see the
     module docstring). Never applied across a genuine same-tick slam.
+
+    `slam_gap_frac`: a genuine same-tick slam's start-to-end gap, as a
+    fraction of the local measure (1/64 by default - see SLAM_GAP_FRAC and
+    the module docstring's "true vox slam" paragraph). 0 (or any other
+    falsy value) instead places the slam's end on the very next free tick,
+    the older, thinner behaviour.
     """
     used_ticks = set()
     out = []
-    for run_pts in _split_into_runs(laser_points):
-        if not run_pts:
-            continue
+    run_groups = [g for g in _split_into_runs(laser_points) if g]
+    for gi, run_pts in enumerate(run_groups):
         width = run_pts[0].width
         segments = _split_at_slams(run_pts)
 
-        points, slam_after, tight = [], [], False
+        # The next run's true (raw) start tick, if any - a run's *last*
+        # point needs this as a ceiling too, not just the next point within
+        # its own flattened list: nothing else stops the standard slam gap
+        # from landing this run's end on or past the next run's start, which
+        # would corrupt the output (two runs' points fighting over the same
+        # row) or, short of that, close up the one-tick gap
+        # LaserLane.anchors() relies on to keep them visually separate (see
+        # its docstring). One extra tick of margin (`- 1`) reserves room for
+        # that gap tick on top of just not colliding outright.
+        next_true_start = run_groups[gi + 1][0].tick if gi + 1 < len(run_groups) else None
+
+        # Flattened across every segment of this run (not just the current
+        # one) so a slam's landing point can see the tick of whatever comes
+        # right after it, even across a segment boundary - needed to back
+        # off from a collision with the *next* slam in a dense chain.
+        flat, tight = [], False
         for seg in segments:
             meas, _ = tl.measure_of_tick(seg[0][0])
             min_gap = max(1, tl.measure_length(meas) // min_gap_frac)
             kept, seg_tight = decimate_segment(seg, min_gap)
             tight = tight or seg_tight
+            flat.extend(kept)
 
-            for (t, v) in kept:
-                # kept[0] of every segment after the first repeats the
-                # previous segment's landing tick (that IS the slam) - give
-                # it its own line and mark the join.
-                is_slam_landing = bool(points) and t == points[-1][0]
-                if is_slam_landing:
-                    t = _bump_to_free_tick(t, used_ticks)
+        points, slam_after = [], []
+        for i, (t, v) in enumerate(flat):
+            # flat[i] repeating the previous kept point's raw tick is
+            # exactly a genuine vox same-tick slam (segment boundaries
+            # duplicate their shared tick by construction - see
+            # _split_at_slams) - give it its own line and mark the join.
+            is_slam_landing = bool(points) and t == points[-1][0]
+            if is_slam_landing:
+                if slam_gap_frac:
+                    meas, _ = tl.measure_of_tick(t)
+                    gap = max(1, tl.measure_length(meas) // slam_gap_frac)
+                    if i + 1 < len(flat):
+                        ceiling = flat[i + 1][0]
+                    elif next_true_start is not None:
+                        ceiling = next_true_start - 1
+                    else:
+                        ceiling = None
+                    t = _slam_landing_tick(points[-1][0], used_ticks, gap, ceiling)
                 else:
-                    used_ticks.add(t)
-                if points:
-                    slam_after.append(is_slam_landing)
-                points.append((t, v))
+                    t = _bump_to_free_tick(t, used_ticks)
+            else:
+                used_ticks.add(t)
+            if points:
+                slam_after.append(is_slam_landing)
+            points.append((t, v))
 
         out.append(Run(points, slam_after, width, tight))
 
