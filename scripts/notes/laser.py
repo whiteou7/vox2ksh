@@ -49,27 +49,13 @@ The three problems named in HANDOFF.md 3.1:
    is too close to its true end - across all 30 charts xcheck.py currently
    matches, that's zero runs.
 
-A true vox slam - two points at the identical tick - is different from all
-of the above: it is not a curve to approximate, it is a real instantaneous
-jump, and both values must survive untouched. Ksh has no "same row, two
-values" - the second point needs a tick of its own. By default it lands
-`SLAM_GAP_FRAC` (1/64 of the local measure) after the first, matching how
-real hand-charted slams are spaced and staying comfortably inside ksh's own
-1/32-or-shorter slam-recognition cutoff - not just the very next free tick,
-which technically works too but renders as a near-invisible hairline next
-to a normal hand-charted slam and forces that measure's grid down to
-near-native resolution just to place one point (see convert.py's resolution
-picker). A dense enough slam chain - 8 slams to a beat, i.e. 32nd-note
-spacing, is the densest this project has seen - can leave less than 1/64 of
-a measure between one slam's start and the next, in which case the standard
-gap would land the first slam's end on or past the second slam's start;
-`_slam_landing_tick` doesn't do anything clever about that, it just backs
-the end off to one tick before the collision. The visual difference between
-a slam landing 1/64 of a measure out and one tick out isn't perceptible,
-and one tick of separation is all ksh actually needs to parse the two
-points as distinct rows. `build_runs(..., slam_gap_frac=0)` - wired to the
-CLI's `--no-slam-gap` and the GUI's "Standard slam gap" checkbox - turns
-this off and goes back to the bare next-free-tick placement.
+A true vox slam - two points at the identical tick - is different from all of the above: it is not a curve to approximate, it is a real instantaneous jump, and both values must survive untouched. Ksh has no "same row, two values" - the second point needs a tick of its own. By default it lands a 32nd note after the first (`SLAM_GAP_FRAC`, a divisor of the whole note - so 1/8 of a beat, 6 ticks at the default 48-cell resolution), which is what the reference hand charts use: 1/8 of a beat is the most common slam gap in every time signature they contain. Not just the very next free tick, which technically works too but renders as a near-invisible hairline next to a normal hand-charted slam and forces that measure's grid down to near-native resolution just to place one point (see convert.py's resolution picker).
+
+The gap is a note value, never a fraction of the *local measure*. Those agree in 4/4 and diverge everywhere else, and the measure-relative version is wrong in both directions: in a measure longer than 4/4 it overshoots ksh's slam-recognition cutoff, which is beat-relative, and the "slam" then draws as an ordinary diagonal laser (found against 2293_leflector_niwashi_5m - its 7/4 measures got 10-tick gaps where its 4/4 measures got 6 - user-reported); in a measure shorter than 4/4 it undershoots into hairline territory again.
+
+A dense enough slam chain - 8 slams to a beat, i.e. 32nd-note spacing, is the densest this project has seen - can leave less than a 32nd note between one slam's start and the next, in which case the standard gap would land the first slam's end on or past the second slam's start; `_slam_landing_tick` doesn't do anything clever about that, it just backs the end off to one tick before the collision. The visual difference between a slam landing a 32nd note out and one tick out isn't perceptible, and one tick of separation is all ksh actually needs to parse the two points as distinct rows. `build_runs(..., slam_gap_frac=0)` - wired to the CLI's `--no-slam-gap` and the GUI's "Standard slam gap" checkbox - turns this off and goes back to the bare next-free-tick placement.
+
+Because the landing point sits `SLAM_GAP_FRAC` later than the raw shared tick, the curve segment that *starts* at that landing has to be decimated from where the landing actually lands, not from the raw tick - otherwise the first surviving point of a sweep coming straight out of a slam sits a slam-gap too close, inside ksh's 1/32 cutoff, and renders as a second slam right on the heels of the real one. See `_enforce_min_gap`'s `lead`.
 
 The same "same row, two values" problem can also land on a *run boundary*
 instead of inside one run's own point list: vox flags one run's true end
@@ -105,11 +91,8 @@ N_STEPS = len(KSH_STEPS) - 1   # 50 - the top index
 # inline) if xcheck.py picks up more reference charts.
 RDP_TOL = 1.0 / 500
 
-# Default gap, as a fraction of the local measure, from a genuine same-tick
-# vox slam's start to where its end lands in the ksh output - see the module
-# docstring's "true vox slam" paragraph. `build_runs(slam_gap_frac=0)`
-# disables this and falls back to the old bare next-free-tick placement.
-SLAM_GAP_FRAC = 64
+# Default gap from a genuine same-tick vox slam's start to where its end lands in the ksh output, as a divisor of the whole note - 32 is a 32nd note, i.e. 1/8 of a beat, which is what the reference hand charts use in every time signature. Deliberately not a fraction of the local measure; see the module docstring's "true vox slam" paragraph for why that breaks outside 4/4. `build_runs(slam_gap_frac=0)` disables this and falls back to the old bare next-free-tick placement.
+SLAM_GAP_FRAC = 32
 
 
 def pos_to_char(pos):
@@ -173,10 +156,12 @@ def _rdp(pts, tol):
     return left[:-1] + right
 
 
-def _enforce_min_gap(pts, min_gap):
+def _enforce_min_gap(pts, min_gap, lead=0):
     """Greedy left-to-right thinning so no two consecutive kept points are
     closer than `min_gap` ticks - except the run's true end, which is
     always kept regardless. Returns (kept_points, tight).
+
+    `lead` is how many ticks past its own tick `pts[0]` will actually be written at, and is nonzero exactly for a segment that begins at a genuine slam's landing point: build_runs places that point `slam_gap` ticks after the raw shared tick (see SLAM_GAP_FRAC), so spacing the rest of the segment from the raw tick leaves the first surviving curve point `slam_gap` ticks closer to it than the min-gap rule intends. That shortfall lands inside ksh's own 1/32 slam cutoff whenever the curve turns sharply straight out of the slam, and the sweep's first leg then renders as a second slam immediately after the real one - a slam-slam stutter where the chart means slam-then-sweep. Found against 2293_leflector_niwashi_5m tick 4440 (measure 24 beat 1.5, user-reported): the landing sat at 4446 and the next kept point at 4449, 3 ticks later. `lead` is the *nominal* gap; a landing that gets backed off from a ceiling collision only ends up further from the next point, never closer, so reserving the nominal amount is always safe.
 
     A fast-but-continuous curve tail (e.g. a sine ease-in, slow start then
     sharp finish) can leave the forward pass one point away from the end
@@ -210,19 +195,24 @@ def _enforce_min_gap(pts, min_gap):
     threshold, shifting the visible turning point six ticks early.
     """
     if len(pts) <= 2:
-        return pts, False
+        return pts, (len(pts) == 2 and pts[1][0] - (pts[0][0] + lead) < min_gap)
     out = [pts[0]]
+    # `eff` is out[i]'s tick as the output will actually see it - identical to out[i][0] for every point except the first, which `lead` moves. Kept as a parallel list rather than pre-shifting out[0] itself, since out[0]'s own tick is what the caller writes and what the slam-landing placement measures its gap from.
+    eff = [pts[0][0] + lead]
     dropped_after = {}   # index into `out` -> [(t, v), ...] dropped right after it
     for t, v in pts[1:-1]:
-        if t - out[-1][0] >= min_gap:
+        if t - eff[-1] >= min_gap:
             out.append((t, v))
+            eff.append(t)
         else:
             dropped_after.setdefault(len(out) - 1, []).append((t, v))
     last = pts[-1]
-    while len(out) > 1 and last[0] - out[-1][0] < min_gap:
+    while len(out) > 1 and last[0] - eff[-1] < min_gap:
         out.pop()
-    tight = (last[0] - out[-1][0]) < min_gap
+        eff.pop()
+    tight = (last[0] - eff[-1]) < min_gap
     out.append(last)
+    eff.append(last[0])
 
     for i in range(1, len(out) - 1):
         cands = dropped_after.get(i, ())
@@ -233,17 +223,18 @@ def _enforce_min_gap(pts, min_gap):
         rising = best_v >= prev_v
         for t, v in cands:
             more_extreme = (rising and v >= best_v) or (not rising and v <= best_v)
-            if (more_extreme and t - out[i - 1][0] >= min_gap
-                    and out[i + 1][0] - t >= min_gap):
+            if (more_extreme and t - eff[i - 1] >= min_gap
+                    and eff[i + 1] - t >= min_gap):
                 best_t, best_v = t, v
         out[i] = (best_t, best_v)
+        eff[i] = best_t
 
     return out, tight
 
 
-def decimate_segment(pts, min_gap, tol=RDP_TOL):
-    """One slam-free stretch of a run -> (kept_points, tight)."""
-    return _enforce_min_gap(_rdp(pts, tol), min_gap)
+def decimate_segment(pts, min_gap, tol=RDP_TOL, lead=0):
+    """One slam-free stretch of a run -> (kept_points, tight). `lead` - see _enforce_min_gap."""
+    return _enforce_min_gap(_rdp(pts, tol), min_gap, lead)
 
 
 def _split_into_runs(laser_points):
@@ -335,12 +326,10 @@ def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC):
     fraction of the *local* measure length (1/24 by default - see the
     module docstring). Never applied across a genuine same-tick slam.
 
-    `slam_gap_frac`: a genuine same-tick slam's start-to-end gap, as a
-    fraction of the local measure (1/64 by default - see SLAM_GAP_FRAC and
-    the module docstring's "true vox slam" paragraph). 0 (or any other
-    falsy value) instead places the slam's end on the very next free tick,
-    the older, thinner behaviour.
+    `slam_gap_frac`: a genuine same-tick slam's start-to-end gap, as a note value - a whole note over `slam_gap_frac`, i.e. a 32nd note by default (see SLAM_GAP_FRAC and the module docstring's "true vox slam" paragraph). Deliberately *not* a fraction of the local measure: ksh's slam cutoff is beat-relative, so in any measure longer than 4/4 a measure-relative gap overshoots it and the slam draws as a plain diagonal laser instead (found against 2293_leflector_niwashi_5m, whose 7/4 measures got 10-tick gaps against 4/4's 6 - user-reported). The reference hand charts settle it: 1/8 of a beat is the most common slam gap in every time signature they use - 4/4, 3/4, 5/4, 6/8, 7/4, 8/4, 11/4 - never a constant slice of the measure. 0 (or any other falsy value) instead places the slam's end on the very next free tick, the older, thinner behaviour.
     """
+    # A whole note in ticks: tl.res is cells per quarter note, so this is what `slam_gap_frac` divides, independent of the local time signature.
+    whole_note = 4 * tl.res
     used_ticks = set()
     out = []
     run_groups = [g for g in _split_into_runs(laser_points) if g]
@@ -364,10 +353,13 @@ def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC):
         # right after it, even across a segment boundary - needed to back
         # off from a collision with the *next* slam in a dense chain.
         flat, tight = [], False
-        for seg in segments:
+        for si, seg in enumerate(segments):
             meas, _ = tl.measure_of_tick(seg[0][0])
-            min_gap = max(1, tl.measure_length(meas) // min_gap_frac)
-            kept, seg_tight = decimate_segment(seg, min_gap)
+            mlen = tl.measure_length(meas)
+            min_gap = max(1, mlen // min_gap_frac)
+            # Every segment but the first starts *at* a slam's landing point, which the placement loop below writes `lead` ticks after this segment's own first tick - so the min-gap rule has to be measured from there, not from the raw shared tick (see _enforce_min_gap's `lead`). A chained same-tick stack (3+ points on one tick) technically stacks more than one gap onto the later segments' landings; not modelled here, since those landings are already collapsed to a tick apiece by the ceiling backoff in _slam_landing_tick.
+            lead = 0 if si == 0 else (max(1, whole_note // slam_gap_frac) if slam_gap_frac else 1)
+            kept, seg_tight = decimate_segment(seg, min_gap, lead=lead)
             tight = tight or seg_tight
             flat.extend(kept)
 
@@ -380,8 +372,7 @@ def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC):
             is_slam_landing = bool(points) and t == points[-1][0]
             if is_slam_landing:
                 if slam_gap_frac:
-                    meas, _ = tl.measure_of_tick(t)
-                    gap = max(1, tl.measure_length(meas) // slam_gap_frac)
+                    gap = max(1, whole_note // slam_gap_frac)
                     if i + 1 < len(flat):
                         ceiling = flat[i + 1][0]
                     elif next_true_start is not None:
