@@ -215,6 +215,17 @@ def convert(vox_path, out_path, camera=False, meta=None, slam_gap_frac=laser.SLA
     # Crosschecked via xcheck.py: ending at the last real event lands on or
     # within 1 measure of every one of the 5 matched reference conversions;
     # #END POSITION overshoots all of them, by 8 measures on the worst one.
+    #
+    # Camera events count too: a tilt/zoom/spin can outlast the last note or
+    # laser into what would otherwise look like a note-less outro (e.g. a
+    # zoom hold that resolves after the chart's last hit) - dropping those
+    # events silently threw away real camera motion the charter placed on
+    # purpose, so the chart is extended to cover them instead (previously:
+    # "note: N camera event(s) past the chart's last real note were dropped",
+    # user-reported as unwanted - the reference-conversion overshoot this
+    # section otherwise guards against is about vox's #END POSITION running
+    # measures past everything, not about a camera event a few ticks past
+    # the last note).
     last_tick = 0
     for lane in bt_lanes + fx_lanes:
         if lane.ends:
@@ -224,19 +235,12 @@ def convert(vox_path, out_path, camera=False, meta=None, slam_gap_frac=laser.SLA
     for lane in laser_lanes:
         for r in lane.runs:
             last_tick = max(last_tick, r.end_tick)
-    last_measure, _ = tl.measure_of_tick(last_tick)
-
-    # camera events past the chart's real end (e.g. a zoom hold that
-    # outlasts the last note into a trimmed outro - see the last_tick
-    # comment above) have nowhere to go once notes/laser already end the
-    # chart; drop them rather than extending the chart for camera alone.
     if camera:
-        dropped = sum(1 for t in cam_opts if t > last_tick) + sum(1 for t in cam_spin if t > last_tick)
-        cam_opts = {t: v for t, v in cam_opts.items() if t <= last_tick}
-        cam_spin = {t: v for t, v in cam_spin.items() if t <= last_tick}
-        if dropped:
-            print("note: %d camera event(s) past the chart's last real note were dropped"
-                  % dropped, file=sys.stderr)
+        if cam_opts:
+            last_tick = max(last_tick, max(cam_opts))
+        if cam_spin:
+            last_tick = max(last_tick, max(cam_spin))
+    last_measure, _ = tl.measure_of_tick(last_tick)
 
     # the initial tempo is already stated in the header's "t="; only changes
     # after it need a body "t=" line. Time signature is different: KSM's own

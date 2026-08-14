@@ -157,10 +157,6 @@ class App:
         ttk.Checkbutton(filt, text="Advanced", variable=self.advanced_var,
                          command=self._apply_toggle_states).pack(side="left", padx=(6, 0))
 
-        self.slam_gap_var = tk.BooleanVar(value=bool(self.settings.get("standard_slam_gap", True)))
-        ttk.Checkbutton(filt, text="Standard slam gap", variable=self.slam_gap_var,
-                         command=self._save_slam_gap).pack(side="left", padx=(6, 0))
-
         ttk.Frame(filt, width=20).pack(side="left")
         ttk.Label(filt, text="Search:").pack(side="left")
         self.search_var = tk.StringVar()
@@ -300,7 +296,19 @@ class App:
     # ------------------------------------------------------------- advanced
 
     def _build_advanced(self):
-        self.advanced_frame = ttk.Labelframe(self.root, text="Advanced: apply_chart.py options", padding=6)
+        self.advanced_frame = ttk.Labelframe(self.root, text="Advanced", padding=6)
+
+        # notes_convert.py option (laser.py's SLAM_GAP_FRAC vs. slam_gap_frac=0
+        # - see _save_slam_gap) - not an apply_chart.py flag, so it gets its
+        # own row above that list instead of blending into it.
+        notes_row = ttk.Frame(self.advanced_frame, padding=(2, 3))
+        notes_row.pack(fill="x", anchor="w")
+        self.slam_gap_var = tk.BooleanVar(value=bool(self.settings.get("standard_slam_gap", True)))
+        ttk.Checkbutton(notes_row, text="Standard slam gap", variable=self.slam_gap_var,
+                         command=self._save_slam_gap).pack(anchor="w")
+
+        ttk.Label(self.advanced_frame, text="apply_chart.py options",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(4, 0))
         self.advanced_vars = {}   # dest -> (spec, tk.Variable)
         scroller = ScrollableFrame(self.advanced_frame, height=190)
         scroller.pack(fill="both", expand=True)
