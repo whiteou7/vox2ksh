@@ -156,8 +156,46 @@ def _new_iir_state():
     return [0.0, 0.0, 0.0, 0.0]
 
 
-def filter_blocked(L, R, kind, mix, freq_fn, q, block):
-    """Run a biquad, recomputing coefficients once per block (freq_fn(blockIdx))."""
+def damp_resonance(q, scale=1.0, max_db=None):
+    """Tame an LPF/HPF's resonant peak without moving its cutoff.
+
+    NOT part of the transcription - the game always runs the authored Q
+    (`FUN_180630760` hands the chart's Q straight to the DSP leaf, no scaling,
+    no clamp). This exists for the same reason `paramq_from_knob`'s
+    `gain_scale`/`max_gain_db` do, and reads the same way: left at its
+    defaults it returns `q` unchanged and every filter is bit-identical to the
+    plain transcription.
+
+    An RBJ lowpass/highpass peaks at exactly `20*log10(Q)` dB at its cutoff,
+    so scaling that figure in dB is just `Q ** scale` - which makes `scale` a
+    straight "fraction of the resonant boost to keep" and `max_db` a ceiling
+    in the same dB the peak is measured in. `Q <= 1` has no peak to tame and
+    is returned untouched (scaling it would *raise* resonance toward 1.0,
+    which is the opposite of the point), and the result is never above the
+    authored Q.
+    """
+    q = float(q)
+    if q <= 1.0:
+        return q
+    boost_db = 20.0 * math.log10(q) * scale
+    if max_db is not None and boost_db > max_db:
+        boost_db = max_db
+    if boost_db < 0.0:
+        boost_db = 0.0
+    return min(q, 10.0 ** (boost_db / 20.0))
+
+
+def filter_blocked(L, R, kind, mix, freq_fn, q, block,
+                   res_scale=1.0, res_max_db=None):
+    """Run a biquad, recomputing coefficients once per block (freq_fn(blockIdx)).
+
+    `res_scale`/`res_max_db` dampen the LPF/HPF resonance (see damp_resonance);
+    they do not apply to `bpf`, which is Wobble's filter selector and carries
+    its own separate makeup gain. The `(1 - Q*0.04)` trim deliberately keeps
+    using the **authored** Q rather than the damped one: the trim is authentic
+    and tied to the chart value, so recomputing it from a damped Q would undo
+    part of the damping by handing back the attenuation the engine applies.
+    """
     m = mixof(mix)
     Q = max(float(q), 0.1)
     if kind == "bpf":
@@ -168,14 +206,16 @@ def filter_blocked(L, R, kind, mix, freq_fn, q, block):
             if g > 4.0:
                 g = 3.0
         trim = 1.0
+        Qc = Q
     else:
         g = 1.0
         trim = 1.0 - Q * 0.04
+        Qc = damp_resonance(Q, res_scale, res_max_db)
 
     sl, sr_ = _new_iir_state(), _new_iir_state()
     outL, outR = L.copy(), R.copy()
     for bi, (i, j) in enumerate(blocks(L.size, block)):
-        c = biquad_coeffs(kind, freq_fn(bi), Q)
+        c = biquad_coeffs(kind, freq_fn(bi), Qc)
         yl = _iir_run(L[i:j], c, sl)
         yr = _iir_run(R[i:j], c, sr_)
         if kind == "bpf":
@@ -187,12 +227,14 @@ def filter_blocked(L, R, kind, mix, freq_fn, q, block):
     return outL, outR
 
 
-def fx_lpf(L, R, mix, freq, q, block=64):
-    return filter_blocked(L, R, "lpf", mix, lambda b: freq, q, block)
+def fx_lpf(L, R, mix, freq, q, block=64, res_scale=1.0, res_max_db=None):
+    return filter_blocked(L, R, "lpf", mix, lambda b: freq, q, block,
+                          res_scale, res_max_db)
 
 
-def fx_hpf(L, R, mix, freq, q, block=64):
-    return filter_blocked(L, R, "hpf", mix, lambda b: freq, q, block)
+def fx_hpf(L, R, mix, freq, q, block=64, res_scale=1.0, res_max_db=None):
+    return filter_blocked(L, R, "hpf", mix, lambda b: freq, q, block,
+                          res_scale, res_max_db)
 
 
 def fx_peak(L, R, mix, freq, q, block=64):
@@ -214,22 +256,26 @@ def _knob_curve(knob, nblocks, block):
     return lambda b: float(vals[min(b, nblocks - 1)])
 
 
-def fx_laser_lpf(L, R, mix, f_lo, f_hi, q, knob=None, block=64):
+def fx_laser_lpf(L, R, mix, f_lo, f_hi, q, knob=None, block=64,
+                 res_scale=1.0, res_max_db=None):
     lo = max(float(f_lo), 1.0)
     ratio = float(f_hi) / lo
     nb = (L.size + block - 1) // block
     kv = _knob_curve(knob, nb, block)
     return filter_blocked(L, R, "lpf", mix,
-                          lambda b: lo * (ratio ** (1.0 - kv(b) * INV_127)), q, block)
+                          lambda b: lo * (ratio ** (1.0 - kv(b) * INV_127)), q, block,
+                          res_scale, res_max_db)
 
 
-def fx_laser_hpf(L, R, mix, f_lo, f_hi, q, knob=None, block=64):
+def fx_laser_hpf(L, R, mix, f_lo, f_hi, q, knob=None, block=64,
+                 res_scale=1.0, res_max_db=None):
     lo = max(float(f_lo), 1.0)
     ratio = float(f_hi) / lo
     nb = (L.size + block - 1) // block
     kv = _knob_curve(knob, nb, block)
     return filter_blocked(L, R, "hpf", mix,
-                          lambda b: lo * (ratio ** (kv(b) * INV_127)), q, block)
+                          lambda b: lo * (ratio ** (kv(b) * INV_127)), q, block,
+                          res_scale, res_max_db)
 
 
 def peaking_coeffs(freq, q, gain_db):

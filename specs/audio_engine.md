@@ -183,6 +183,38 @@ every other effect row              unchanged, |delta| <= 0.004
 
 `masscheck.py` drops the `laser` and `idle` regions from its CSV (they have no exclusive column), so its aggregate cannot see this change's main target at all — the laser row above was scored separately by re-rendering both ways. The `HighPassFilter` row is the FX-button filter (id 12) and is carried almost entirely by one chart (`aimai_chocolate` 5m, +0.551); read it as "not a regression" rather than as the win.
 
+### 4.1b Resonance damping — a second deliberate deviation
+
+**The engine runs the authored Q, unscaled and uncapped.** Wrapper `FUN_180630760` reads `mix`, the swept cutoff and `Q` out of the parameter vector and hands all three straight to `FUN_18063e500`; there is no clamp, no scale, and nothing downstream that tames the result — `CGainWithHardLimiter` (§6.2) is a plain gain-and-clip with no knee. So the loud sweep "whoosh" is not a modelling error. It is what the cabinet does.
+
+It is also everywhere. Across all 8107 charts, `#TAB EFFECT INFO` declares 32430 LPF/HPF definitions, and **52.2 % of them sit at Q > 2** — almost entirely on two authoring presets, `Q = 3.0` (25.9 %, a +9.5 dB peak at cutoff) and `Q = 5.0` (25.8 %, +14.0 dB). The other half is `Q = 0.7` (47.6 %), which has no peak at all. The FX-button filters (ids 11/12, 2474 definitions) are the same story at smaller scale, 38 % above Q 2. Wobble is not: 94.8 % of its 8556 definitions are `Q = 1.4` (+2.9 dB), so it is left alone — and its filter carries its own makeup gain, which damping would interact with.
+
+Measured on the frames where a Q ≥ 3 tab filter is actually live, against those charts' own captures (5 pairs, 4842 frames; 3 more dropped at alignment corr < 0.15):
+
+```
+                     gain vs dry     Q3 becomes    Q5 becomes
+--filter-resonance-scale
+  1.0  (authentic)      +2.794        +9.5 dB       +14.0 dB
+  0.75                  +2.766        +7.2 dB       +10.5 dB
+  0.5                   +2.654        +4.8 dB        +7.0 dB
+  0.25                  +2.465        +2.4 dB        +3.5 dB
+  0.0                   +2.191         0.0 dB         0.0 dB
+--filter-max-resonance
+  off  (authentic)      +2.794        +9.5 dB       +14.0 dB
+  12 dB                 +2.801        +9.5 dB       +12.0 dB
+   9 dB                 +2.733        +9.0 dB        +9.0 dB
+   6 dB                 +2.637        +6.0 dB        +6.0 dB     <- CLI default
+   3 dB                 +2.453        +3.0 dB        +3.0 dB
+```
+
+Damping is monotonically *worse* against the recordings, which is the expected shape for removing something real — the ablation is what proves the resonance authentic, the same way §7.1's peak-EQ ablation did. The cap is the better-targeted of the two controls: it flattens the two loud presets to one ceiling and leaves the benign `Q ≤ 2` half untouched, where the scale thins every filter proportionally. A 12 dB cap is free (inside noise) but only trims the `Q = 5` preset by 2 dB.
+
+**`apply_chart.py` defaults `--filter-max-resonance` to 6 dB, and that is a product choice, not a correction** — the same trade §7.1 makes for the device ParamEq, for the same reported reason (the sweep is loud and distracting over a whole batch of conversions) and at a known price of **0.157 dB** on the frames it touches. `--filter-resonance-scale` stays at 1.0; `--filter-max-resonance 99` restores the transcription. `sdvx_fx.damp_resonance`'s own defaults are inert, so the DSP layer stays bit-identical to the engine unless a caller asks otherwise.
+
+Whole-corpus cost of that default, 40 (chart, capture) pairs: `ALL` **+0.918 → +0.901**. Every FX-button row also drops by 0.003–0.026 dB, which is not a per-effect regression — it is the capped *laser* filters showing up inside those regions' frames, since an FX region's "exclusive" mask excludes other FX effects but not lasers. A uniform small decline across every row is the expected signature of a laser-path change, and is how to tell one from a real single-effect regression.
+
+**Consequence for re-measuring:** like the peak-EQ flags, `xcheck.py`/`masscheck.py` invoke `apply_chart.py` without these, so a fresh corpus run now scores capped filters. Pass `--extra="--filter-max-resonance 99"` (alongside the §7.1 peak flags) to reproduce any number in this document taken before the cap landed — which includes every figure in §4.1 and §9.
+
 ### 4.2 Laser / knob sweep (wrappers `0x180630110` LPF, `0x1806303f0`+`0x180630760` HPF)
 
 Chart params `{mix, freqLo, freqHi, Q}`. Per block:

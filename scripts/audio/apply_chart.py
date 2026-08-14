@@ -426,6 +426,15 @@ TAPESTOP_EX_3PHASE = [False]    # Tape Stop Ex: attack/hold/release instead of p
 PARAM_ASSIGN_SWEEP = [True]     # #TAB PARAM ASSIGN INFO laser-driven parameter sweep
 PARAM_ASSIGN_BLOCK = 512        # refresh interval, matching the source's own constant
 
+# NOT authentic, and the LPF/HPF twin of --peak-gain-scale/--peak-max-gain
+# (audio_engine.md 7.1's "deliberate deviation"). The engine hands the chart's
+# Q straight to the filter; these tame the resonant peak it produces. See
+# FX.damp_resonance and audio_engine.md 4.1b for why this is the loud one:
+# 52% of the corpus's 32430 laser filter definitions sit at Q > 2, almost all
+# of them on two authoring presets (Q=3.0 -> +9.5 dB, Q=5.0 -> +14.0 dB).
+RES_SCALE = [1.0]               # fraction of the resonant boost (dB) to keep
+RES_MAX_DB = [6.0]              # hard ceiling on that boost, in dB
+
 
 def _laser_ease(phase, curve):
     """Reshape a 0..1 event-local phase per vox_format.md's C7 curve type.
@@ -520,9 +529,11 @@ def run_fx(L, R, eff, tl, tick, block, knob=None, lookahead=None):
                                  p[4] * spb, block=block, lookahead=lookahead,
                                  floor=TSE_FLOOR[0])
     if t == 11:                                         # Low Pass Filter
-        return FX.fx_laser_lpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block)
+        return FX.fx_laser_lpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block,
+                               res_scale=RES_SCALE[0], res_max_db=RES_MAX_DB[0])
     if t == 12:                                         # High Pass Filter
-        return FX.fx_laser_hpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block)
+        return FX.fx_laser_hpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block,
+                               res_scale=RES_SCALE[0], res_max_db=RES_MAX_DB[0])
     return None                                         # 13 -> not implemented
 
 
@@ -531,9 +542,11 @@ def run_tab(L, R, eff, knob, block):
     p = list(eff[1:])
     p[0] = _mx(p[0])
     if t == 1:
-        return FX.fx_laser_lpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block)
+        return FX.fx_laser_lpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block,
+                               res_scale=RES_SCALE[0], res_max_db=RES_MAX_DB[0])
     if t == 2:
-        return FX.fx_laser_hpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block)
+        return FX.fx_laser_hpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block,
+                               res_scale=RES_SCALE[0], res_max_db=RES_MAX_DB[0])
     if t == 3:
         return FX.fx_laser_bitcrush(L, R, p[0], p[1], knob=knob, block=block)
     return None
@@ -881,6 +894,28 @@ def build_arg_parser():
                          "boost (default %(default)g dB; the transcribed engine is "
                          "unclamped up to +15 dB - pass --peak-max-gain 15 to disable "
                          "the cap in practice). Applied after --peak-gain-scale")
+    ap.add_argument("--filter-resonance-scale", type=float, default=1.0,
+                    help="NOT authentic - fraction of the resonant boost to keep on "
+                         "every LPF/HPF that takes a chart Q, laser (#TAB EFFECT INFO "
+                         "types 1-2) and FX-button (ids 11-12) alike. An RBJ filter "
+                         "peaks at 20*log10(Q) dB at its cutoff, so 0.5 halves that "
+                         "figure in dB and 0 removes the resonance entirely. The "
+                         "engine always runs the authored Q (default %(default)g). "
+                         "Half the corpus's laser filters are authored at Q 3 or 5, "
+                         "i.e. +9.5 or +14 dB, which is the loud sweep 'whoosh'; this "
+                         "is the LPF/HPF twin of --peak-gain-scale. Does not touch "
+                         "Wobble, whose filter carries its own makeup gain")
+    ap.add_argument("--filter-max-resonance", type=float, default=6.0,
+                    help="NOT authentic - hard ceiling in dB on that same resonant "
+                         "boost (default %(default)g dB; the engine is uncapped - pass "
+                         "--filter-max-resonance 99 for that). This is the flag that "
+                         "tames the sweep 'whoosh' by default: it pulls the corpus's "
+                         "two loud presets (Q 3 = +9.5 dB, Q 5 = +14.0 dB) down to one "
+                         "ceiling while leaving Q <= 2 untouched, where "
+                         "--filter-resonance-scale would thin every filter "
+                         "proportionally. Applied after --filter-resonance-scale. The "
+                         "boost is authentic and capping it costs 0.157 dB against the "
+                         "cabinet corpus - see specs/audio_engine.md 4.1b")
     ap.add_argument("--master-gain", type=float, default=1.0,
                     help="output gain before the hard clip (the game's "
                          "CGainWithHardLimiter stage). Use e.g. 0.9 to buy headroom")
@@ -916,6 +951,8 @@ def main():
     LASER_EASING[0] = args.laser_easing
     TAPESTOP_EX_3PHASE[0] = args.tapestop_ex_3phase
     PARAM_ASSIGN_SWEEP[0] = not args.no_param_assign_sweep
+    RES_SCALE[0] = args.filter_resonance_scale
+    RES_MAX_DB[0] = args.filter_max_resonance
     if args.no_persist:
         PERSIST.clear()
     folder = os.path.abspath(args.folder)
