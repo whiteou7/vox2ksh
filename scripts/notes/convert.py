@@ -66,6 +66,7 @@ class HoldLane:
         self.starts = [h[0] for h in holds]
         self.ends = [h[1] for h in holds]
         self.chips = set(n.tick for n in notes if not n.is_hold)
+        self.sfx_chips = set(n.tick for n in notes if not n.is_hold and n.c2 > 0)
 
     def char_at(self, tick, chip_char, hold_char):
         if tick in self.chips:
@@ -287,8 +288,13 @@ def convert(vox_path, out_path, camera=False, meta=None):
                     lines.append(opt_line)
 
             for li, lane in enumerate(fx_lanes):
+                side = "l" if li == 0 else "r"
+
                 if lane.hold_starting_at(tick):
-                    lines.append("fx-%s=" % ("l" if li == 0 else "r"))
+                    lines.append("fx-%s=" % side)
+
+                if tick in lane.sfx_chips:
+                    lines.append("fx-%s_se=clap;0" % side)
 
             for li, lane in enumerate(laser_lanes):
                 run = lane.run_starting_at(tick)
