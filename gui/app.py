@@ -157,6 +157,12 @@ class App:
         ttk.Checkbutton(filt, text="Advanced", variable=self.advanced_var,
                          command=self._apply_toggle_states).pack(side="left", padx=(6, 0))
 
+        ttk.Frame(filt, width=20).pack(side="left")
+        ttk.Label(filt, text="Search:").pack(side="left")
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *_: self._populate_table())
+        ttk.Entry(filt, textvariable=self.search_var, width=22).pack(side="left", padx=(4, 0))
+
     def _save_diff_filters(self):
         self.settings["difficulties"] = [k for k, v in self.diff_vars.items() if v.get()]
         settings_store.save(self.settings)
@@ -425,7 +431,10 @@ class App:
     def _populate_table(self):
         self.tree.delete(*self.tree.get_children())
         self.row_to_song = {}
+        query = self.search_var.get().strip().lower()
         for song in sorted(self.songs, key=lambda s: s.id):
+            if query and query not in song.title.lower() and query not in song.artist.lower():
+                continue
             iid = self.tree.insert("", "end", values=(song.id, song.title, song.artist, song.version_name))
             self.row_to_song[iid] = song
         self._update_selected_count()
