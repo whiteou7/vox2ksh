@@ -10,7 +10,7 @@ Conversion splits into three independent problems. They share the `.vox` parser 
 |---|---|---|
 | **audio** | The FX/laser effect engine, the device ParamEq, the music duck, the layered SE bank, the per-sample `S3V0` header gains. | **Largely done.** Composite kind 14 (id 13) is still only partly transcribed. |
 | **notes** | BT/FX/laser note data, timing, BPM and time-signature changes, slams, curve types, chip vs hold — the `.ksh` chart body. | **Done** |
-| **camera** | `#SPCONTROLER` track data: lane tilt, spin/swing, top/bottom zoom. `.ksh` expresses only a subset, so this needs mapping decisions on top of transcription. | **In progress.** Zoom top/bottom are reliable. Spin is settled: *kind* and *direction* verified against the reference set, and *length* re-derived by regression. Tilt needs review. |
+| **camera** | `#SPCONTROLER` track data: lane tilt, spin/swing, top/bottom zoom. `.ksh` expresses only a subset, so this needs mapping decisions on top of transcription. | **In progress.** Zoom top/bottom are reliable. Spin is settled: *kind* and *direction* verified against the reference set, and *length* re-derived by regression. Tilt is auto-baseline plus manual passthrough, with optional pretilt removal (`--pretilt-fix`, off by default - see `specs/camera.md`). |
 
 ## The writeup
 

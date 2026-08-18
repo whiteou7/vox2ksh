@@ -164,7 +164,8 @@ DIFF_MAP = {"1n": "light", "2a": "challenge", "3e": "extended",
             "4i": "infinite", "5m": "infinite"}
 
 
-def convert(vox_path, out_path, camera=False, meta=None, slam_gap_frac=laser.SLAM_GAP_FRAC):
+def convert(vox_path, out_path, camera=False, meta=None, slam_gap_frac=laser.SLAM_GAP_FRAC,
+            pretilt_fix=False):
     chart = vox.load(vox_path)
     tl = chart.tl
 
@@ -183,7 +184,9 @@ def convert(vox_path, out_path, camera=False, meta=None, slam_gap_frac=laser.SLA
     if camera:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "camera"))
         import camera as camera_mod
-        for (t, value) in camera_mod.compute_tilt_events(chart):
+        # pretilt_fix only reaches the tilt track, and only means anything
+        # with camera=True - there is no tilt output at all otherwise.
+        for (t, value) in camera_mod.compute_tilt_events(chart, pretilt_fix=pretilt_fix):
             cam_opts.setdefault(t, []).append("tilt=" + value)
         for (t, line) in camera_mod.compute_zoom_events(chart):
             cam_opts.setdefault(t, []).append(line)

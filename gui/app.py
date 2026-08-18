@@ -173,6 +173,12 @@ class App:
         self.settings["standard_slam_gap"] = self.slam_gap_var.get()
         settings_store.save(self.settings)
 
+    def _save_pretilt_fix(self):
+        # notes_convert.convert()'s pretilt_fix - camera.py brackets the lasers
+        # KSM would tilt into early. Off by default; see specs/camera.md.
+        self.settings["pretilt_fix"] = self.pretilt_var.get()
+        settings_store.save(self.settings)
+
     # ---------------------------------------------------------------- table
 
     def _build_table(self):
@@ -306,6 +312,10 @@ class App:
         self.slam_gap_var = tk.BooleanVar(value=bool(self.settings.get("standard_slam_gap", True)))
         ttk.Checkbutton(notes_row, text="Standard slam gap", variable=self.slam_gap_var,
                          command=self._save_slam_gap).pack(anchor="w")
+        self.pretilt_var = tk.BooleanVar(value=bool(self.settings.get("pretilt_fix", False)))
+        ttk.Checkbutton(notes_row, text="Remove pretilt",
+                         variable=self.pretilt_var,
+                         command=self._save_pretilt_fix).pack(anchor="w")
 
         ttk.Label(self.advanced_frame, text="apply_chart.py options",
                   font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(4, 0))
@@ -531,6 +541,7 @@ class App:
             ffmpeg_path=self._resolve_ffmpeg(),
             render_audio=True,
             standard_slam_gap=self.slam_gap_var.get(),
+            pretilt_fix=self.pretilt_var.get(),
             advanced_values=self._read_advanced_values(),
         )
         self._log("=== starting: %d job(s) across %d song(s) -> %s ===" % (len(jobs), len(selected), out_dir))

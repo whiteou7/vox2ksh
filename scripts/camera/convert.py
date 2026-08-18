@@ -22,9 +22,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("vox", help="path to a .vox chart")
     ap.add_argument("-o", "--output", default=None)
+    ap.add_argument("--pretilt-fix", action="store_true",
+                    help="bracket laser sections KSM would tilt into early with "
+                         "tilt=zero..tilt=normal, so the lane stays flat until the "
+                         "laser actually arrives (see specs/camera.md)")
     args = ap.parse_args()
     out = args.output or os.path.splitext(os.path.basename(args.vox))[0] + ".ksh"
-    path = notes_convert.convert(args.vox, out, camera=True)
+    path = notes_convert.convert(args.vox, out, camera=True,
+                                 pretilt_fix=args.pretilt_fix)
     print("wrote %s" % path)
 
 
