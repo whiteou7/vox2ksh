@@ -224,6 +224,61 @@ def _pretilt_brackets(chart, min_factor=PRETILT_MIN_FACTOR):
     return merged
 
 
+def _triple_spin_tilt_points(chart):
+    """-> ([(tick, value), ...], [(tick, "normal"), ...], [(start, end), ...])
+    - the manual-tilt ramp that carries vox roll_type 4's extra turns, split
+    into the points that go through `_place_track`, the hand-back that must
+    stack on the ramp's own last tick rather than take a grid cell of its
+    own, and the tick spans the ramps occupy (which the caller clears of
+    everything else - see `compute_tilt_events`).
+
+    ksh cannot express a triple spin as three spin tokens: KSM starts a spin
+    from `CamPatternMain::onLaserSlamJudged`, so a token only fires where a
+    laser slam is judged, and a type-4 row has exactly one slam. The spin
+    stays a single token and the rest of the rotation is driven manually:
+
+        tick         tilt=0           <- ramp starts flat, at the slam
+        tick + D     tilt=+/-72       <- linear ramp across the whole roll
+        tick + D     tilt=0           <- stacked: drop the lane back to level
+        tick + D + 1 tilt=normal      <- next cell: hand back to auto tilt
+
+    with `D` the vox-declared duration in quarter notes (C8, or 12) - the
+    full declared duration, settle included, not just the 3/4 the turns
+    themselves occupy.
+
+    Emitted only where `compute_spin_tokens` emits a token, and on the same
+    conditions, so the ramp can never outlive a spin that was never placed:
+    a point whose outgoing direction is unreadable is skipped in both, and
+    at most one bracket lands per tick (ksh has one spin slot per line, so
+    two lanes rolling on the same tick already collapse to one token).
+    """
+    ramp, restore, spans = [], [], []
+    seen = set()
+    for lst in chart.laser:
+        for i, p in enumerate(lst):
+            if p.roll_type != TRIPLE_ROLL_TYPE or p.tick in seen:
+                continue
+            dirsign = _outgoing_dirsign(lst, i)
+            if dirsign is None:
+                continue
+            seen.add(p.tick)
+            span = int(round(triple_declared_beats(p) * chart.res))
+            if span <= 0:
+                continue
+            # dirsign < 0 is the clockwise `@(` case - see compute_spin_tokens.
+            magnitude = TRIPLE_TILT_MAGNITUDE if dirsign < 0 else -TRIPLE_TILT_MAGNITUDE
+            ramp.append((p.tick, "0"))
+            ramp.append((p.tick + span, "%d" % magnitude))
+            # The ramp's peak and the return to level stack on one tick (no
+            # grid line between them - ksh's instant-transition idiom), and
+            # the hand-back to auto tilt goes one cell later, so the level
+            # value is actually held for a cell before auto takes over.
+            restore.append((p.tick + span, "0"))
+            restore.append((p.tick + span + 1, "normal"))
+            spans.append((p.tick, p.tick + span))
+    return ramp, restore, spans
+
+
 def compute_tilt_events(chart, pretilt_fix=False, min_factor=PRETILT_MIN_FACTOR):
     """-> sorted [(tick, "tilt=<value>"), ...].
 
@@ -234,6 +289,12 @@ def compute_tilt_events(chart, pretilt_fix=False, min_factor=PRETILT_MIN_FACTOR)
     specs/camera.md) are charter-authored camera work and override that
     baseline, passed through as literal floats at each segment's start/end
     tick.
+
+    vox roll_type 4 (the triple spin) additionally gets a manual-tilt ramp
+    here, because ksh's spin token can only turn the lane once - see
+    `_triple_spin_tilt_points`. This one is not optional: without it a
+    type-4 roll converts to a plain single spin and two thirds of the
+    motion is simply lost.
 
     `pretilt_fix` additionally brackets every laser section KSM would tilt
     into early with `tilt=zero` ... `tilt=normal`, the restore landing on
@@ -261,6 +322,29 @@ def compute_tilt_events(chart, pretilt_fix=False, min_factor=PRETILT_MIN_FACTOR)
             points.append((open_tick, "zero"))
             points.append((close_tick, "normal"))
 
+    # A ramp is a linear interpolation from one endpoint to the other, so
+    # ANY other tilt point landing strictly inside it breaks it: the value
+    # gets pinned partway and the rotation the ramp exists to produce stops
+    # happening. Real, not hypothetical - `2392_dementafterlegend_cosmograph_5m`
+    # (format 13) has a manual `Tilt` series whose 0.0 -> 0.0 block ends 96
+    # cells into a 144-cell ramp, which held the lane flat for two thirds of
+    # the roll and handed back to auto-tilt before the ramp had done
+    # anything. Per direction the ramp wins: it is carrying the spin, which
+    # is the dominant motion, so the span is cleared of everything else
+    # first. This is a genuine (if small) discard of chart data, so it is
+    # counted and reported rather than done silently.
+    spin_ramp, spin_restore, spin_spans = _triple_spin_tilt_points(chart)
+
+    def _inside_ramp(tick):
+        return any(a < tick < b for (a, b) in spin_spans)
+
+    dropped = 0
+    if spin_spans:
+        kept = [pt for pt in points if not _inside_ramp(pt[0])]
+        dropped += len(points) - len(kept)
+        points = kept
+    points.extend(spin_ramp)
+
     placed = _dedupe_consecutive(_place_track(points))
 
     # Revert to normal on each manual block's OWN last tick, not a grid
@@ -280,8 +364,21 @@ def compute_tilt_events(chart, pretilt_fix=False, min_factor=PRETILT_MIN_FACTOR)
     # a needless divergence from how real charts do it.
     starts = set(a for (a, _b) in manual_ranges)
     reverts = [(b, "normal") for (_a, b) in manual_ranges if b not in starts]
+    if spin_spans:
+        kept = [r for r in reverts if not _inside_ramp(r[0])]
+        dropped += len(reverts) - len(kept)
+        reverts = kept
+    if dropped:
+        print("note: dropped %d tilt point(s) falling inside a roll_type 4 "
+              "spin ramp, which would have broken the ramp's interpolation "
+              "(see specs/camera.md)" % dropped, file=sys.stderr)
 
-    combined = placed + reverts
+    # The triple-spin ramp's hand-back rides the same path as those reverts,
+    # and for the same reason: it is layered onto a tick that already has its
+    # real value, so it stacks on that tick instead of spending a grid cell.
+    # `combined` puts `placed` first and the sort is stable, so the ramp's
+    # final value is always written before the `normal` that ends it.
+    combined = placed + reverts + spin_restore
     combined.sort(key=lambda p: p[0])
     return _dedupe_consecutive(combined)
 
@@ -362,38 +459,145 @@ def compute_zoom_events(chart, rotx_scale=ROTX_TO_ZOOM_TOP, radi_scale=RADI_TO_Z
 # spin / swing
 # --------------------------------------------------------------------------
 
-# vox "roll" (1,2,3,4,6,7) -> ksh full spin @(/@); vox "swing" (5) -> ksh
-# half spin @</@> - confirmed 66/66 against the reference set (kind) and
-# 66/66 (direction, see below). S</S> intentionally never emitted: unused
-# in every reference chart even for genuine vox swings - specs/camera.md.
-SWING_ROLL_TYPE = 5
+# --- what the game itself does, read out of soundvoltex.dll ---------------
+#
+# `Game::AngleUpdater` (gameplay event kind 8) is the whole lane-spin system,
+# and three exact facts come out of it. specs/camera.md "Spin/swing" carries
+# the full derivation and the addresses; the short form:
+#
+# 1. The chart's roll_type is REMAPPED before the game ever uses it. The
+#    laser builder (`FUN_1803b1180`, switch at 0x1803b1a0c) rewrites the vox
+#    column into an internal "rotation kind": 1->1, 2->3, 3->2, 4->4, 5->5,
+#    6->6, 7->7 - vox 2 and 3 swap places. Everything in this module is
+#    stated in *vox* numbering; the DLL's constants are in internal
+#    numbering, so the swap matters when re-reading the disassembly.
+#
+# 2. The total duration is `FUN_18011f320(kind, bpm, length)`, in seconds.
+#    Every branch is a multiple of 60/bpm - one beat - so the duration is
+#    purely musical, with no wall-clock term anywhere:
+#      length == 0 (vox's "use this type's default"):
+#        internal 1,6 -> 420/bpm = 7 beats;  2,5,7 -> 180/bpm = 3 beats
+#        internal 3   -> 60/bpm+60/bpm = 2 beats;  4 -> 720/bpm = 12 beats
+#      length != 0:
+#        internal 6,7 -> (6/bpm)*length  = length TENTHS of a beat
+#        everything else -> (60/bpm)*length = length beats
+#
+# 3. What happens during that duration is one of three curves, picked by
+#    `Game::AngleUpdater::CurrentRotationEffect`'s three lambdas (dispatch at
+#    0x1803a4a1e). With u = progress 0..1 and d = +/-1 for direction:
+#      internal 4       `FUN_1803a64d0`  angle = d*1440*u while u < 3/4:
+#                       THREE full turns, one per quarter of the duration,
+#                       then a damped-sine settle over the last quarter.
+#      internal 5,7     `FUN_1803a6350`  angle = d*80*sin(2.1*pi*u)*(1-u):
+#                       a +/-61-degree swing that never completes a turn.
+#      internal 1,2,3,6 `FUN_1803a6190`  angle = d*840*u while u < 3/7:
+#                       ONE full turn in the first 3/7, then the same
+#                       damped-sine settle over the remaining 4/7.
+#
+# So the roll/swing split is *not* "type 5 is the swing": internal 7 (= vox
+# 7) runs the swing curve too. That is what SWING_ROLL_TYPES encodes.
 
-# vox_format.md's named default duration per roll_type, in quarter notes -
-# used only when the length column (roll_length) is 0, i.e. vox says "use
-# this type's normal length". All four types with reference coverage (1, 2, 3, 5)
-# confirm their name against the hand charts once the per-song charter
-# scale is controlled for; type 4 has one sample and is unvalidated. Types
-# 6/7 aren't named this way - they always carry an explicit length - so
-# they aren't in this table; see compute_spin_tokens.
+# vox "roll" (1,2,3,4,6) -> ksh full spin @(/@); vox "swing" (5) and vox 7
+# -> ksh half spin @</@>. The 5-is-a-swing half was confirmed 66/66 against
+# the reference set (kind) and 66/66 (direction, see below); the 7-is-a-swing
+# half has no reference coverage at all and comes from the lambda dispatch
+# above - type 7 was previously emitted as a full spin on the inherited
+# (wrong) assumption that it behaves like type 6. S</S> intentionally never
+# emitted: unused in every reference chart even for genuine vox swings -
+# specs/camera.md.
+SWING_ROLL_TYPES = (5, 7)
+
+# vox roll_type 4 is the triple spin: three complete turns back to back,
+# each taking exactly a quarter of the declared duration, with the single
+# overshoot only after the third (fact 3 above - and exactly what direct
+# inspection of the 25 type-4 charts showed).
+#
+# ksh has no triple-spin token, and it cannot be faked with three
+# consecutive spin tokens either: KSM starts a spin from
+# `CamPatternMain::onLaserSlamJudged` (ksm-v2
+# MusicGame/Camera/CamPattern/CamPatternMain.cpp), i.e. a spin token only
+# fires when a laser *slam* is judged on that line. A type-4 row has one
+# slam, so turns 2 and 3 have nothing to hang off and their tokens are
+# inert. The spin therefore stays a single token, and the two extra turns
+# are driven by a manual `tilt=` ramp instead - see compute_spin_tokens and
+# specs/camera.md.
+# (For the record, since the ramp below does not use it: the three turns
+# each take a *quarter* of the declared duration, not a third - the last
+# quarter is the settle, which is what `angle = d*1440*u for u < 3/4` says.)
+TRIPLE_ROLL_TYPE = 4
+
+# The manual-tilt ramp that stands in for the two turns the spin token
+# cannot express. `tilt=` is a graph in ksh, linearly interpolated between
+# points, and KSM's manual tilt path applies its value to the highway
+# rotation directly (`m_radians = kTiltRadians * value`, no clamping -
+# ksm-v2 MusicGame/Camera/HighwayTiltManual.cpp). So ramping the value from
+# 0 to a large magnitude across the roll's declared duration rotates the
+# lane continuously for as long as the roll lasts, on top of the one real
+# spin the token triggers at the slam.
+#
+# Magnitude and sign are per direction: +72 for a clockwise spin (`@(`,
+# ksh_format.md's "left, clockwise"), -72 for anticlockwise (`@)`). The
+# magnitude is a tested value from the target KSM build, not derived here.
+TRIPLE_TILT_MAGNITUDE = 72
+
+# ...and the spin token that goes with the ramp is NOT halved the way every
+# other type is. BEAT_TO_KSH192 halves because vox's declared duration
+# covers the settle and ksh's (on the reference-set reading) does not - but
+# here the token and the ramp are one composite effect, so the token has to
+# END WHERE THE RAMP ENDS, at the full declared duration. 48 ksh-192nds per
+# quarter note is that duration in ksh's own unit, and it lines up with the
+# ramp's end tick (declared beats * chart.res cells) by construction,
+# whatever the chart's #BEAT RESOLUTION is.
+TRIPLE_BEAT_TO_KSH192 = 48
+
+# The declared duration per roll_type when the length column (roll_length) is
+# 0, in quarter notes - vox's "use this type's normal length".
+#
+# The game's own table, out of `FUN_18011f320`'s length==0 branch (fact 2
+# above) mapped back through the internal-kind remap into vox numbering, is
+#     {1: 7, 2: 2, 3: 3, 4: 12, 5: 3, 6: 7, 7: 3}
+# and every entry except type 1's agrees with what the hand charts imply.
+# Type 1 is left at the hand-chart 6 *on purpose*: the two disagreements
+# cancel. This table feeds BEAT_TO_KSH192 below, which is the reference set's
+# "ksh length = half the declared duration" scale, and the game's real
+# rotation share is 3/7, not a half - so 6 beats halved and 7 beats times
+# 3/7 both come out at exactly 3 beats of ksh spin. Changing this entry
+# without also changing that scale would just make type 1 wrong. See
+# specs/camera.md, "The scale question the DLL does not settle".
 DEFAULT_BEATS = {1: 6, 2: 2, 3: 3, 4: 12, 5: 3}
 
 # The spin-length law, fit against 1354 reference samples by
 # scripts/camera/correlate.py's spin_length_report: a ksh spin token's
-# length is exactly HALF the duration vox declares, in ksh 192nds.
+# length is exactly HALF the duration vox declares, in ksh 192nds. So one
+# vox quarter note = 48 ksh-192nds of declared duration -> 24 of ksh spin.
 #
-# vox states roll lengths in quarter notes and its number covers the whole
-# motion *including the overshoot*, where ksh's number covers only the part
-# before the overshoot (vox_format.md C3) - and the overshoot turns out to
-# take exactly as long as the rotation it follows. So one vox quarter note
-# = 48 ksh-192nds of declared duration -> 24 ksh-192nds of ksh spin length.
+# The *reasoning* this constant used to carry is now known to be wrong on
+# both sides, even though the number stays. It said vox's length covers the
+# rotation plus an overshoot that takes exactly as long as the rotation,
+# while ksh's covers only the part before the overshoot. Measured instead:
+# SDVX completes its turn at 3/7 of the declared duration (fact 3 above),
+# not a half; and KSM's own length is *also* rotation-plus-recovery, its
+# turn completing at 360/675 = 0.533 of it (ksm-v2 CamPatternSpin.cpp), not
+# rotation-only. Matching the two rotation rates exactly would want a scale
+# of 38.6, not 24 - against ksm-v2 constants, while the reference charters
+# worked against v1.6x. 24 is kept because it is the only one of the three
+# candidate scales with 1354 samples behind it; picking between them needs
+# a test chart played in the target KSM build. specs/camera.md, "The scale
+# question the DLL does not settle", has the full argument.
 BEAT_TO_KSH192 = 24
 
-# Types 6/7 are the "8x speed" rolls: their length column counts 1/32
-# notes, i.e. 1/8 of a quarter note, so the same law lands on 24/8 = 3.
-# This one is not a modal estimate - the reference charts transcribe type 6
-# machine-exactly (C8 of 13/17/23/33/37 -> ksh 39/51/69/99/111, numbers no
-# charter picks by feel), 61/64 exact.
-TYPE67_UNIT_TO_KSH192 = 3   # 1/32 note
+# Types 6/7 are the "8x speed" rolls. The reference charts transcribe type 6
+# as if its length column counted 1/32 notes (1/8 of a quarter note), which
+# puts the same halving law at 24/8 = 3 - and they do it machine-exactly
+# (C8 of 13/17/23/33/37 -> ksh 39/51/69/99/111, numbers no charter picks by
+# feel), 61/64 exact.
+#
+# The DLL disagrees about the unit: `(6/bpm)*length` makes it a *tenth* of a
+# quarter note, not an eighth (fact 2 above). That is the same unresolved
+# scale question as BEAT_TO_KSH192, so this stays on the measured value; the
+# 64 type-6 reference samples are the only evidence either way, and they may
+# themselves be echoing the 1/32-note folklore rather than judging by ear.
+TYPE67_UNIT_TO_KSH192 = 3   # reference-set unit; the DLL's is 1/10 beat
 
 # In chart format 13 the length column MOVED one place right, for every
 # roll type - the game's row parser inserted a new column after the curve
@@ -419,18 +623,27 @@ def _outgoing_dirsign(lst, i, max_lookahead=5):
 def _spin_length(chart, p):
     """A laser point's ksh spin length in 192nds, per the law above.
 
-    `p.roll_length` is the version-resolved length column (C8 up to format
-    12, C9 from 13). Every 6/7 row in the corpus carries an explicit length
-    in it, so the `or 0` below is unreachable in practice and there is no
-    documented default duration for those two types to fall back on.
+    `TRIPLE_ROLL_TYPE` is the one type that is not halved: its token has to
+    end where its tilt ramp ends - see TRIPLE_BEAT_TO_KSH192.
     """
-    if p.roll_type in (6, 7):
+    if p.roll_type == TRIPLE_ROLL_TYPE:
+        length = triple_declared_beats(p) * TRIPLE_BEAT_TO_KSH192
+    elif p.roll_type in (6, 7):
         length = (p.roll_length or 0) * TYPE67_UNIT_TO_KSH192
     elif p.roll_length:
         length = p.roll_length * BEAT_TO_KSH192
     else:
         length = DEFAULT_BEATS.get(p.roll_type, 3) * BEAT_TO_KSH192
     return max(1, int(round(length)))
+
+
+def triple_declared_beats(p):
+    """vox roll_type 4's declared duration in quarter notes - C8, or the
+    type's default when C8 is 0. Type 4 is the one type whose DLL default
+    (12, from `FUN_18011f320`'s `720/bpm`) and hand-chart default agree, so
+    both readings give the same number here.
+    """
+    return p.roll_length if p.roll_length else DEFAULT_BEATS[TRIPLE_ROLL_TYPE]
 
 
 def compute_spin_tokens(chart):
@@ -440,6 +653,10 @@ def compute_spin_tokens(chart):
     function always returns only the first one found per tick and the
     caller is expected to at least count/report drops rather than silently
     picking one, per this project's rule on lossy conversions.
+
+    Exactly one entry per rolling laser point, `TRIPLE_ROLL_TYPE` included:
+    ksh cannot express its three turns as three tokens, because KSM only
+    starts a spin where a laser slam is judged (see TRIPLE_ROLL_TYPE above).
     """
     tokens = {}
     for side_idx, lst in enumerate(chart.laser):
@@ -449,7 +666,7 @@ def compute_spin_tokens(chart):
             dirsign = _outgoing_dirsign(lst, i)
             if dirsign is None:
                 continue
-            is_swing = p.roll_type == SWING_ROLL_TYPE
+            is_swing = p.roll_type in SWING_ROLL_TYPES
             if is_swing:
                 base = "@<" if dirsign < 0 else "@>"
             else:

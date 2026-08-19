@@ -225,13 +225,22 @@ Empty for all charts; purpose unknown.
 
 + C3: Roll/swing type. Lengths below are in 1/4th notes and refer to the time the roll takes to *completely* finish, including overshoots — unlike KSM roll lengths, where the overshoot occurs after the specified length. These values refer to default length if it's not defined in C8/C9.
     + `0`: No roll
-    + `1`: 6-beat roll
+    + `1`: 7-beat roll 
     + `2`: 2-beat roll
     + `3`: 3-beat roll
-    + `4`: 12-beat triple roll
+    + `4`: 12-beat triple roll — **three complete turns**, one every quarter of the declared duration
     + `5`: 3-beat swing
     + `6`: (v12) 8x-speed roll (length from C8, or C9 in v13)
-    + `7`: (v12) undocumented, behaves like type 6
+    + `7`: (v12)
+        | C3 | internal | default duration (C8=0) | explicit-length unit | curve | full turns |
+        |---|---|---|---|---|---|
+        | 1 | 1 | 7 beats | 1 beat | roll | 1, done at 3/7 of the duration |
+        | 2 | 3 | 2 beats | 1 beat | roll | 1, done at 3/7 |
+        | 3 | 2 | 3 beats | 1 beat | roll | 1, done at 3/7 |
+        | 4 | 4 | 12 beats | 1 beat | **triple** | **3**, done at 1/4, 2/4, 3/4 |
+        | 5 | 5 | 3 beats | 1 beat | swing | 0 — a ±61° wobble |
+        | 6 | 6 | 7 beats | **1/10 beat** | roll | 1, done at 3/7 |
+        | 7 | 7 | 3 beats | **1/10 beat** | **swing** | 0 |
 
 + C4: Laser effect, applied until the timing of the next node
     + `0`: Peak filter, default side low, opposite side high
@@ -252,12 +261,14 @@ Empty for all charts; purpose unknown.
     + This does not always reliably indicate the presence/absence of smooth lasers — e.g. in 緋色月下、狂咲ノ絶 (nayuta 2017 ver) MXM some smooth lasers have curve type `0`.
 
 + C8:
-    + **(v10/v12) Roll/swing length**, in 1/4th notes; `0` means "use the type's default length". This is the only length source those versions have.
-    + **(v13)** Unknown purpose
+    + **(v10/v12) Roll/swing length**, in 1/4th notes for types 1-5 and in *tenths* of a 1/4th note for types 6/7 (per the renderer — see the C3 table above; the inherited "1/32 note" reading is what the reference charters transcribe, not what the game does); `0` means "use the type's default length".
+    + **(v13) Not the length — a different field entirely, meaning unknown.** It takes only the values `0`, `1` and `2` (5806 and 3707 nonzero rows out of 93,574), across 106 of the 148 format-13 charts, all three node types, all curve types, both laser widths, and with no BPM relationship. Unlike a length it appears freely on rows carrying no roll at all (9489 of 93,086), and unlike cells-per-chain it never exceeds 2. This is the column an earlier pass here mistook for a still-mostly-empty length column.
+    + The v13 length is C9. Do not read a v13 `C8=0` as "use the type's default": the default applies when the *length column* is 0, which in v13 means C9.
 
 + C9:
     + **(v10/v12) (Optional) Cells per chain** — the number of cells per chain contributed by a laser segment. If unspecified, defaults to 12 for BPMs $< 255$ and 24 for BPMs $\geq 255$. Rare, and isolated to three charters (`i_kuroma`/`madeinlove_kuroma` in v10, `littleredridinghood_roughsketch` in v12), holding small values (1-12) consistent with the chain meaning and unrelated to roll length.
-    + **(v13) Roll/swing length**, shifted from C8 
+    + **(v13) Roll/swing length**, for *every* roll type — the same quantity in the same unit as v10/v12's C8, one column to the right. The ksh conversion is unchanged: `24 * C9` for types 1, 2, 3 and 5 (C9 in quarter notes), `3 * C9` for types 6/7, and `48 * C9` for type 4, which additionally carries a manual `tilt=` ramp. In v13 this is the last column any row carries.
+    + A v13 row can carry both C8 and C9 (23 rows corpus-wide, across types 1, 5 and 6). C8 is `1` or `2` on every one of them; C9 is the length. See [`camera.md`](camera.md).
 
 + C10: (v13) Cells per chain, shifted from C9 (unverified)
 
@@ -406,3 +417,18 @@ Unknown.
 + Followed by a space-separated list of script IDs, applied left to right to anything with a matching timing in the corresponding track.
     + Applying a script to the start timing appears to be sufficient for a hold or laser.
     + An assignment is visible to later scripts within a single run of script processing — from EXCEED April Fools MXM's comments: "複数のスクリプトが同じ変数を書き換える場合左のスクリプトから順に処理され、結果が重ね合わされる。" Assignments in one run are not visible in the next.
+
+## Open questions
+
+Things this document does not settle. Everything above is what the format does; this is what is still guessed at.
+
++ **The v13-only C8 column.** Measured as a 0/1/2 per-point flag with no roll, node-type, curve, width or BPM correlation. Which record field it lands in is known (`+0x34`); what reads that field is not. Finding its consumer needs the gameplay/graphics code, which is outside this project's decompiled dumps.
++ **The v13 length's unit** — inherited from v10/v12 rather than measured, for want of any format-13 hand chart to measure against.
++ **Laser curve type `1`** — no known examples in any chart.
++ **BT tracks' C2** — non-zero (usually `2`) on holds, with no observed effect.
++ **`#BPM OPTION`'s two fields.** `ConstantScroll` plausibly means "use a constant visual scroll speed regardless of BPM changes", analogous to ksh's `scroll_speed`; `RepresentativeBpm` plausibly matches ksh's `to` or VOX's own default-BPM concept. Neither is confirmed against the renderer.
++ **`#LOCKED_SPCONTROLER`'s purpose** — parses like `#SPCONTROLER`, but why a separate locked section exists is unknown.
++ **`#REVERB EFFECT PARAM`** — empty in every chart.
++ **`AIRL_ScaX`/`AIRR_ScaX`**, and whether `BAR` works without `BAROFF`.
++ **Echo's 7th field (id 8).** Described as a grid alignment / update period, but the Echo wrapper demonstrably does not call the grid snap, so that reading is at best imprecise. It is `0.00` on every row of every chart examined.
++ **Composite effect id 13.** Stores `{tick, value}` keyframes and interpolates between them, dispatched like any other effect kind; what the interpolated value modulates was never reached. `p2 ∈ [-24,24]` reads plausibly as semitones, making an animated pitch bend the leading guess. See [`audio_engine.md`](audio_engine.md) §8.
