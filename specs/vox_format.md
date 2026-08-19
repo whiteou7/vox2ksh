@@ -2,10 +2,7 @@
 
 ## Credits
 
-This document began as **zacharied's** VOX format notes and was substantially rewritten and extended by **m0seng**, whose v10/v12-focused version is what this project inherited. Most of the structure below is still theirs, and the parts this project has changed are changes to *their* groundwork, not a replacement for it. It is now maintained here, with corrections applied in place.
-
-DSP-level detail lives in [`audio_engine.md`](audio_engine.md), camera detail in [`camera.md`](camera.md). Anything still unsettled is collected under "Open questions" at the end; everything else here is what the format does.
-
+This document began as **zacharied's** VOX format notes and was substantially rewritten and extended by **m0seng**, whose v10/v12-focused version is what this project inherited.
 
 ## Conventions
 
