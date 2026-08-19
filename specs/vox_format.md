@@ -230,7 +230,9 @@ Empty for all charts; purpose unknown.
 
 ### `#TRACK1`/`#TRACK8`
 
-(Tabsep) The left and right laser respectively. In v10 and v12 most rows carry 9 fields (C0-C8) and C9 is omitted; **in v13 every row carries all 10**.
+(Tabsep) The left and right laser respectively. In v10 and v12 most rows carry 9 fields (C0-C8) and C9 is omitted; **in v13 every row carries all 10** (C0-C9).
+
+**The columns from C8 on are not the same quantity in every format version.** Format 13 inserted one new column after the curve type and pushed the roll length and cells-per-chain one place right, so the length lives in C8 up to v12 and in C9 from v13. This is a property of the row layout, not of any particular roll type — see the C8/C9/C10 entries below, and read them together rather than one at a time.
 
 + C0: Timing
 
@@ -277,14 +279,48 @@ Empty for all charts; purpose unknown.
     + `5`: Sine ease in (start slow, end fast)
     + This does not always reliably indicate the presence/absence of smooth lasers — e.g. in 緋色月下、狂咲ノ絶 (nayuta 2017 ver) MXM some smooth lasers have curve type `0`.
 
-+ C8: (v12) Roll/swing length, in 1/4th notes; `0` means "use the type's default length".
-    + In v10/v12 this is essentially the only length source ever used. `C8=0` occurs legitimately for types 1/2/3/5, and for types 6/7 it is effectively always a real explicit length (the only two corpus counterexamples turned out to be misfiled v13 charts). In v10, C8 and C9 are usually *absent* rather than present-and-zero.
-    + **(v13) `C8` is near-universally `0` for every type**, 96-100 % of rows (`1`: 323/337, `2`: 3/3, `3`: 1/1, `4`: 2/2, `5`: 59/65, `6`: 60/62, `7`: 16/18). For types 1-5 that is just the existing "use the default" path being taken more often. For types 6/7 the length moves to C9.
++ C8:
+    + **(v10/v12) Roll/swing length**, in 1/4th notes; `0` means "use the type's default length". This is the only length source those versions have. `C8=0` occurs legitimately for types 1/2/3/5, and for types 6/7 it is effectively always a real explicit length (the only two corpus counterexamples turned out to be misfiled v13 charts). In v10, C8 and C9 are usually *absent* rather than present-and-zero.
+    + **(v13) Not the length — a different field entirely, meaning unknown.** It takes only the values `0`, `1` and `2` (5806 and 3707 nonzero rows out of 93,574), across 106 of the 148 format-13 charts, all three node types, all curve types, both laser widths, and with no BPM relationship. Unlike a length it appears freely on rows carrying no roll at all (9489 of 93,086), and unlike cells-per-chain it never exceeds 2. This is the column an earlier pass here mistook for a still-mostly-empty length column.
+    + The v13 length is C9. Do not read a v13 `C8=0` as "use the type's default": the default applies when the *length column* is 0, which in v13 means C9.
 
-+ C9: (v12?) (Optional) Cells per chain — the number of cells per chain contributed by a laser segment. If unspecified, defaults to 12 for BPMs $< 255$ and 24 for BPMs $\geq 255$.
-    + In v10/v12, C9 alongside a populated C8 is rare — isolated to two charters (`i_kuroma`/`madeinlove_kuroma` in v10, `littleredridinghood_roughsketch` in v12), holding small values (1-12) consistent with the chain meaning and unrelated to roll length.
-    + **(v13) For roll types `6`/`7`, C9 holds the roll length** — the same value in the same unit as C8, relocated to this column. The two distributions coincide corpus-wide (quartiles `[min, q25, median, q75, max]`): type `6`, v12 C8 `[5, 12, 15, 25, 135]` mean 17.7 against v13 C9 `[3, 12, 15, 25, 35]` mean 18.2; type `7`, `[5, 7, 15, 25, 32]` mean 15.7 against `[10, 12, 18, 28, 45]` mean 20.4. The ksh conversion is `3 * C9`, identical to C8's. For types `1`-`5` this column keeps its cells-per-chain meaning and is an order smaller (`[1, 2, 3, 5, 21]`, mean 4.0); it is not a length there.
-    + A v13 row of type `6`/`7` can carry both columns (4 rows corpus-wide). C8 is `1` or `2` on all of them against a C9 of 10-30 — it is vestigial, and C9 is the length. See [`camera.md`](camera.md).
++ C9:
+    + **(v10/v12) (Optional) Cells per chain** — the number of cells per chain contributed by a laser segment. If unspecified, defaults to 12 for BPMs $< 255$ and 24 for BPMs $\geq 255$. Rare, and isolated to three charters (`i_kuroma`/`madeinlove_kuroma` in v10, `littleredridinghood_roughsketch` in v12), holding small values (1-12) consistent with the chain meaning and unrelated to roll length.
+    + **(v13) Roll/swing length**, for *every* roll type — the same quantity in the same unit as v10/v12's C8, one column to the right. The ksh conversion is unchanged: `24 * C9` for types 1-5 (C9 in quarter notes), `3 * C9` for types 6/7 (C9 in 1/32 notes). In v13 this is the last column any row carries.
+    + A v13 row can carry both C8 and C9 (23 rows corpus-wide, across types 1, 5 and 6). C8 is `1` or `2` on every one of them; C9 is the length. See [`camera.md`](camera.md).
+
++ C10: (v13) Cells per chain, shifted right along with the length. **No corpus row carries it** — and a row that did would be discarded whole, because the parser's accepted-conversion check (below) rejects a ten-data-column row.
+
+#### How the version shift was settled
+
+Not by inference from the values — by reading the game's own row parser, `FUN_18023baa0` in `modules/soundvoltex.dll` (the current chart reader; `FUN_180239810` and `FUN_1802380f0` are earlier generations, for older formats). Its laser-row loop at `0x18023d470` picks one of three format strings by version and scans the row into one fixed record at `rbp+0x330`:
+
+| version gate | conversions | position column |
+| --- | --- | --- |
+| `< 12` | 12 | int 0-127, rescaled by `* 0.007874016` (= 1/127) |
+| `== 12` | 12 | float 0-1 |
+| `>= 13` | 13 | float 0-1 |
+
+The record slots each branch fills, in column order (data columns, so column 1 is C1):
+
+| data column | 1 (pos) | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v10/v12 fills | `+0x18` | `+0x1c` | `+0x20` | `+0x24` | `+0x28` | `+0x2c` | `+0x30` | `+0x38` | `+0x3c` | — |
+| v13 fills | `+0x18` | `+0x1c` | `+0x20` | `+0x24` | `+0x28` | `+0x2c` | `+0x30` | `+0x34` | `+0x38` | `+0x3c` |
+
+`+0x38` is the roll length — v10/v12 feed it from C8, and that column is validated as the length against 1354 hand-chart samples (see [`camera.md`](camera.md), "Spin/swing: length") — and v13 feeds the same field from C9. `+0x34` is written *only* by the v13 branch, which is why that new column has no older meaning to inherit. Two things make this decisive: the shift lives in the row reader, which has not looked at C3 yet, so **it cannot be per-roll-type**; and both branches scan into one compile-time record, so a column's meaning is exactly the slot it lands in.
+
+The corpus agrees, by a test that needs no binary at all. A length can only mean something on a row that *has* a roll, while cells-per-chain is a property of the laser segment and appears regardless — so ask which column is dead on non-roll rows (`python scripts/camera/survey.py --lasercols`):
+
+| version | C8 nonzero, roll rows | C8 nonzero, non-roll rows | C9 nonzero, roll rows | C9 nonzero, non-roll rows |
+| --- | --- | --- | --- | --- |
+| v10 | 2 / 12,034 | **0 / 1,145,121** | 17 / 12,034 | 2872 / 1,145,121 |
+| v12 | 4700 / 6352 | **0 / 1,716,795** | 8 / 6352 | 1853 / 1,716,795 |
+| v13 | 24 / 488 | 9489 / 93,086 | 467 / 488 | **0 / 93,086** |
+
+Unambiguous in both directions, and it flips exactly at v13. Two further cross-checks. Per roll type, v13's C9 reproduces v12's C8 distribution (quartiles `[min, q25, median, q75, max]` — type 1: `[1,1,2,4,46]` mean 3.6 against `[1,2,3,5,21]` mean 4.1; type 6: `[5,12,15,25,135]` mean 17.7 against `[3,12,15,25,35]` mean 18.2; type 7: `[5,7,15,25,32]` mean 15.7 against `[10,12,18,28,45]` mean 20.4). And the row-shape census matches the parser's accepted-conversion check exactly: that check keeps a row whose scan consumed 9, 11 or 12 conversions and drops every other count, i.e. 7, 9 or 10 tab tokens, and the corpus holds only those three shapes (v10 `{7: 1141535, 9: 12731, 10: 2889}`, v12 `{9: 1721286, 10: 1861}`, v13 `{10: 93574}`). An 8-token row would be dropped; none exists.
+
+What this does *not* settle is the v13 length's **unit**. No format-13 chart has hand-chart coverage in `scripts/shared/reference/ksh` (they are all recent update-folder songs), so the quarter-note reading carries over from v10/v12 on the strength of being the same record field with the same value distribution, not from an independent measurement.
 
 ### `#TRACK2`/`#TRACK7`
 
@@ -443,7 +479,9 @@ Row shape is 8 fields for every control type, unchanged in v13.
 
 Things this document does not settle. Everything above is what the format does; this is what is still guessed at.
 
-+ **Roll/swing lengths for types `4` and `7` (C3/C8).** Type `4`'s stated 12 beats is contradicted by the only reference sample carrying it, and type `7` has no reference coverage at all — its length behaviour is assumed identical to type `6`'s. Neither is confirmed against the renderer. See [`camera.md`](camera.md), "Spin/swing: length".
++ **Roll/swing lengths for types `4` and `7`.** Type `4`'s stated 12 beats is contradicted by the only reference sample carrying it, and type `7` has no reference coverage at all — its length behaviour is assumed identical to type `6`'s. Neither is confirmed against the renderer. See [`camera.md`](camera.md), "Spin/swing: length".
++ **The v13-only C8 column.** Measured as a 0/1/2 per-point flag with no roll, node-type, curve, width or BPM correlation. Which record field it lands in is known (`+0x34`); what reads that field is not. Finding its consumer needs the gameplay/graphics code, which is outside this project's decompiled dumps.
++ **The v13 length's unit** — inherited from v10/v12 rather than measured, for want of any format-13 hand chart to measure against.
 + **Laser curve type `1`** — no known examples in any chart.
 + **BT tracks' C2** — non-zero (usually `2`) on holds, with no observed effect.
 + **`#BPM OPTION`'s two fields.** `ConstantScroll` plausibly means "use a constant visual scroll speed regardless of BPM changes", analogous to ksh's `scroll_speed`; `RepresentativeBpm` plausibly matches ksh's `to` or VOX's own default-BPM concept. Neither is confirmed against the renderer.

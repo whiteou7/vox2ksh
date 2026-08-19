@@ -233,8 +233,9 @@ def collect_spin_pairs(chart, ev, out_rows, label=None):
     dirsign is the sign of the slam/movement immediately following the
     roll-tagged point (see outgoing_dirsign) - a candidate discriminator for
     @( vs @) / @< vs @> since vox's roll_type alone doesn't encode direction.
-    `extra` is (label, version, cells_per_chain, ksh_len), carried for the
-    length analysis in spin_length_report.
+    `roll_length` is the version-resolved length column (vox.py picks C8 or,
+    from format 13, C9). `extra` is (label, version, ksh_len), carried for
+    the length analysis in spin_length_report.
     """
     for (tick, lchar, rchar, token) in ev.spin:
         best = None
@@ -244,12 +245,12 @@ def collect_spin_pairs(chart, ev, out_rows, label=None):
                     d = abs(p.tick - tick)
                     if best is None or d < best[4]:
                         dirsign = outgoing_dirsign(lst, i)
-                        best = (side, p.roll_type, p.roll_length, dirsign, d, p.cells_per_chain)
+                        best = (side, p.roll_type, p.roll_length, dirsign, d)
         if best:
-            side, roll_type, roll_length, dirsign, d, c9 = best
+            side, roll_type, roll_length, dirsign, d = best
             ksh_len = int(re.search(r"(\d+)", token).group(1))
             out_rows.append((roll_type, roll_length, side, dirsign, token,
-                             (label, chart.version, c9, ksh_len)))
+                             (label, chart.version, ksh_len)))
 
 
 def laser_pos_at(lst, tick):
@@ -501,33 +502,37 @@ def spin_length_report(spin_rows):
     different charters picked different ones (24 ksh-192nds per vox quarter
     note dominates; 32, 36 and 48 all recur). Pooling raw lengths mixes those
     scales together and hides the law - conditioning on songs whose explicit-
-    C8 rows measure exactly 24 exposes it, and the type-vs-type ratio test at
-    the end confirms it without needing any scale at all.
+    length rows measure exactly 24 exposes it, and the type-vs-type ratio test
+    at the end confirms it without needing any scale at all.
+
+    Every matched reference pair is format 10 or 12, so "the length column"
+    here is always C8; the format-13 shift to C9 is settled from the game's
+    parser instead - see specs/vox_format.md.
     """
     import collections
     import statistics
 
-    def vox_quarter_notes(rt, c8, c9, ver):
+    def vox_quarter_notes(rt, length):
         """The vox-declared roll duration in quarter notes, per camera.py."""
         if rt in (6, 7):
-            units = (c9 if ver >= 13 and c9 else c8 or c9) or 0
-            return units / 8.0          # C8/C9 count 1/32 notes for these
-        return float(c8) if c8 else float(camera_defaults.get(rt, 3))
+            return (length or 0) / 8.0      # these count 1/32 notes
+        return float(length) if length else float(camera_defaults.get(rt, 3))
 
     camera_defaults = {1: 6, 2: 2, 3: 3, 4: 12, 5: 3}
 
     rows = []
-    for (rt, c8, side, ds, tok, extra) in spin_rows:
-        label, ver, c9, ksh_len = extra
-        rows.append((label, rt, c8, c9, ver, ksh_len, vox_quarter_notes(rt, c8, c9, ver)))
+    for (rt, length, side, ds, tok, extra) in spin_rows:
+        label, ver, ksh_len = extra
+        rows.append((label, rt, length, ver, ksh_len,
+                     vox_quarter_notes(rt, length)))
     if not rows:
         print("\n==== spin length ====  no samples")
         return
 
     print("\n==== spin length: ksh_len / vox quarter note, per song (the charter's scale) ====")
     bysong = collections.defaultdict(list)
-    for (label, rt, c8, c9, ver, ksh_len, qn) in rows:
-        if c8 and qn:                      # explicit lengths only - defaults are what we're solving for
+    for (label, rt, length, ver, ksh_len, qn) in rows:
+        if length and qn:                  # explicit lengths only - defaults are what we're solving for
             bysong[label].append(ksh_len / qn)
     scale = {}
     for label, v in bysong.items():
@@ -538,10 +543,10 @@ def spin_length_report(spin_rows):
 
     print("\n   exact-match rate of `ksh_len = SCALE * vox quarter notes`:")
     for s in (24, 32):
-        hit = sum(1 for r in rows if abs(r[5] - s * r[6]) < 1e-6)
+        hit = sum(1 for r in rows if abs(r[4] - s * r[5]) < 1e-6)
         print("     SCALE=%-3d %d/%d = %.1f%%" % (s, hit, len(rows), 100.0 * hit / len(rows)))
     print("   ratio of observed to predicted at SCALE=24 (residual is charter style):")
-    rat = collections.Counter(round(r[5] / (24.0 * r[6]), 3) for r in rows if r[6])
+    rat = collections.Counter(round(r[4] / (24.0 * r[5]), 3) for r in rows if r[5])
     for v, c in rat.most_common(6):
         print("     x%-6s n=%-4d (%4.1f%%)  = scale %g" % (v, c, 100.0 * c / len(rows), 24 * v))
 
@@ -551,10 +556,10 @@ def spin_length_report(spin_rows):
                          ("default ", [r for r in rows if r[1] == rt and not r[2]])):
             if not sel:
                 continue
-            hit = sum(1 for r in sel if abs(r[5] - 24 * r[6]) < 1e-6)
+            hit = sum(1 for r in sel if abs(r[4] - 24 * r[5]) < 1e-6)
             print("     rt=%d %s n=%-4d exact@24=%-4d (%5.1f%%)  median ratio=%.3f" % (
                 rt, tag, len(sel), hit, 100.0 * hit / len(sel),
-                statistics.median([r[5] / (24.0 * r[6]) for r in sel])))
+                statistics.median([r[4] / (24.0 * r[5]) for r in sel])))
 
     print("\n==== C8=0 defaults, in songs whose explicit-C8 scale is exactly 24 ====")
     print("   (the implied vox default duration, in quarter notes - compare vox_format.md's names)")
@@ -563,16 +568,16 @@ def spin_length_report(spin_rows):
         sel = [r for r in rows if r[1] == rt and not r[2] and r[0] in n24]
         if not sel:
             continue
-        imp = collections.Counter(r[5] / 24.0 for r in sel)
+        imp = collections.Counter(r[4] / 24.0 for r in sel)
         print("   rt=%-2d name=%-3s n=%-4d median=%.2f  observed: %s" % (
             rt, camera_defaults.get(rt, "?"), len(sel),
-            statistics.median([r[5] / 24.0 for r in sel]), dict(imp.most_common(5))))
+            statistics.median([r[4] / 24.0 for r in sel]), dict(imp.most_common(5))))
 
     print("\n==== scale-free cross-check: ratio between two types' defaults in the SAME song ====")
     print("   (needs no charter scale at all - it cancels; names predict 6:2:3:3 for rt 1:2:3:5)")
     d = collections.defaultdict(list)
-    for (label, rt, c8, c9, ver, ksh_len, qn) in rows:
-        if not c8:
+    for (label, rt, length, ver, ksh_len, qn) in rows:
+        if not length:
             d[(label, rt)].append(ksh_len)
     med = {k: statistics.median(v) for k, v in d.items()}
     songs = {k[0] for k in med}

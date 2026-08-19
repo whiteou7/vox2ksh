@@ -369,12 +369,12 @@ def compute_zoom_events(chart, rotx_scale=ROTX_TO_ZOOM_TOP, radi_scale=RADI_TO_Z
 SWING_ROLL_TYPE = 5
 
 # vox_format.md's named default duration per roll_type, in quarter notes -
-# used only when C8 (roll_length) is 0, i.e. vox says "use this type's
-# normal length". All four types with reference coverage (1, 2, 3, 5)
+# used only when the length column (roll_length) is 0, i.e. vox says "use
+# this type's normal length". All four types with reference coverage (1, 2, 3, 5)
 # confirm their name against the hand charts once the per-song charter
 # scale is controlled for; type 4 has one sample and is unvalidated. Types
-# 6/7 aren't named this way - they always carry an explicit length in C8
-# (or C9 in v13) - so they aren't in this table; see compute_spin_tokens.
+# 6/7 aren't named this way - they always carry an explicit length - so
+# they aren't in this table; see compute_spin_tokens.
 DEFAULT_BEATS = {1: 6, 2: 2, 3: 3, 4: 12, 5: 3}
 
 # The spin-length law, fit against 1354 reference samples by
@@ -395,12 +395,12 @@ BEAT_TO_KSH192 = 24
 # charter picks by feel), 61/64 exact.
 TYPE67_UNIT_TO_KSH192 = 3   # 1/32 note
 
-# In chart format 13 the types-6/7 length simply MOVED from C8 to C9: the
-# two distributions are the same quantity in the same unit (v12 C8 vs v13
-# C9 for type 6: quartiles [5,12,15,25,135] vs [3,12,15,25,35], means 17.7
-# vs 18.2), so no separate scale factor applies - see specs/camera.md. C9
-# on types 1-5 is the unrelated "cells per chain" (median 3) and must not
-# be read as a length, which is why this path is restricted to 6/7.
+# In chart format 13 the length column MOVED one place right, for every
+# roll type - the game's row parser inserted a new column after the curve
+# type and shifted the rest, without ever consulting the roll type. That
+# resolution lives in shared/vox.py's parse_laser_track, so `p.roll_length`
+# below is already the right column for the chart's version and nothing
+# here needs a version test. See specs/vox_format.md and specs/camera.md.
 
 
 def _outgoing_dirsign(lst, i, max_lookahead=5):
@@ -419,21 +419,13 @@ def _outgoing_dirsign(lst, i, max_lookahead=5):
 def _spin_length(chart, p):
     """A laser point's ksh spin length in 192nds, per the law above.
 
-    Types 6/7 read their length from C9 instead of C8 on format-13 charts,
-    where the column moved. The four v13 rows that carry *both* are the
-    reason this prefers C9 outright rather than "C8 if present": their C8
-    is 1 or 2 (a 3-to-6 tick spin, i.e. nothing) next to a C9 of 10-30,
-    squarely in the normal length range - C8 is vestigial there. The
-    version test is what keeps that preference off v12, where the only
-    rows carrying both are one charter's (`littleredridinghood`) genuine
-    cells-per-chain C9=3 alongside a real C8 length of 7-15.
+    `p.roll_length` is the version-resolved length column (C8 up to format
+    12, C9 from 13). Every 6/7 row in the corpus carries an explicit length
+    in it, so the `or 0` below is unreachable in practice and there is no
+    documented default duration for those two types to fall back on.
     """
     if p.roll_type in (6, 7):
-        units = (p.cells_per_chain if chart.version >= 13 and p.cells_per_chain
-                 else p.roll_length or p.cells_per_chain)
-        # No corpus row reaches the fallback: every 6/7 row in every version
-        # carries a length in one column or the other.
-        length = (units or 0) * TYPE67_UNIT_TO_KSH192
+        length = (p.roll_length or 0) * TYPE67_UNIT_TO_KSH192
     elif p.roll_length:
         length = p.roll_length * BEAT_TO_KSH192
     else:

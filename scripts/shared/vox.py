@@ -209,12 +209,18 @@ class LaserPoint:
     """One #TRACK1/#TRACK8 row, already resolved to an absolute tick and a
     0..1 position (v10's 0..127 integer range is rescaled here so callers
     never have to check the format version).
+
+    `roll_length` and `cells_per_chain` are likewise resolved: format 13
+    inserted a new column after the curve type, shifting both one place to
+    the right, so callers get the quantity and never the column - see
+    `parse_laser_track`.
     """
     __slots__ = ("tick", "pos", "node_type", "roll_type", "effect",
-                 "width", "curve_type", "roll_length", "cells_per_chain")
+                 "width", "curve_type", "roll_length", "cells_per_chain",
+                 "unknown_c8")
 
     def __init__(self, tick, pos, node_type, roll_type, effect, width,
-                 curve_type, roll_length, cells_per_chain):
+                 curve_type, roll_length, cells_per_chain, unknown_c8=0):
         self.tick = tick
         self.pos = pos
         self.node_type = node_type      # 0 continue, 1 start, 2 end
@@ -224,6 +230,7 @@ class LaserPoint:
         self.curve_type = curve_type
         self.roll_length = roll_length
         self.cells_per_chain = cells_per_chain
+        self.unknown_c8 = unknown_c8    # v13-only column, meaning unknown
 
 
 def parse_bt_fx_track(sec, tag):
@@ -243,7 +250,15 @@ def parse_bt_fx_track(sec, tag):
 
 
 def parse_laser_track(sec, tag, version):
-    """#TRACK1/#TRACK8 -> sorted list of LaserPoint."""
+    """#TRACK1/#TRACK8 -> sorted list of LaserPoint.
+
+    Format 13 inserted one new column between the curve type (C7) and the
+    roll length, pushing the roll length to C9 and cells-per-chain to C10.
+    This is not a per-roll-type quirk: the game's own row parser has three
+    version branches (`< 12`, `== 12`, `>= 13`) that differ only in the
+    position column's type and in this shift, and it reads the row before it
+    has looked at the roll type at all. See specs/vox_format.md.
+    """
     out = []
     for line in sec.get(tag, []):
         f = line.split()
@@ -259,10 +274,18 @@ def parse_laser_track(sec, tag, version):
         width = int(f[5])
         # C6 unused
         curve_type = int(f[7]) if len(f) > 7 else 0
-        roll_length = int(f[8]) if len(f) > 8 else 0
-        cells_per_chain = int(f[9]) if len(f) > 9 else None
+        col = (lambda i: int(f[i]) if len(f) > i else None)
+        if version >= 13:
+            unknown_c8 = col(8) or 0
+            roll_length = col(9) or 0
+            cells_per_chain = col(10)
+        else:
+            unknown_c8 = 0
+            roll_length = col(8) or 0
+            cells_per_chain = col(9)
         out.append(LaserPoint(tick, pos, node_type, roll_type, effect, width,
-                               curve_type, roll_length, cells_per_chain))
+                               curve_type, roll_length, cells_per_chain,
+                               unknown_c8))
     out.sort(key=lambda p: p.tick)
     return out
 
