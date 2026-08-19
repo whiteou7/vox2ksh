@@ -203,6 +203,23 @@ def _enforce_min_gap(pts, min_gap, lead=0):
     a real trough at a run's tick 3792 was dropped in favour of a
     slightly-higher, slightly-earlier point at 3786, six ticks short of the
     threshold, shifting the visible turning point six ticks early.
+
+    That second pass must not fire when the leg *into* the kept point is
+    flat. `rising` was originally `best_v >= prev_v`, which reads a flat
+    approach as "rising", so a candidate anywhere above the hold counted as
+    "more extreme" and replaced the point - but a kept point with a flat leg
+    in is not an extremum, it is the corner where a straight hold ends and a
+    curve begins, and moving a corner is never an improvement: it delays the
+    turn and drags the hold's end value out along the curve with it. Found
+    against 2392_dementafterlegend_cosmograph_5m (format 13) measure 29 beat
+    3 to measure 30 beat 1, user-reported: both lanes hold straight for 96
+    ticks and then split apart, and the right lane's corner at tick 5568
+    (pos 0.375) was replaced by tick 5574 (pos 0.4357) - six ticks late and
+    three ksh steps high, so the "straight" section visibly drifted. The
+    left lane escaped only by luck of sign: it leaves its hold *downward*,
+    so `v >= best_v` failed and no candidate qualified. Requiring a real
+    direction (`best_v != prev_v`) fixes the corner case and leaves genuine
+    extrema, which by definition have a non-flat leg in, untouched.
     """
     if len(pts) <= 2:
         return pts, (len(pts) == 2 and pts[1][0] - (pts[0][0] + lead) < min_gap)
@@ -230,7 +247,14 @@ def _enforce_min_gap(pts, min_gap, lead=0):
             continue
         prev_v = out[i - 1][1]
         best_t, best_v = out[i]
-        rising = best_v >= prev_v
+        if best_v == prev_v:
+            # Flat leg in: out[i] is not an extremum at all, it is the
+            # CORNER where a straight hold stops and a curve starts, and
+            # the corner's whole job is to be exactly where it is. See the
+            # docstring - swapping it forward both delays the turn and
+            # drags the hold's end value out along the curve.
+            continue
+        rising = best_v > prev_v
         for t, v in cands:
             more_extreme = (rising and v >= best_v) or (not rising and v <= best_v)
             if (more_extreme and t - eff[i - 1] >= min_gap
