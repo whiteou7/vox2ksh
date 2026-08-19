@@ -13,7 +13,7 @@ _DEFAULTS = {
     "ffmpeg_path": "",
     "se_bank_dir": "",
     "difficulties": ["novice", "advanced", "exhaust", "top"],
-    "pretilt_fix": False,
+    "pretilt_fix": True,
     "debug": False,
     "advanced": False,
     "advanced_values": {},
