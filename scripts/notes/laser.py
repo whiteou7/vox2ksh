@@ -68,16 +68,20 @@ The same "same row, two values" problem can also land on a *run boundary*
 instead of inside one run's own point list: vox flags one run's true end
 and the next run's true start at the identical tick (node_type 2 then 1,
 same tick) rather than folding it into one run's own point sequence -
-common in zigzag/chain laser patterns. `build_runs`'s tie-breaking in
-`LaserLane.run_at` (convert.py) always resolves that shared tick to
-whichever run *starts* there, so without correction the earlier run's true
-endpoint never gets a row at all - the output draws a straight line from
-that run's second-to-last point clear through to the next run's landing
-value, a multi-tick diagonal standing in for what should be a vertical hold
-followed by an instant drop. `build_runs` moves the earlier run's endpoint
-one tick earlier so both get a row - found and fixed against
-2397_ultracharge_yutaimai (user-reported); occurs zero times in the 30
-reference charts xcheck.py currently matches, so it went uncaught there.
+common in zigzag/chain laser patterns. That is not a slam and must not be
+drawn as one; it is two sections, and ksh separates sections with a grid row
+holding '-'. Reserving a row costs *two* ticks of separation, not one - a
+one-tick gap leaves no row in between - so `_separate_runs` pulls the
+earlier run's trailing points back until its end clears the next run's start
+by `MIN_RUN_GAP_TICKS`, and `LaserLane.anchors` (convert.py) then puts a
+grid line in the gap so the '-' actually gets written. Same pass, same
+reason, for the two neighbouring shapes: a vox-native one-tick gap, and a
+slam landing that `_slam_landing_tick` had to push past the next run's start
+(which used to make `LaserLane.run_at` drop the earlier run outright).
+Found against 2397_ultracharge_yutaimai measures 53-54 (user-reported);
+across the 8105-chart corpus 66 boundaries came out as phantom slams, 25
+more merged from vox-native one-tick gaps, and 114 runs were overlapped or
+swallowed.
 
 ksh format version 2 changes what "approximate the curve" even means, and `build_runs(curves=True)` takes that path. `laser_l_curve`/`laser_r_curve` give one segment - one laser point to the next - a quadratic bezier: the two laser points are the endpoints and the option's `"<a>;<b>"` payload is the control point normalised inside that segment's own box, `a` across time and `b` across position. `a == b` puts the control point on the diagonal and the segment stays straight; mirroring in time maps `(a, b)` to `(1-a, 1-b)`. Every slam-free stretch then goes through decimate_segment_curved() instead of decimate_segment(), which is a re-fit and not a decimation: it keeps the stretch's own turning points and inflections rather than every point a polyline needs to trace the curve, and gives each surviving segment the (a, b) that best reproduces the vox samples it spans. Over the whole 8000-chart corpus that is about 30 % fewer laser points at well under half of v1's shape error.
 
@@ -120,6 +124,23 @@ SLAM_GAP_FRAC = 32
 #
 # A divisor of the whole note, like every other gap constant here. Being an engine constant rather than a tuning knob, this is the one that most obviously must not scale with the bar - and it was the last one still doing so. Measured against the local measure it came out at 5 ticks in 3/4 where the engine's real boundary is 6, so the guard concluded a 5-tick leg was already clear, did nothing, and let the slam-slam stutter it exists to prevent happen anyway - silently, since from its own point of view there was nothing to fix. 47 of the 56 unintended slams left in this project's 3/4 reference charts after `min_gap_frac` was corrected were this. The other direction (11 ticks in 7/4, against a real 7) only ever cost a tick, since _slam_landing_tick caps the backoff it will chase for this at `max_backoff`.
 KSH_SLAM_CUTOFF_FRAC = 32
+
+# Least separation, in ticks, this converter leaves between one run's last
+# point and the next run's first. Two, because ksh needs a whole grid row
+# holding '-' to end a laser section: one tick of separation leaves no row
+# in between, and the two runs splice into a single continuous laser that
+# the engine then reads as a slam (see `_separate_runs`). A raw tick count,
+# not a note value - it is a property of the grid, not of the music, and the
+# smallest value that works is the one that costs the earlier run the least
+# of its true length.
+#
+# Hand charters leave far more room than this at the same boundaries - 22 of
+# the 23 alignable same-tick handoffs across the 649 matched reference pairs
+# get a '-' break, at a median of about 45 ticks - but that is their reading
+# of the phrase, not a format constraint. Widening this is a tuning knob, and
+# would have to be fitted the way SLAM_GAP_FRAC was; 2 is what makes the
+# output *correct* rather than merely prettier.
+MIN_RUN_GAP_TICKS = 2
 
 
 def pos_to_char(pos):
@@ -396,20 +417,6 @@ def _slam_landing_tick(start_t, used, gap, ceiling=None, safe_gap=1, max_backoff
     target = max(target, start_t + 1)
     used.add(target)
     return target
-
-
-def _bump_to_free_tick_before(t, used, floor):
-    """Like _bump_to_free_tick but searches backward, never going past
-    `floor` (exclusive) - the tick of whatever point precedes it.
-    """
-    bump = 1
-    while t - bump in used and t - bump > floor:
-        bump += 1
-    new_t = t - bump
-    if new_t <= floor:
-        return None      # no free tick between the two points - give up
-    used.add(new_t)
-    return new_t
 
 
 # --------------------------------------------------------------------------
@@ -764,26 +771,77 @@ def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC, c
 
         out.append(Run(points, slam_after, width, tight, flat_curves))
 
-    # A slam can land exactly on a run *boundary* instead of inside one
-    # run's own point list: vox flags one run's true end and the next
-    # run's true start at the identical tick (node_type 2 then 1, same
-    # tick) - a real handoff, not the mid-run case _split_at_slams already
-    # covers. Only one grid row exists per tick, and LaserLane.run_at()
-    # resolves the tie toward whichever run *starts* there, so the earlier
-    # run's true endpoint would otherwise never get a row of its own - the
-    # output draws a straight line from that run's second-to-last point
-    # clear through to the next run's landing value instead of a vertical
-    # hold followed by an instant drop. Move the earlier run's endpoint one
-    # tick earlier so it gets a row; found and fixed against
-    # 2397_ultracharge_yutaimai (user-reported).
-    for a, b in zip(out, out[1:]):
-        if a.end_tick != b.start_tick:
-            continue
-        t, v = a.points[-1]
-        floor = a.points[-2][0] if len(a.points) > 1 else a.points[0][0] - 1
-        new_t = _bump_to_free_tick_before(t, used_ticks, floor)
-        if new_t is not None:
-            used_ticks.discard(t)
-            a.points[-1] = (new_t, v)
-
+    _separate_runs(out)
     return out
+
+
+def _separate_runs(runs):
+    """Guarantee MIN_RUN_GAP_TICKS between consecutive runs, in place.
+
+    Two vox laser sections can end and begin close enough that the ksh grid
+    cannot keep them apart, and then they are not two sections any more: the
+    writer emits one run's last explicit char and the next run's first with
+    no '-' row between them, KSM splices them into a single continuous laser,
+    and a value change across that join reads as a *slam* - a note the chart
+    never had, with its own judgement and its own knob flick.
+
+    Three ways a chart gets there, all of them the same defect:
+
+    * The handoff is on one tick - vox flags one run's true end (node_type 2)
+      and the next run's true start (node_type 1) at the identical tick, the
+      common zigzag/chain shape. This is not the mid-run slam _split_at_slams
+      already covers; it is a real section boundary.
+    * Vox itself leaves exactly one tick between the two sections.
+    * The earlier run's last point is a slam landing that _slam_landing_tick
+      had to push *past* the next run's start: with the slam's own start tick
+      already at or after that ceiling, its `max(target, start_t + 1)` floor
+      wins over the ceiling clamp and the runs come out overlapping. Then
+      LaserLane.run_at() resolves every shared tick toward whichever run
+      *starts* there and the earlier run is not drawn at all - in
+      0223_syonenha_sorawo_tadoru_toromaru_3e a whole two-point slam run
+      disappeared this way.
+
+    Walking the pairs backwards fixes all three the same way: pull the
+    earlier run's trailing points back onto consecutive free ticks until its
+    end clears the next run's start by MIN_RUN_GAP_TICKS, then let the pass
+    reach the pair before it with that run's new start already in hand, so a
+    shift never just moves the collision one run upstream. The cascade stops
+    at the first point that is already early enough, which - the nearest
+    preceding kept point being a median 47 ticks back across the corpus, 6 in
+    the tightest case - is almost always the very next one.
+
+    How much room a boundary needs depends on whether it is *visibly* a
+    handoff, and the test is what the two sides round to, not what they are:
+    two positions closer than half a ksh step render as the same character,
+    so no jump is drawn and nothing can be misread as a slam.
+
+    * Different characters - a real jump. Needs MIN_RUN_GAP_TICKS, the two
+      ticks it takes to fit the '-' row that ends the first section.
+    * The same character - the knob does not move across the boundary, and
+      one continuous laser through it is not a mistranscription, it is what
+      the player does. Needs one tick, purely so both runs get a row of
+      their own and `run_at` stops resolving a shared tick toward the later
+      run and dropping the earlier one. Splitting these instead would
+      manufacture a release-and-regrab the chart never asked for - and they
+      are not rare: 40 of the 130 same-tick handoffs in the corpus, and 9 of
+      the 11 in spear_of_justice alone, hand off at an unchanged position.
+
+    A run whose own start would have to move before the chart begins is left
+    alone: nothing about it can be represented, and corrupting the tick order
+    to say so would be worse than the splice.
+    """
+    for i in range(len(runs) - 2, -1, -1):
+        a, b = runs[i], runs[i + 1]
+        visible_jump = pos_to_char(a.points[-1][1]) != pos_to_char(b.points[0][1])
+        limit = b.start_tick - (MIN_RUN_GAP_TICKS if visible_jump else 1)
+        if a.end_tick <= limit:
+            continue
+        if limit - (len(a.points) - 1) < 0:
+            continue                      # would run off the front of the chart
+        t = limit
+        for j in range(len(a.points) - 1, -1, -1):
+            tick, v = a.points[j]
+            if tick <= t:
+                break
+            a.points[j] = (t, v)
+            t -= 1

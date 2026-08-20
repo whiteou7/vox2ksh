@@ -147,9 +147,12 @@ class LaserLane:
         grid line inside of gets no line at all - the output would go
         straight from one run's last explicit char to the next run's first
         with no '-' between them, silently splicing two separate vox runs
-        into what reads as one continuous laser. A one-tick gap can't be
-        fixed this way (there is no room for a third distinct row) - that
-        is the same kind of grid limit as an unrepresentable 32nd slam.
+        into what reads as one continuous laser. A one-tick gap has no room
+        for a third distinct row and so cannot be separated here at all,
+        which is why laser.py's `_separate_runs` guarantees every pair of
+        runs `MIN_RUN_GAP_TICKS` (2) apart before this ever runs - the two
+        halves of one fix, and the reason the `>= 2` below is a check rather
+        than a limitation.
         """
         out = set()
         for r in self.runs:
