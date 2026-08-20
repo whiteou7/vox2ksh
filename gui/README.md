@@ -13,10 +13,10 @@ python main.py
 
 | file | what it does |
 |---|---|
-| `app.py` | The window: song table, difficulty filters, jacket/metadata preview, Debug console, Advanced options panel, Settings dialog. `main.py` is the thin entry point. |
+| `app.py` | The window: song table, difficulty filters, the **KSH version** dropdown, jacket/metadata preview, Debug console, Advanced options panel, Settings dialog. `main.py` is the thin entry point. |
 | `music_db.py` | Parses `data/others/music_db.xml` (cp932) and cross-references it against `data/music`, producing `Song`/`Difficulty` objects - titles, artists, jackets, levels, illustrators, which difficulties actually have a chart on disk. |
 | `convert_worker.py` | The background job queue: per (song, difficulty), calls `notes/convert.py`'s `convert()` (with real metadata via its `meta=` param) then `apply_chart.py`'s `main()`, in-process, on one worker thread. Streams stdout into the Debug console. |
-| `argspec.py` | Introspects `apply_chart.build_arg_parser()` into the Advanced panel's controls, skipping whatever the worker already computes per chart (`-d`, `-a`, `-o`, `--se-bank-dir`, `--dry`). The two chart-side checkboxes at the top of that panel - **Standard slam gap** and **Remove pretilt** - are `notes/convert.py` arguments rather than `apply_chart.py` flags, so `app.py` places them by hand above the introspected list. |
+| `argspec.py` | Introspects `apply_chart.build_arg_parser()` into the Advanced panel's controls, skipping whatever the worker already computes per chart (`-d`, `-a`, `-o`, `--se-bank-dir`, `--dry`). The two chart-side checkboxes at the top of that panel - **Standard slam gap** and **Remove pretilt** - are `notes/convert.py` arguments rather than `apply_chart.py` flags, so `app.py` places them by hand above the introspected list. So is the **KSH version** dropdown, which sits in the toolbar instead: it decides which editors and players can read the output at all (a v2 file's laser curves are invisible to KSM v1.xx), which is a choice to make before converting rather than a tuning knob to leave alone. |
 | `release_check.py` | Background GitHub-releases check against `whiteou7/vox2ksh` - red text only, no auto-update. |
 | `paths.py` | Dev-vs-frozen path resolution; where a build's bundled SE bank / ffmpeg live. |
 | `settings.py` | Persists folder choices and panel state between runs (`%APPDATA%\vox2ksh-gui\settings.json`). |

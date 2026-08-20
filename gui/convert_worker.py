@@ -62,6 +62,7 @@ class BatchOptions:
     ffmpeg_path: str = None
     render_audio: bool = True
     standard_slam_gap: bool = True   # notes_convert.convert()'s slam_gap_frac - see its docstring
+    ksh_version: int = 1             # notes_convert.convert()'s ksh_version: 1 = interpolated laser points, 2 = laser_l_curve/laser_r_curve beziers
     pretilt_fix: bool = False        # notes_convert.convert()'s pretilt_fix - see camera.py
     advanced_values: dict = field(default_factory=dict)   # dest -> value, from the Advanced panel
 
@@ -164,7 +165,8 @@ def run_job(job, options, log):
     try:
         notes_convert.convert(job.vox_path, job.ksh_out, camera=True, meta=meta,
                                slam_gap_frac=slam_gap_frac,
-                               pretilt_fix=options.pretilt_fix)
+                               pretilt_fix=options.pretilt_fix,
+                               ksh_version=options.ksh_version)
         result.wrote_ksh = True
     except Exception as e:  # noqa: BLE001 - one bad chart must not abort the batch
         result.ok = False

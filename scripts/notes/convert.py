@@ -39,6 +39,8 @@ nothing and gets the old placeholder behaviour unchanged.
 `slam_gap_frac` is forwarded to laser.build_runs() - see its docstring and
 laser.py's module docstring ("true vox slam") for what it controls. CLI
 `--no-slam-gap` sets it to 0.
+
+`ksh_version` picks which of the two laser writings comes out, and nothing else about the file changes with it (`ver=` stays 171 either way - the v2 laser options are new syntax, not a new behaviour version, and none of ksh_format.md's `ver` history entries gates them). 1, the default, is what this converter has always written: a curve becomes interpolated points and the engine joins them straight. 2 re-fits every curve into `laser_l_curve`/`laser_r_curve` bezier segments over far fewer points - see laser.py's "ksh v2: laser curves" section and specs/notes.md. KSM v1.xx ignores an option it doesn't know, so a v2 file opened there draws the remaining points as straight lines, which is why this is a choice and not an upgrade.
 """
 
 import argparse
@@ -97,6 +99,26 @@ class LaserLane:
     def __init__(self, runs):
         self.runs = sorted(runs, key=lambda r: r.start_tick)
         self.run_starts = [r.start_tick for r in self.runs]
+        self.curve_ticks = self._build_curve_ticks()
+
+    def _build_curve_ticks(self):
+        """tick -> the (a, b) that tick's `laser_x_curve` option should carry (ksh v2; empty in v1, where Run.curves is all None).
+
+        A curve option belongs on the line of the laser point its segment *starts* at - except coming out of a slam, where ksh_format.md puts it on the slam's own starting line instead ("should be placed just before the slam ... Should not be placed at the line just before the line laser after the slam"). That never collides with another option: the segment starting at a slam's start line *is* the slam, and a slam is never a curve.
+        """
+        out = {}
+        for r in self.runs:
+            for i, curve in enumerate(r.curves):
+                if curve is None:
+                    continue
+                tick = r.points[i][0]
+                if i > 0 and r.slam_after[i - 1]:
+                    tick = r.points[i - 1][0]
+                out.setdefault(tick, curve)
+        return out
+
+    def curve_at(self, tick):
+        return self.curve_ticks.get(tick)
 
     def run_at(self, tick):
         i = bisect.bisect_right(self.run_starts, tick) - 1
@@ -165,13 +187,14 @@ DIFF_MAP = {"1n": "light", "2a": "challenge", "3e": "extended",
 
 
 def convert(vox_path, out_path, camera=False, meta=None, slam_gap_frac=laser.SLAM_GAP_FRAC,
-            pretilt_fix=False):
+            pretilt_fix=False, ksh_version=1):
     chart = vox.load(vox_path)
     tl = chart.tl
 
+    curves = ksh_version >= 2
     bt_lanes = [HoldLane(notes) for notes in chart.bt]
     fx_lanes = [HoldLane(notes) for notes in chart.fx]
-    laser_lanes = [LaserLane(laser.build_runs(pts, tl, slam_gap_frac=slam_gap_frac))
+    laser_lanes = [LaserLane(laser.build_runs(pts, tl, slam_gap_frac=slam_gap_frac, curves=curves))
                    for pts in chart.laser]
 
     # camera: tick -> pending "option=value" line(s), and tick -> spin suffix.
@@ -322,9 +345,14 @@ def convert(vox_path, out_path, camera=False, meta=None, slam_gap_frac=laser.SLA
                     lines.append("fx-%s_se=clap;0" % side)
 
             for li, lane in enumerate(laser_lanes):
+                side = "l" if li == 0 else "r"
                 run = lane.run_starting_at(tick)
                 if run is not None and run.width == 2:
-                    lines.append("laserrange_%s=2x" % ("l" if li == 0 else "r"))
+                    lines.append("laserrange_%s=2x" % side)
+                if curves:
+                    curve = lane.curve_at(tick)
+                    if curve is not None:
+                        lines.append("laser_%s_curve=%s" % (side, _fmt_curve(curve)))
 
             bt_chars = "".join(lane.char_at(tick, BT_CHIP, BT_HOLD) for lane in bt_lanes)
             fx_chars = "".join(lane.char_at(tick, FX_CHIP, FX_HOLD) for lane in fx_lanes)
@@ -343,6 +371,14 @@ def _fmt_bpm(bpm):
     s = "%.3f" % bpm
     s = s.rstrip("0").rstrip(".")
     return s if s else "0"
+
+
+def _fmt_curve(curve):
+    """A fitted (a, b) -> the `laser_l_curve`/`laser_r_curve` payload, "<a>;<b>".
+
+    Two decimals, matching ksh_format.md's own examples and the precision laser.py already rounds its fits to: b moves the drawn position by at most 2*s*(1-s) <= 0.5 of whatever it changes by, so a hundredth of b is a two-hundredth of a lane - a quarter of one of ksh's 51 laser steps.
+    """
+    return "%.2f;%.2f" % curve
 
 
 def _header(chart, bpm_changes, beat_changes, meta=None):
@@ -401,6 +437,12 @@ def build_arg_parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("vox", help="path to a .vox chart")
     ap.add_argument("-o", "--output", default=None)
+    ap.add_argument("--ksh-version", type=int, choices=(1, 2), default=1,
+                     help="1 (default) writes every laser curve as interpolated points, which is "
+                          "all KSM v1.xx can read. 2 re-fits each curve and writes it as a "
+                          "laser_l_curve/laser_r_curve bezier over far fewer points - smoother and "
+                          "closer to the vox shape, but KSM v1.xx ignores the option lines and "
+                          "draws the remaining points straight. See specs/notes.md")
     ap.add_argument("--no-slam-gap", action="store_true",
                      help="place a genuine same-tick vox slam's landing point on the "
                           "very next free tick instead of ksh's standard 1/64-of-a-measure "
@@ -415,7 +457,7 @@ def main():
     args = build_arg_parser().parse_args()
     out = args.output or os.path.splitext(os.path.basename(args.vox))[0] + ".ksh"
     slam_gap_frac = 0 if args.no_slam_gap else laser.SLAM_GAP_FRAC
-    path = convert(args.vox, out, slam_gap_frac=slam_gap_frac)
+    path = convert(args.vox, out, slam_gap_frac=slam_gap_frac, ksh_version=args.ksh_version)
     print("wrote %s" % path)
 
 

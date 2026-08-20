@@ -25,6 +25,11 @@ from version import __version__  # noqa: E402
 
 DIFF_FILTERS = [("novice", "NOV"), ("advanced", "ADV"), ("exhaust", "EXH"), ("top", "INF/MXM")]
 
+# notes/convert.py's `ksh_version`, in dropdown order. Not an Advanced-panel option: it decides which editors/players can read the output at all, which is a choice to make before converting rather than a tuning knob to leave alone. See specs/notes.md's "KSH format version 2".
+KSH_VERSIONS = [
+    (1, "KSH v1"),
+    (2, "KSH v2 (with smooth laser)"),
+]
 
 class ScrollableFrame(ttk.Frame):
     """A vertically-scrolling Frame - used for the Advanced panel, which has
@@ -136,6 +141,19 @@ class App:
         ttk.Entry(bar, textvariable=self.output_folder_var, state="readonly").grid(
             row=1, column=1, sticky="ew", padx=4, pady=(4, 0))
         ttk.Button(bar, text="Browse...", command=self.on_choose_output_folder).grid(row=1, column=2, pady=(4, 0))
+
+        ttk.Label(bar, text="KSH version:").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ver_cell = ttk.Frame(bar)
+        ver_cell.grid(row=2, column=1, columnspan=2, sticky="ew", padx=4, pady=(4, 0))
+        labels = [label for _v, label in KSH_VERSIONS]
+        saved_version = self.settings.get("ksh_version", 1)
+        current = next((label for v, label in KSH_VERSIONS if v == saved_version), labels[0])
+        self.ksh_version_var = tk.StringVar(value=current)
+        combo = ttk.Combobox(ver_cell, textvariable=self.ksh_version_var, values=labels,
+                              state="readonly", width=32)
+        combo.pack(side="left")
+        combo.bind("<<ComboboxSelected>>", lambda _e: self._save_ksh_version())
+
         bar.columnconfigure(1, weight=1)
 
         filt = ttk.Frame(self.root, padding=(6, 0))
@@ -165,6 +183,15 @@ class App:
 
     def _save_diff_filters(self):
         self.settings["difficulties"] = [k for k, v in self.diff_vars.items() if v.get()]
+        settings_store.save(self.settings)
+
+    def _ksh_version(self):
+        """The dropdown's current label -> notes_convert.convert()'s `ksh_version`."""
+        label = self.ksh_version_var.get()
+        return next((v for v, text in KSH_VERSIONS if text == label), 1)
+
+    def _save_ksh_version(self):
+        self.settings["ksh_version"] = self._ksh_version()
         settings_store.save(self.settings)
 
     def _save_slam_gap(self):
@@ -541,10 +568,12 @@ class App:
             ffmpeg_path=self._resolve_ffmpeg(),
             render_audio=True,
             standard_slam_gap=self.slam_gap_var.get(),
+            ksh_version=self._ksh_version(),
             pretilt_fix=self.pretilt_var.get(),
             advanced_values=self._read_advanced_values(),
         )
-        self._log("=== starting: %d job(s) across %d song(s) -> %s ===" % (len(jobs), len(selected), out_dir))
+        self._log("=== starting: %d job(s) across %d song(s), ksh v%d -> %s ==="
+                   % (len(jobs), len(selected), opts.ksh_version, out_dir))
         self.progress.configure(maximum=len(jobs), value=0)
         self.convert_btn.configure(state="disabled")
         self.cancel_btn.configure(state="normal")

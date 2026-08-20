@@ -71,7 +71,15 @@ followed by an instant drop. `build_runs` moves the earlier run's endpoint
 one tick earlier so both get a row - found and fixed against
 2397_ultracharge_yutaimai (user-reported); occurs zero times in the 30
 reference charts xcheck.py currently matches, so it went uncaught there.
+
+ksh format version 2 changes what "approximate the curve" even means, and `build_runs(curves=True)` takes that path. `laser_l_curve`/`laser_r_curve` give one segment - one laser point to the next - a quadratic bezier: the two laser points are the endpoints and the option's `"<a>;<b>"` payload is the control point normalised inside that segment's own box, `a` across time and `b` across position. `a == b` puts the control point on the diagonal and the segment stays straight; mirroring in time maps `(a, b)` to `(1-a, 1-b)`. Every slam-free stretch then goes through decimate_segment_curved() instead of decimate_segment(), which is a re-fit and not a decimation: it keeps the stretch's own turning points and inflections rather than every point a polyline needs to trace the curve, and gives each surviving segment the (a, b) that best reproduces the vox samples it spans. Over the whole 8000-chart corpus that is about 30 % fewer laser points at well under half of v1's shape error.
+
+Two limits decide where a stretch has to be split, and they are easy to confuse. Scope: one option covers one segment, so a laser that reverses forces a point at the reversal and ends that option's reach (_direction_breaks). Geometry: a parabola's curvature cannot change sign, so one segment can never make an S - which bites even a laser that never reverses, since an ease-in-ease-out sweep is monotonic but has an inflection (_inflection_index). Everything else here is version-independent and shared: slam placement, width, the run-boundary fixup and the minimum-gap rule all apply unchanged, because a v2 chart's laser points are ordinary ksh laser points - two of them 1/32 of a measure apart still read as a slam whether an option line sits on them or not.
+
+Nothing in the v2 path reads vox's own curve type (C7). It is a provenance tag on generated points rather than a renderer instruction: joining the points linearly already reproduces the authored curve to well under one laser step, measured across all 2447 v12/v13 charts in specs/notes.md. Re-deriving the shape from the points instead is also what lets the fit follow a stretch whose C7 is 2 (Hermite), whose defining derivatives are not in the vox file at all.
 """
+
+import math
 
 KSH_STEPS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmno"   # 51 steps
 N_STEPS = len(KSH_STEPS) - 1   # 50 - the top index
@@ -125,15 +133,17 @@ class Run:
     `tight`      True if decimating this run required breaking the
                  minimum-gap rule to preserve the true start/end - i.e. a
                  real sub-1/24 gap existed that isn't a slam. See (3) above.
+    `curves`     ksh v2 only, parallel to `slam_after`: curves[i] is the (a, b) bezier control point drawing points[i] -> points[i+1], or None for a plain straight join. All None in v1 mode (build_runs(curves=False), the default), which is what makes a v1 conversion byte-identical to what this module produced before v2 existed.
     """
 
-    __slots__ = ("points", "slam_after", "width", "tight")
+    __slots__ = ("points", "slam_after", "width", "tight", "curves")
 
-    def __init__(self, points, slam_after, width, tight):
+    def __init__(self, points, slam_after, width, tight, curves=None):
         self.points = points
         self.slam_after = slam_after
         self.width = width
         self.tight = tight
+        self.curves = curves if curves is not None else [None] * max(0, len(points) - 1)
 
     @property
     def start_tick(self):
@@ -393,12 +403,278 @@ def _bump_to_free_tick_before(t, used, floor):
     return new_t
 
 
-def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC):
+# --------------------------------------------------------------------------
+# ksh v2: laser curves
+# --------------------------------------------------------------------------
+#
+# Everything from here to build_runs() is inert unless build_runs(curves=True). See the module docstring's "ksh format version 2" section and specs/notes.md.
+
+# How far a written segment may stray from the vox points it spans before it gets split at its worst point, in position units (0..1 across the lane). Half a laser step: the endpoints ksh writes are themselves quantised to 51 steps, so anything finer than half a step in between is below what the format can show. This is the v2 counterpart of RDP_TOL and is deliberately looser - RDP_TOL measures a *straight* chord's error, and v1 has to keep the points it survives close enough together that the polyline still traces the curve, where a v2 segment carries its own shape.
+CURVE_FIT_TOL = 0.5 / N_STEPS
+
+# Least a fitted curve has to beat its own straight chord by, in position units, before its option line is worth writing. A quarter of a laser step - below that the two draw the same characters. This and CURVE_FIT_TOL together are specs/notes.md's "emit a curve only where the fit beats linear by enough to earn the line"; _curve_or_none applies them.
+CURVE_MIN_GAIN = 0.25 / N_STEPS
+
+# Reversal amplitude below which a turning point isn't one: half a laser step, small enough that the turn and the extremum it turns at round to the same character. Guards _direction_breaks against spending a laser point on the sampling jitter at the top of a slow arc.
+CURVE_DEAD_ZONE = 0.5 / N_STEPS
+
+# Longest gap between two consecutive vox points a fitted curve is allowed to span, as a divisor of the whole note - a 32nd note. Wider than that and the stretch gets straight joins between its own points instead, however well a bezier threads them.
+#
+# This is the difference between recovering a shape and inventing one, and nothing else in this section catches it: a fit is scored against the vox points *at their own ticks*, so where the points are dense (the arcade's own pre-sampled curve fill, 3 ticks apart) "between the points" is nothing and fitting the points fits the shape - but where a charter placed three points 200 ticks apart, almost the whole segment is between points, and a quadratic can thread all three exactly while bowing anywhere it likes in between. Found against 2010_xroinrmx_xi_5m tick 6708: a hold at 0.0 followed by a dead-straight ramp to 1.0, all three points type 0 (linear), written as one `1.00;0.00` curve that passed through every point and bowed 24 laser steps - half the lane - away from the ramp. 261 curves across the MXM charts did this, 2.3 % of all of them.
+#
+# The cut comes from specs/notes.md's own corpus table rather than being picked: generated points sit at a median gap of 3/192 of a measure and a p99 of 4/192, while type-0 (linear) gaps sit at a quarter note with 95.4 % of them wider than 1/32. A 32nd note admits essentially all of the former and excludes essentially all of the latter. The sub-1 % of generated gaps that do exceed it move the knob by a median 0.012-0.024, about one laser step, so declining to curve those costs nothing either. Expressed as a note value, never a fraction of the local measure - see the module docstring's "true vox slam" paragraph for what that mistake does outside 4/4.
+CURVE_LEG_FRAC = 32
+
+
+def _bezier_s(x, a):
+    """The bezier's own parameter at normalised time `x`: solves x = s**2 + 2a*s(1-s) for s in [0, 1].
+
+    Both coordinates of the quadratic bezier through (0,0) and (1,1) with control point (a, b) have this same form - x from a, y from b - which is why a == b is the neutral, perfectly straight control point. x(s) is monotonic for every a in [0, 1] (x'(s) is linear in s and non-negative at both ends), so exactly one root lies in range and it is always the '+' one.
+    """
+    d = 1.0 - 2.0 * a
+    if -1e-12 < d < 1e-12:
+        return x                      # a == 0.5 -> x(s) == s
+    disc = a * a + d * x
+    return (math.sqrt(disc if disc > 0.0 else 0.0) - a) / d
+
+
+def _score_a(a, xs, ys, scale):
+    """One candidate `a` -> (a, b, rms, maxerr), with the matching `b` solved rather than searched.
+
+    y(s) = s**2 + 2b*s(1-s) is *linear* in b once s is known, and s comes from x through `a` alone - so the least-squares b for a given a is a one-line normal equation instead of a second search dimension. b is rounded to what the option line can actually carry (see convert.py's _fmt_curve) before it is scored, so the reported error is the error of the string that gets written, not of an unwritable ideal. Errors come back in real position units (`scale` is the segment's own height): a shallow segment's normalised error means less on screen than a tall one's, and every threshold in this section is a number of laser steps.
+    """
+    ss = [_bezier_s(x, a) for x in xs]
+    num = den = 0.0
+    for s, y in zip(ss, ys):
+        w = 2.0 * s * (1.0 - s)
+        num += w * (y - s * s)
+        den += w * w
+    b = a if den <= 1e-12 else num / den
+    b = round(min(1.0, max(0.0, b)), 2)
+    total = worst = 0.0
+    for s, y in zip(ss, ys):
+        e = abs(y - (s * s + 2.0 * b * s * (1.0 - s))) * scale
+        total += e * e
+        if e > worst:
+            worst = e
+    return (round(a, 2), b, (total / len(ys)) ** 0.5, worst)
+
+
+def _fit_quadratic(pts):
+    """One monotonic, single-curvature stretch -> its best (a, b, rms, maxerr), or None where no curve can say anything (a zero-length or perfectly flat span, or nothing between the endpoints to fit).
+
+    A coarse 1/20 sweep over `a`, then a 1/100 refinement around the winner. The objective is smooth in `a`, and both stages land on values the two-decimal option line carries exactly.
+    """
+    t0, v0 = pts[0]
+    t1, v1 = pts[-1]
+    dt, dv = t1 - t0, v1 - v0
+    if dt <= 0 or dv == 0.0 or len(pts) < 3:
+        return None
+    xs = [(t - t0) / dt for (t, _v) in pts[1:-1]]
+    ys = [(v - v0) / dv for (_t, v) in pts[1:-1]]
+    scale = abs(dv)
+    best = None
+    for i in range(21):
+        cand = _score_a(i / 20.0, xs, ys, scale)
+        if best is None or cand[2] < best[2]:
+            best = cand
+    centre = int(round(best[0] * 100))
+    for i in range(max(0, centre - 5), min(100, centre + 5) + 1):
+        cand = _score_a(i / 100.0, xs, ys, scale)
+        if cand[2] < best[2]:
+            best = cand
+    return best
+
+
+def _line_error(pts):
+    """A stretch's straight chord -> (rms, maxerr) against its own interior points, in position units. The baseline every fitted curve has to beat."""
+    t0, v0 = pts[0]
+    t1, v1 = pts[-1]
+    dt = t1 - t0
+    if dt <= 0 or len(pts) < 3:
+        return 0.0, 0.0
+    total = worst = 0.0
+    for (t, v) in pts[1:-1]:
+        e = abs(v - (v0 + (v1 - v0) * (t - t0) / dt))
+        total += e * e
+        if e > worst:
+            worst = e
+    return (total / (len(pts) - 2)) ** 0.5, worst
+
+
+def _inflection_index(pts, dev):
+    """Where a stretch's deviation from its own chord changes sign, or None if it only ever bulges one way.
+
+    A parabola's curvature cannot change sign, so one option can never make an S (specs/notes.md) - an S has to be split, and its inflection is exactly where the deviation from the chord crosses zero. That crossing is cheaper and far steadier on sampled data than a second difference. A lobe shallower than `dev` on either side isn't an S worth a laser point, it's quantisation.
+    """
+    t0, v0 = pts[0]
+    t1, v1 = pts[-1]
+    dt = t1 - t0
+    if dt <= 0 or len(pts) < 4:
+        return None
+    res = [v - (v0 + (v1 - v0) * (t - t0) / dt) for (t, v) in pts]
+    hi, lo = max(res), min(res)
+    if hi < dev or -lo < dev:
+        return None
+    i, j = sorted((res.index(hi), res.index(lo)))
+    cross = min(range(i, j + 1), key=lambda k: abs(res[k]))
+    return cross if 0 < cross < len(pts) - 1 else None
+
+
+def _most_deviant(pts, idxs):
+    """Whichever of `idxs` sits furthest from the chord through pts[0] and pts[-1], or None if `idxs` is empty.
+
+    This is what settles which turning point a stretch too fast to hold them all spends its one available laser point on, and it has to be deviation rather than anything local: two reversals a few ticks apart routinely have the *same* depth against their own neighbours, and picking the earlier one then quietly deletes the deeper excursion (0653_konransyojo_kameria_4i measure 56 - a trough at 0.26 and a spike to 0.75 nine ticks apart, min gap twelve, where keeping the trough left the spike undrawable and keeping the spike left the trough recoverable a few ticks earlier).
+    """
+    t0, v0 = pts[0]
+    t1, v1 = pts[-1]
+    dt = t1 - t0
+    best_i, best_d = None, -1.0
+    for i in idxs:
+        t, v = pts[i]
+        d = abs(v - (v0 + (v1 - v0) * ((t - t0) / dt if dt else 0.0)))
+        if d > best_d:
+            best_i, best_d = i, d
+    return best_i
+
+
+def _worst_index(pts, fit):
+    """Interior index furthest from whatever the stretch is currently drawn as - `fit`'s curve, or the straight chord when `fit` is None. Where splitting buys the most."""
+    t0, v0 = pts[0]
+    t1, v1 = pts[-1]
+    dt, dv = t1 - t0, v1 - v0
+    if dt <= 0 or len(pts) < 3:
+        return None
+    a, b = (fit[0], fit[1]) if fit else (None, None)
+    worst_e, worst_i = -1.0, None
+    for k in range(1, len(pts) - 1):
+        t, v = pts[k]
+        x = (t - t0) / dt
+        if a is None:
+            pred = v0 + dv * x
+        else:
+            s = _bezier_s(x, a)
+            pred = v0 + dv * (s * s + 2.0 * b * s * (1.0 - s))
+        e = abs(v - pred)
+        if e > worst_e:
+            worst_e, worst_i = e, k
+    return worst_i
+
+
+def _curve_or_none(fit, lin_max):
+    """The (a, b) a segment should write, or None to leave it a plain ':' join.
+
+    Two ways a curve fails to earn its option line: the straight chord is already inside CURVE_FIT_TOL (the two render identically once ksh quantises to 51 steps), or the fit beats the chord by less than CURVE_MIN_GAIN. `a == b` is the neutral control point - an option that says "straight" - so it never earns one either.
+    """
+    if fit is None:
+        return None
+    a, b, _rms, fit_max = fit
+    if a == b or lin_max <= CURVE_FIT_TOL or lin_max - fit_max < CURVE_MIN_GAIN:
+        return None
+    return (a, b)
+
+
+def _direction_breaks(pts, dead):
+    """Indices of a stretch's turning points - every tick where the laser reverses.
+
+    A reversal is a hard segment boundary for the same reason an inflection is: the bezier runs (0,0) to (1,1) inside its own normalised box, so one option can only ever describe a monotonic move. `dead` ignores a reversal that never gets further than half a laser step from the extremum it turned at - it renders as the same character, and splitting there would spend a laser point on nothing. The break is recorded at the extremum itself, not at the point where the retreat finally cleared `dead`, so a slow arc's peak still lands on its true peak - the same thing _enforce_min_gap's second pass exists to protect on the v1 side.
+    """
+    breaks = []
+    ext, direction = 0, 0
+    for i in range(1, len(pts)):
+        v, ev = pts[i][1], pts[ext][1]
+        if direction == 0:
+            if abs(v - ev) > dead:
+                direction = 1 if v > ev else -1
+                ext = i
+        elif (v - ev) * direction > 0:
+            ext = i                          # further in the direction we were already going
+        elif (ev - v) * direction > dead:
+            breaks.append(ext)
+            direction = -direction
+            ext = i
+    return breaks
+
+
+def _split_window(pts, lo, hi, min_gap, lead):
+    """The inclusive index range a split of pts[lo..hi] may land on without leaving two points closer than `min_gap`. Empty (first > last) when the whole stretch has no room for a third point.
+
+    This is where v1's continuity rule (module docstring point 2) enters the v2 path: a v2 chart's laser points are ordinary ksh laser points and the engine reads two of them 1/32 of a measure apart as a slam whether an option line sits on them or not. `lead` - see _enforce_min_gap.
+    """
+    first, last = lo + 1, hi - 1
+    while first <= last and pts[first][0] - (pts[lo][0] + lead) < min_gap:
+        first += 1
+    while last >= first and pts[hi][0] - pts[last][0] < min_gap:
+        last -= 1
+    return first, last
+
+
+def _fit_stretch(pts, lo, hi, min_gap, tol, lead=0, max_leg=None):
+    """pts[lo..hi] -> ([kept indices after lo, ending at hi], [curve-or-None, one per resulting segment]).
+
+    Adaptive subdivision, and the only thing that chooses points in the v2 path. A straight join is tried first, then one fitted curve, and only if that still misses by more than `tol` does the stretch get a point in the middle and try again on each half. Where that point goes, in falling priority:
+
+    1. A turning point, if the minimum-gap window has room for one. One option covers one monotonic move, so a reversal cannot be inside a segment at all - and where several compete for one slot, the one furthest from the stretch's own chord wins (see _most_deviant).
+    2. Otherwise, on a stretch with no reversal in it, the inflection: specs/notes.md measures an unsplit S as *degenerate* rather than merely inaccurate - every near-optimal (a, b) sits against the neutral diagonal, so the fit buys 0.15 of a laser step over emitting nothing at all. The reversal check has to come first for this to mean anything, since the chord-crossing an inflection is read from is equally happy to fire on a zigzag.
+    3. Otherwise the worst-fitting point: a single-curvature stretch that misses is just under-resolved, and resolving it there is what fixes it.
+
+    Whichever wins is *moved* to the nearest index the minimum-gap rule allows rather than abandoned when it lands too near an end. Giving up there was a real bug: a dip bottoming out 6 ticks into a 72-tick stretch put the inflection inside the gap, and dropping the split with it also dropped the perfectly legal one at the stretch's other feature (2226_gryphone_etia tick 12408 - the laser returned to 1.0 and held, and the whole flat top got swallowed by one curve, 14 laser steps out at its worst).
+    """
+    sub = pts[lo:hi + 1]
+    _lin_rms, lin_max = _line_error(sub)
+    if lin_max <= tol:
+        return [hi], [None]                  # already straight enough to just join
+    # A curve is only offered where the points are dense enough to vouch for the shape between them - see CURVE_LEG_FRAC. Where they aren't, `fit` stays None all the way through: the splitter falls back to the chord (which is what the arcade draws between authored points anyway) and every segment comes out a straight join.
+    dense = max_leg is None or all(b[0] - a[0] <= max_leg for a, b in zip(sub, sub[1:]))
+    fit = _fit_quadratic(sub) if dense else None
+    if fit is not None and fit[3] <= tol:
+        return [hi], [_curve_or_none(fit, lin_max)]
+
+    first, last = _split_window(pts, lo, hi, min_gap, lead)
+    split = None
+    if first <= last:
+        breaks = _direction_breaks(sub, CURVE_DEAD_ZONE)
+        want = _most_deviant(sub, [i for i in breaks if first - lo <= i <= last - lo])
+        if want is None and not breaks and dense:
+            # The inflection rule exists to serve curve fitting - it is where one parabola stops being able to follow the shape. On a stretch too sparse to fit a curve over at all there is no parabola and no inflection to find, and the chord-crossing it reads instead lands near the chord's own midpoint, which on a hold-then-ramp is nowhere near the corner. Found against 2242_hihouwaineat_shu_5m tick 6504: a 24-tick hold at 0.0 into a fast rise, where splitting at the "inflection" dropped the corner at 6528 and drew straight through it, 14 laser steps out. Falling through to the chord's worst point puts the split on the corner, which is what v1 keeps there too.
+            want = _inflection_index(sub, tol)
+        if want is None:
+            want = _worst_index(sub, fit)
+        if want is not None:
+            split = min(max(lo + want, first), last)
+    if split is not None:
+        li, lc = _fit_stretch(pts, lo, split, min_gap, tol, lead, max_leg)
+        ri, rc = _fit_stretch(pts, split, hi, min_gap, tol, 0, max_leg)
+        return li + ri, lc + rc
+    # No room to split: write the best single segment available and accept the error - the same unrepresentable-shape squeeze `Run.tight` flags on the v1 side, reached from the other direction.
+    return [hi], [_curve_or_none(fit, lin_max)]
+
+
+def decimate_segment_curved(pts, min_gap, tol=CURVE_FIT_TOL, lead=0, max_leg=None):
+    """One slam-free stretch of a run -> (kept_points, curves, tight). The ksh v2 counterpart of decimate_segment().
+
+    Not a decimation of v1's output but a re-fit of the vox points, per specs/notes.md: _fit_stretch keeps only the points a bezier can't say for itself - turning points, inflections, and wherever one segment still missed by more than `tol` - and `curves[i]` is the (a, b) drawing kept[i] -> kept[i+1], or None for a straight join. The run's true start and end are always kept, and `tight` means the same thing it does in v1: the two are closer than `min_gap` and nothing could go between them. `lead` - see _enforce_min_gap.
+
+    `max_leg` - see CURVE_LEG_FRAC. build_runs passes the exact note value; the fallback below is its 4/4 equivalent, for a caller with only `min_gap` to hand (min_gap is 1/24 of the measure, max_leg 1/32 of it).
+    """
+    if max_leg is None:
+        max_leg = max(1, min_gap * 24 // 32)
+    if len(pts) <= 2:
+        tight = len(pts) == 2 and pts[1][0] - (pts[0][0] + lead) < min_gap
+        return list(pts), [None] * max(0, len(pts) - 1), tight
+    idx, curves = _fit_stretch(pts, 0, len(pts) - 1, min_gap, tol, lead, max_leg)
+    tight = pts[-1][0] - (pts[0][0] + lead) < min_gap
+    return [pts[0]] + [pts[i] for i in idx], curves, tight
+
+
+def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC, curves=False):
     """vox LaserPoint stream (one lane, already tick-sorted) -> [Run, ...].
 
     `min_gap_frac`: minimum point spacing enforced during decimation, as a
     fraction of the *local* measure length (1/24 by default - see the
     module docstring). Never applied across a genuine same-tick slam.
+
+    `curves`: ksh v2 mode. Each slam-free stretch is re-fitted by decimate_segment_curved() instead of decimated by decimate_segment(), and every Run comes back with a `curves` entry per segment for convert.py to write as `laser_l_curve`/`laser_r_curve`. Off by default: v1 has no such option line, so the points themselves have to carry the shape. Only the point-choosing step changes - slam handling, width, the run-boundary fixup and the minimum-gap rule are shared, since a v2 chart's laser points are ordinary ksh laser points that the engine reads by the same rules.
 
     `slam_gap_frac`: a genuine same-tick slam's start-to-end gap, as a note value - a whole note over `slam_gap_frac`, i.e. a 32nd note by default (see SLAM_GAP_FRAC and the module docstring's "true vox slam" paragraph). Deliberately *not* a fraction of the local measure: ksh's slam cutoff is beat-relative, so in any measure longer than 4/4 a measure-relative gap overshoots it and the slam draws as a plain diagonal laser instead (found against 2293_leflector_niwashi_5m, whose 7/4 measures got 10-tick gaps against 4/4's 6 - user-reported). The reference hand charts settle it: 1/8 of a beat is the most common slam gap in every time signature they use - 4/4, 3/4, 5/4, 6/8, 7/4, 8/4, 11/4 - never a constant slice of the measure. 0 (or any other falsy value) instead places the slam's end on the very next free tick, the older, thinner behaviour.
     """
@@ -426,16 +702,25 @@ def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC):
         # one) so a slam's landing point can see the tick of whatever comes
         # right after it, even across a segment boundary - needed to back
         # off from a collision with the *next* slam in a dense chain.
-        flat, tight = [], False
+        # `flat_curves` runs parallel to `flat` with one entry fewer: flat_curves[i] draws flat[i] -> flat[i+1]. The join *between* two segments is always a genuine slam (that is what _split_at_slams split on), and a slam is never a curve, so those joins get None.
+        flat, flat_curves, tight = [], [], False
         for si, seg in enumerate(segments):
             meas, _ = tl.measure_of_tick(seg[0][0])
             mlen = tl.measure_length(meas)
             min_gap = max(1, mlen // min_gap_frac)
             # Every segment but the first starts *at* a slam's landing point, which the placement loop below writes `lead` ticks after this segment's own first tick - so the min-gap rule has to be measured from there, not from the raw shared tick (see _enforce_min_gap's `lead`). A chained same-tick stack (3+ points on one tick) technically stacks more than one gap onto the later segments' landings; not modelled here, since those landings are already collapsed to a tick apiece by the ceiling backoff in _slam_landing_tick.
             lead = 0 if si == 0 else (max(1, whole_note // slam_gap_frac) if slam_gap_frac else 1)
-            kept, seg_tight = decimate_segment(seg, min_gap, lead=lead)
+            if curves:
+                kept, seg_curves, seg_tight = decimate_segment_curved(
+                    seg, min_gap, lead=lead, max_leg=max(1, whole_note // CURVE_LEG_FRAC))
+            else:
+                kept, seg_tight = decimate_segment(seg, min_gap, lead=lead)
+                seg_curves = [None] * max(0, len(kept) - 1)
             tight = tight or seg_tight
+            if flat:
+                flat_curves.append(None)      # the slam join into this segment
             flat.extend(kept)
+            flat_curves.extend(seg_curves)
 
         points, slam_after = [], []
         for i, (t, v) in enumerate(flat):
@@ -468,7 +753,7 @@ def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC):
                 slam_after.append(is_slam_landing)
             points.append((t, v))
 
-        out.append(Run(points, slam_after, width, tight))
+        out.append(Run(points, slam_after, width, tight, flat_curves))
 
     # A slam can land exactly on a run *boundary* instead of inside one
     # run's own point list: vox flags one run's true end and the next
