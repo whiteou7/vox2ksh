@@ -564,7 +564,18 @@ TRIPLE_BEAT_TO_KSH192 = 48
 # 3/7 both come out at exactly 3 beats of ksh spin. Changing this entry
 # without also changing that scale would just make type 1 wrong. See
 # specs/camera.md, "The scale question the DLL does not settle".
-DEFAULT_BEATS = {1: 6, 2: 2, 3: 3, 4: 12, 5: 3}
+#
+# Types 6 and 7 carry the DLL's values outright, since there is no
+# hand-chart reading of them to weigh against: no reference chart covers
+# either type's default, and no corpus row of either type reaches it (they
+# all carry an explicit length). They are here so a chart that *does* use
+# one converts sensibly instead of falling off the end - see _spin_length,
+# which has to route them through BEAT_TO_KSH192 rather than
+# TYPE67_UNIT_TO_KSH192, because the DLL states these two defaults in whole
+# beats (`420/bpm`, `180/bpm`) while 6/7's *explicit* lengths are counted in
+# tenths of a beat. Reading the default in the explicit column's unit would
+# make it ten times too short.
+DEFAULT_BEATS = {1: 6, 2: 2, 3: 3, 4: 12, 5: 3, 6: 7, 7: 3}
 
 # The spin-length law, fit against 1354 reference samples by
 # scripts/camera/correlate.py's spin_length_report: a ksh spin token's
@@ -629,7 +640,11 @@ def _spin_length(chart, p):
     if p.roll_type == TRIPLE_ROLL_TYPE:
         length = triple_declared_beats(p) * TRIPLE_BEAT_TO_KSH192
     elif p.roll_type in (6, 7):
-        length = (p.roll_length or 0) * TYPE67_UNIT_TO_KSH192
+        # Explicit length only - the default is in beats, not in this
+        # type's own tenth-of-a-beat unit, so it falls through to the
+        # shared default branch below. See DEFAULT_BEATS.
+        length = (p.roll_length * TYPE67_UNIT_TO_KSH192 if p.roll_length
+                  else DEFAULT_BEATS[p.roll_type] * BEAT_TO_KSH192)
     elif p.roll_length:
         length = p.roll_length * BEAT_TO_KSH192
     else:
