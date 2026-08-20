@@ -218,7 +218,7 @@ def convert(vox_path, out_path, camera=False, meta=None, slam_gap_frac=laser.SLA
 
     tight_runs = sum(1 for lane in laser_lanes for r in lane.runs if r.tight)
     if tight_runs:
-        print("note: %d laser run(s) needed a sub-1/24 gap to keep their true "
+        print("note: %d laser run(s) needed a sub-24th-note gap to keep their true "
               "shape (see laser.py's docstring, point 3) - real, unavoidable "
               "given .ksh's grid" % tight_runs, file=sys.stderr)
 

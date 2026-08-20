@@ -22,20 +22,27 @@ The three problems named in HANDOFF.md 3.1:
 
    So every curve is decimated before it is written: points are dropped by
    Douglas-Peucker simplification, then a second pass enforces a minimum
-   spacing of 1/24 of a measure between whatever points survive - the
-   practical threshold this project has settled on for "still reads as a
-   continuous laser" (see HANDOFF.md 3.1; ksh's own doc says 1/32, but that
-   is the point at which the *engine* calls something a slam, not a safe
-   authoring margin - 1/24 is the working number here). The run's true start
-   and end are always kept even if that leaves a short final segment - see
-   (3).
+   spacing of a 24th note - 1/6 of a beat - between whatever points survive
+   (the practical threshold this project has settled on for "still reads as
+   a continuous laser"; see HANDOFF.md 3.1. Ksh's own doc says 1/32, but
+   that is the point at which the *engine* calls something a slam, not a
+   safe authoring margin - a 24th note is the working number here). The
+   run's true start and end are always kept even if that leaves a short
+   final segment - see (3).
+
+   A note value, never a fraction of the local measure. Those agree in 4/4
+   and diverge everywhere else, and the measure-relative version was wrong
+   in both directions for the same reason it was wrong for the slam gap
+   below: the cutoff it exists to clear is beat-relative, so a longer bar
+   does not make the engine any likelier to misread two points. See
+   `min_gap_frac` in build_runs for what a 41-beat measure did with it.
 
 3. No 1/32-or-shorter non-slam segment is representable. A vox chart can
    have two curve points genuinely closer than that which were *not* meant
    to be a slam. Decimation throws away closely spaced points in the common
    case (they are almost always near-collinear with their neighbours - that
    is *why* they are close together), but nothing stops a chart from having
-   a real, sharp bend inside a sub-1/24 gap. This converter accepts the
+   a real, sharp bend inside a sub-24th-note gap. This converter accepts the
    resulting shape error there; no ksh construct does better. `Run.tight`
    flags runs where the minimum-gap rule had to be broken, so the caller can
    report it instead of silently eating it.
@@ -110,6 +117,8 @@ SLAM_GAP_FRAC = 32
 # _slam_landing_tick to work out the least backoff that keeps the leg
 # *after* a slam landing from itself being misread as a second slam - see
 # its docstring.
+#
+# A divisor of the whole note, like every other gap constant here. Being an engine constant rather than a tuning knob, this is the one that most obviously must not scale with the bar - and it was the last one still doing so. Measured against the local measure it came out at 5 ticks in 3/4 where the engine's real boundary is 6, so the guard concluded a 5-tick leg was already clear, did nothing, and let the slam-slam stutter it exists to prevent happen anyway - silently, since from its own point of view there was nothing to fix. 47 of the 56 unintended slams left in this project's 3/4 reference charts after `min_gap_frac` was corrected were this. The other direction (11 ticks in 7/4, against a real 7) only ever cost a tick, since _slam_landing_tick caps the backoff it will chase for this at `max_backoff`.
 KSH_SLAM_CUTOFF_FRAC = 32
 
 
@@ -132,7 +141,7 @@ class Run:
     `width`      1 (normal) or 2 (wide), from the run's first point.
     `tight`      True if decimating this run required breaking the
                  minimum-gap rule to preserve the true start/end - i.e. a
-                 real sub-1/24 gap existed that isn't a slam. See (3) above.
+                 real sub-24th-note gap existed that isn't a slam. See (3) above.
     `curves`     ksh v2 only, parallel to `slam_after`: curves[i] is the (a, b) bezier control point drawing points[i] -> points[i+1], or None for a plain straight join. All None in v1 mode (build_runs(curves=False), the default), which is what makes a v1 conversion byte-identical to what this module produced before v2 existed.
     """
 
@@ -185,7 +194,7 @@ def _enforce_min_gap(pts, min_gap, lead=0):
 
     A fast-but-continuous curve tail (e.g. a sine ease-in, slow start then
     sharp finish) can leave the forward pass one point away from the end
-    with too little room - a real bug, not the sub-1/24 format limit this
+    with too little room - a real bug, not the sub-24th-note format limit this
     module otherwise documents: the run's true shape has plenty of room a
     little further back, the forward pass just didn't know that yet. Before
     accepting the violation, walk backward dropping the most recent kept
@@ -655,7 +664,7 @@ def decimate_segment_curved(pts, min_gap, tol=CURVE_FIT_TOL, lead=0, max_leg=Non
 
     Not a decimation of v1's output but a re-fit of the vox points, per specs/notes.md: _fit_stretch keeps only the points a bezier can't say for itself - turning points, inflections, and wherever one segment still missed by more than `tol` - and `curves[i]` is the (a, b) drawing kept[i] -> kept[i+1], or None for a straight join. The run's true start and end are always kept, and `tight` means the same thing it does in v1: the two are closer than `min_gap` and nothing could go between them. `lead` - see _enforce_min_gap.
 
-    `max_leg` - see CURVE_LEG_FRAC. build_runs passes the exact note value; the fallback below is its 4/4 equivalent, for a caller with only `min_gap` to hand (min_gap is 1/24 of the measure, max_leg 1/32 of it).
+    `max_leg` - see CURVE_LEG_FRAC. build_runs passes the exact note value; the fallback below is its 4/4 equivalent, for a caller with only `min_gap` to hand (both are note values off the same whole note: min_gap a 24th, max_leg a 32nd).
     """
     if max_leg is None:
         max_leg = max(1, min_gap * 24 // 32)
@@ -670,16 +679,18 @@ def decimate_segment_curved(pts, min_gap, tol=CURVE_FIT_TOL, lead=0, max_leg=Non
 def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC, curves=False):
     """vox LaserPoint stream (one lane, already tick-sorted) -> [Run, ...].
 
-    `min_gap_frac`: minimum point spacing enforced during decimation, as a
-    fraction of the *local* measure length (1/24 by default - see the
-    module docstring). Never applied across a genuine same-tick slam.
+    `min_gap_frac`: minimum point spacing enforced during decimation, as a note value - a whole note over `min_gap_frac`, i.e. a 24th note by default (1/6 of a beat, 8 ticks at the default 48-cell resolution). Never applied across a genuine same-tick slam.
+
+    Deliberately *not* a fraction of the local measure, for exactly the reason `slam_gap_frac` below isn't: what this guards against is ksh's slam-recognition cutoff, and that cutoff is beat-relative, so a bar being longer does not make the engine any likelier to misread two points. The two agree in 4/4 and diverge everywhere else, in both directions - a 41-beat measure gave a 82-tick minimum against laser features 12 ticks apart, and a 3/4 measure gave 6 ticks, which is the cutoff itself. The 41-beat case is not hypothetical: in 0536_chase_in_the_shine_penoreri_3e it deleted an entire bottom-to-top-and-back laser spike, drawing a flat line through where it should have been, and was the worst single stretch in the whole 8255-chart corpus for both ksh versions.
 
     `curves`: ksh v2 mode. Each slam-free stretch is re-fitted by decimate_segment_curved() instead of decimated by decimate_segment(), and every Run comes back with a `curves` entry per segment for convert.py to write as `laser_l_curve`/`laser_r_curve`. Off by default: v1 has no such option line, so the points themselves have to carry the shape. Only the point-choosing step changes - slam handling, width, the run-boundary fixup and the minimum-gap rule are shared, since a v2 chart's laser points are ordinary ksh laser points that the engine reads by the same rules.
 
     `slam_gap_frac`: a genuine same-tick slam's start-to-end gap, as a note value - a whole note over `slam_gap_frac`, i.e. a 32nd note by default (see SLAM_GAP_FRAC and the module docstring's "true vox slam" paragraph). Deliberately *not* a fraction of the local measure: ksh's slam cutoff is beat-relative, so in any measure longer than 4/4 a measure-relative gap overshoots it and the slam draws as a plain diagonal laser instead (found against 2293_leflector_niwashi_5m, whose 7/4 measures got 10-tick gaps against 4/4's 6 - user-reported). The reference hand charts settle it: 1/8 of a beat is the most common slam gap in every time signature they use - 4/4, 3/4, 5/4, 6/8, 7/4, 8/4, 11/4 - never a constant slice of the measure. 0 (or any other falsy value) instead places the slam's end on the very next free tick, the older, thinner behaviour.
     """
-    # A whole note in ticks: tl.res is cells per quarter note, so this is what `slam_gap_frac` divides, independent of the local time signature.
+    # A whole note in ticks: tl.res is cells per quarter note, so this is what every gap constant here divides, independent of the local time signature.
     whole_note = 4 * tl.res
+    # Chart-wide, not per-measure - that is the point of it being a note value. See `min_gap_frac` above.
+    min_gap = max(1, whole_note // min_gap_frac)
     used_ticks = set()
     out = []
     run_groups = [g for g in _split_into_runs(laser_points) if g]
@@ -705,9 +716,6 @@ def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC, c
         # `flat_curves` runs parallel to `flat` with one entry fewer: flat_curves[i] draws flat[i] -> flat[i+1]. The join *between* two segments is always a genuine slam (that is what _split_at_slams split on), and a slam is never a curve, so those joins get None.
         flat, flat_curves, tight = [], [], False
         for si, seg in enumerate(segments):
-            meas, _ = tl.measure_of_tick(seg[0][0])
-            mlen = tl.measure_length(meas)
-            min_gap = max(1, mlen // min_gap_frac)
             # Every segment but the first starts *at* a slam's landing point, which the placement loop below writes `lead` ticks after this segment's own first tick - so the min-gap rule has to be measured from there, not from the raw shared tick (see _enforce_min_gap's `lead`). A chained same-tick stack (3+ points on one tick) technically stacks more than one gap onto the later segments' landings; not modelled here, since those landings are already collapsed to a tick apiece by the ceiling backoff in _slam_landing_tick.
             lead = 0 if si == 0 else (max(1, whole_note // slam_gap_frac) if slam_gap_frac else 1)
             if curves:
@@ -738,12 +746,13 @@ def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC, c
                         ceiling = next_true_start - 1
                     else:
                         ceiling = None
-                    meas, _ = tl.measure_of_tick(points[-1][0])
                     # One tick past ksh's own slam cutoff - the least a
                     # trailing leg can be and still be unambiguously *not*
                     # a slam (see _slam_landing_tick's docstring for why
-                    # this isn't the more conservative min_gap_frac).
-                    safe_gap = max(1, tl.measure_length(meas) // KSH_SLAM_CUTOFF_FRAC) + 1
+                    # this isn't the more conservative min_gap_frac). A note
+                    # value, not a slice of the local measure - see
+                    # KSH_SLAM_CUTOFF_FRAC.
+                    safe_gap = max(1, whole_note // KSH_SLAM_CUTOFF_FRAC) + 1
                     t = _slam_landing_tick(points[-1][0], used_ticks, gap, ceiling, safe_gap)
                 else:
                     t = _bump_to_free_tick(t, used_ticks)
