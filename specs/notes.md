@@ -4,7 +4,7 @@ Implementation: [`../scripts/notes/`](../scripts/notes/). Formats: [`vox_format.
 
 ## Scope
 
-BT/FX/laser notes, plus just enough BPM/time-signature to build the grid. Out of scope: all metadata (placeholders), every sound-fx parameter (already in the audio track), roll/swing (camera element - see `camera.md`), `#TRACK AUTO TAB`.
+BT/FX/laser notes, plus just enough BPM/time-signature to build the grid. Out of scope: every sound-fx parameter (already in the audio track), roll/swing (camera element - see `camera.md`), `#TRACK AUTO TAB`. Header metadata is placeholder unless a caller supplies it - see "Metadata" below.
 
 ## Buttons
 
@@ -18,6 +18,32 @@ Vox's laser tracks are pre-sampled curves (as fine as 1/64 of a measure), and ks
 * **Continuity** - decimation must never leave two non-slam points closer than a 24th note (1/6 of a beat), or ksh's engine reads the movement as an unintended slam (its own cutoff is 1/32). A note value, not a fraction of the local measure - see "Bugs found and fixed" item 10.
 * **Genuine same-tick slams** - kept exactly. A same-tick *run boundary* is a different thing and is not a slam: two sections handing off, separated by `MIN_RUN_GAP_TICKS` so a `-` row fits between them (see "Bugs found and fixed" item 11). By default the end lands `SLAM_GAP_FRAC` (1/64 of the local measure) after the start, matching hand-charted slam width, instead of the bare next free tick (`slam_gap_frac=0`, CLI `--no-slam-gap`, GUI "Standard slam gap" checkbox); a dense enough chain (8 slams to a beat is the densest seen) can leave less than that much room, in which case the end just backs off to one tick before the collision.
 * **The unrepresentable 32nd slam** - accepted as a real format limit when unavoidable, flagged via `Run.tight` rather than silently eaten.
+
+## Metadata
+
+Everything above the `--` is a placeholder unless a caller passes `meta` to `convert()`; `gui/convert_worker.py` fills it from `music_db.xml`. One pair has no source to read: `po`/`plength`, the song-select preview window.
+
+SDVX has no such window. It ships the preview as its own pre-cut file, `<folder>_pre.s3v`, beside the track's `<folder>.s3v` — 2187 of this install's 2190 song folders carry one — and nothing in `music_db.xml` records which part of the track it was cut from. `.ksh` has no second audio file, only an offset into `m=`, so the offset has to be recovered: a normalised cross-correlation of the clip against every lag in the track, in [`../scripts/audio/preview.py`](../scripts/audio/preview.py).
+
+Swept over the whole library, 2184 songs scored, the winning lag's score has a **median of 0.973, a 5th percentile of 0.905 and a 1st percentile of 0.831**. `MIN_NCC = 0.5` refuses 6 of the 2184, all of them under 0.45. What keeps a typical score off 1.0 is a fade the game bakes into the clip — roughly 0.5 s in, 1 s out. `po` is the start of the clip, fade included, which is what it should be: KSM fades the preview in itself.
+
+**Clip length is measured, not assumed**, because two conventions ship side by side. 2181 of the 2184 are the familiar faded ~10 s clip (2154 rounding to 10000 ms and 27 to 9980). The other three — `2120_hbfs_daffpunk`, `2168_garasuno_kneesormx_korsk`, `2170_icbmoflove_odenpa`, all recent — are a **~20 s cut starting at exactly 30.000 s with no fade whatsoever**, flat at unity from the first 100 ms window to the last. They score 0.995 to 0.998, the highest in the corpus, precisely because there is no fade to disagree about. Hard-coding a 10-second window would have written the wrong `plength` for all three. `plength` is rounded to 10 ms, which folds WMA decoder padding back out (10000 against 10003 is one clip encoded twice) without pretending to a precision the clip hasn't got.
+
+The measurement runs at 11025 Hz mono (0.09 ms per lag step, about half a second per song, cached across that song's difficulties), and the answer holds against the **rendered** `.ogg` and not just the source `.s3v`: `apply_chart.py` writes its effects in place over the decoded track, so the two stay sample-aligned. Checked on `0001_albida_muryoku_3e` — 84393 ms either way, correlating 0.97 against the dry track and 0.80 against the FX render, same lag.
+
+A repetitive song can score nearly as well at a second lag (`0785_voltexes3_sota_fujimori`: 0.974 against 0.950), which is why the runner-up is reported but not gated on — where it happens, the two lags are the same passage and either is a correct preview. Any failure at all leaves `po=0 plength=0`, which is what every conversion wrote before this and what KSM assumes for a file without them. Off by default on the CLI (`--preview`, since it needs ffmpeg and the audio files that a notes-only conversion otherwise never opens), on by default in the GUI ("Preview offset (po/plength)").
+
+### Not every preview is the same bytes as its track
+
+`MIN_NCC` is 0.5 and not somewhere up near the 0.83 first percentile because a tail of songs ship a preview cut from a **different render** of the same passage. `2336_ticktackchikupa_risyuu` is the worked example: 0.698 overall, and still only 0.734 over the unfaded middle at its exact peak lag — refining the search to 44100 Hz moves the lag by one sample and does not raise the score, so it is not a misalignment. Its envelope tracks the track at unity across that middle and its spectral centroid matches to 2 Hz (1601 against 1599), so it is the same music, mixed or mastered differently. The lag is not in doubt there: the dry `.s3v` and both of that song's rendered `.ogg`s peak at the same millisecond.
+
+The 6 the sweep refuses (0.235 to 0.448) are presumably the same thing taken further, and refusing is right: two of them (`0630_critical_line_kradness` at 0.316, `1852_crystalia_djtotto` at 0.339) beat their own runner-up by only about 0.01, so there is no lag worth standing behind. One more song scores nothing at all for a different reason — `2229_kamui_tjhangneil`, this project's own calibration track, has a **544-byte `_pre.s3v`** where every other preview in the corpus is at least 183 KB. It is a stub, not audio, and ffmpeg refuses it; `locate()` turns that into a clean "no answer" rather than an exception.
+
+Where the different-render tail matters is which audio the correlation is run against. A heavily effected MXM render decorrelates further still, and `ticktackchikupa_risyuu`'s EXH render fell *under* `MIN_NCC` while the answer was known good from the dry track — so the measurement always runs against the game's own `.s3v`, never against a render, and relies on `apply_chart.py` writing its effects in place to keep the two sample-aligned.
+
+### Filling the fields into charts that already exist
+
+`preview.py --patch <folder>` walks a converted output tree and rewrites `po=`/`plength=` in place, for a batch converted before any of this existed or hand-refined since. It edits the two lines in the byte stream rather than re-emitting a header, so the BOM, the line endings, the charter's own field order, and any field they added or removed all survive; a field that isn't there at all is appended to the end of the header rather than put back where `_header()` would have written it. It measures once per song folder rather than once per chart, since the window belongs to the track.
 
 ## Crosscheck
 

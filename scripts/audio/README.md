@@ -9,6 +9,7 @@ Reference writeup: [`specs/audio_engine.md`](../../specs/audio_engine.md) (techn
 | `sdvx_fx.py` | The DSP, transcribed from `BMSoundLibSvo::CSvoEffectedAudioGeneratorImpl`. Biquads (LPF/HPF/BPF/peaking), BitCrusher, Retrigger/Echo, Gate, TapeStop, SideChain, Flanger, Wobble, plus the knob-swept laser variants. Runs standalone on a WAV. |
 | `apply_chart.py` | Parses a `.vox`, decodes the `.s3v`, and applies every FX-button hold and laser segment at the chart's times. Also reproduces the parts that live *outside* the effect generator: the device ParamEq that is the default laser sound, its 80 ms lag, the music duck, and the layered SE bank. |
 | `s3p_decode.py` | Extracts an `S3P0` sample bank and decodes each `S3V0` (ASF/WMA) entry to WAV, reporting duration, peak, centroid and attack time. Also where the per-sample header gain is read from — see §6.1.4. |
+| `preview.py` | Finds a song's pre-cut `_pre.s3v` selection preview inside its full track by cross-correlation, giving the `po=`/`plength=` a `.ksh` header wants. Nothing in the game data records that offset — see [`specs/notes.md`](../../specs/notes.md) "Metadata". `--patch` fills the two fields into charts that already exist, editing only those lines, for a batch converted before this was written or hand-refined since. |
 
 ```bash
 python scripts/audio/sdvx_fx.py --list
@@ -21,6 +22,16 @@ python scripts/audio/sdvx_fx.py in.wav out.wav --effect wobble --params 80,0,3,5
 ```bash
 python scripts/audio/apply_chart.py ../data/music/2229_kamui_tjhangneil -d 5m -o output/kamui_fx.ogg
 ```
+
+```bash
+python scripts/audio/preview.py 0001_albida_muryoku 2229_kamui_tjhangneil
+```
+
+```bash
+python scripts/audio/preview.py --patch <converted-folder> --music <a game folder's data/music> --dry-run
+```
+
+`--music` is repeatable and this install's own `data/music` is always searched last, which is what to reach for when the batch came out of a game *update* folder — those songs are not in the base install at all.
 
 `apply_chart.py --help` lists the diagnostic flags that isolate each part of the chain (`--no-peak`, `--peak-delay`, `--no-duck`, `--se-trim`, `--se-polyphonic`, …). Each exists because it settled a question; they are documented in `audio_engine.md` §6.
 

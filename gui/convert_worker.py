@@ -33,6 +33,7 @@ import music_db  # noqa: E402
 
 import convert as notes_convert  # noqa: E402  (scripts/notes/convert.py)
 import apply_chart  # noqa: E402
+import preview  # noqa: E402  (scripts/audio/preview.py)
 
 
 @dataclass
@@ -45,6 +46,7 @@ class Job:
     audio_out: str
     s3v_path: str          # may be None -> audio render is skipped for this job
     jacket_src: str         # may be None
+    pre_s3v_path: str = None   # may be None -> po=/plength= stay 0
 
 
 @dataclass
@@ -61,6 +63,7 @@ class BatchOptions:
     se_bank_dir: str = None
     ffmpeg_path: str = None
     render_audio: bool = True
+    preview_meta: bool = True        # measure po=/plength= from the song's _pre.s3v - see _preview_window
     standard_slam_gap: bool = True   # notes_convert.convert()'s slam_gap_frac - see its docstring
     ksh_version: int = 1             # notes_convert.convert()'s ksh_version: 1 = interpolated laser points, 2 = laser_l_curve/laser_r_curve beziers
     pretilt_fix: bool = False        # notes_convert.convert()'s pretilt_fix - see camera.py
@@ -133,15 +136,17 @@ def plan_jobs(songs, music_dir, output_dir, diff_keys, fallback_music_dir=None):
                 audio_out=os.path.join(song_out_dir, "%s.ogg" % diff.suffix),
                 s3v_path=song.s3v_path(music_dir, fallback_music_dir),
                 jacket_src=jacket_src,
+                pre_s3v_path=song.pre_s3v_path(music_dir, fallback_music_dir),
             ))
     return jobs
 
 
-def _meta_for(job):
+def _meta_for(job, preview_window=None):
     diff = job.song.difficulties[job.diff_key]
     jacket_name = ""
     if job.jacket_src:
         jacket_name = "%s.png" % diff.suffix
+    po, plength = preview_window or (0, 0)
     return {
         "title": job.song.title,
         "artist": job.song.artist,
@@ -150,17 +155,41 @@ def _meta_for(job):
         "level": diff.level_int,
         "jacket": jacket_name,
         "m": os.path.basename(job.audio_out),
+        "po": po,
+        "plength": plength,
     }
 
 
-def run_job(job, options, log):
+def _preview_window(job, options, log, cache):
+    """(po_ms, plength_ms) for this job's song, or None.
+
+    Cached on the track path because the window is a property of the song and not of the difficulty: without it a four-difficulty song would pay for the same correlation four times. A None result is cached too - a song whose preview can't be placed shouldn't be decoded again per difficulty just to fail again.
+    """
+    if not options.preview_meta or not job.s3v_path or not job.pre_s3v_path:
+        return None
+    if job.s3v_path in cache:
+        return cache[job.s3v_path]
+    try:
+        window = preview.measure(job.s3v_path, job.pre_s3v_path)
+        if window is None:
+            log("-- %s: preview didn't match the track - po/plength left at 0"
+                % job.song.folder)
+    except Exception as e:  # noqa: BLE001 - preview metadata is never worth failing a chart over
+        log("-- %s: preview offset failed (%s) - po/plength left at 0" % (job.song.folder, e))
+        window = None
+    cache[job.s3v_path] = window
+    return window
+
+
+def run_job(job, options, log, preview_cache=None):
     """One (song, difficulty): notes conversion, jacket copy, audio render.
     Never raises - failures are reported in the returned JobResult so one bad
     chart doesn't stop the batch."""
     os.makedirs(job.song_out_dir, exist_ok=True)
     result = JobResult(job=job, ok=True)
 
-    meta = _meta_for(job)
+    meta = _meta_for(job, _preview_window(job, options, log,
+                                           preview_cache if preview_cache is not None else {}))
     slam_gap_frac = notes_convert.laser.SLAM_GAP_FRAC if options.standard_slam_gap else 0
     try:
         notes_convert.convert(job.vox_path, job.ksh_out, camera=True, meta=meta,
@@ -238,6 +267,7 @@ class ConvertWorker:
         self.on_done = on_done              # (list[JobResult], cancelled: bool) -> None
         self._cancel = threading.Event()
         self._thread = None
+        self._preview_cache = {}     # .s3v path -> (po, plength) or None, shared across the batch
 
     def start(self):
         self._thread = threading.Thread(target=self._run, name="convert-worker", daemon=True)
@@ -257,5 +287,5 @@ class ConvertWorker:
                 self.on_done(results, True)
                 return
             self.on_progress(i, total, job)
-            results.append(run_job(job, self.options, self.on_log))
+            results.append(run_job(job, self.options, self.on_log, self._preview_cache))
         self.on_done(results, False)

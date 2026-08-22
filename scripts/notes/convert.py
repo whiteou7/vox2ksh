@@ -29,12 +29,7 @@ default so every existing caller (notably notes/xcheck.py) keeps its exact
 prior output; see specs/camera.md for what's approximate about the camera
 values themselves - this module only places them, it doesn't compute them.
 
-`meta`, if given, is a dict of real track metadata (title/artist/effect/
-jacket/illustrator/difficulty/level/m) that overrides the placeholders
-_header() would otherwise write - see its docstring for the exact keys. This
-is how a caller with an actual data source (music_db.xml, for the GUI) gets
-a real header instead of "artist=" left blank; every existing caller passes
-nothing and gets the old placeholder behaviour unchanged.
+`meta`, if given, is a dict of real track metadata (title/artist/effect/jacket/illustrator/difficulty/level/m/po/plength) that overrides the placeholders _header() would otherwise write - see its docstring for the exact keys. This is how a caller with an actual data source (music_db.xml, for the GUI) gets a real header instead of "artist=" left blank; every existing caller passes nothing and gets the old placeholder behaviour unchanged. `po`/`plength` are the one pair not read out of a file: SDVX keeps the song-select preview as a separate pre-cut `_pre.s3v` and records nowhere which part of the track it was cut from, so the offset has to be measured - `--preview` here, ../audio/preview.py for a caller.
 
 `slam_gap_frac` is forwarded to laser.build_runs() - see its docstring and
 laser.py's module docstring ("true vox slam") for what it controls. CLI
@@ -389,7 +384,7 @@ def _header(chart, bpm_changes, beat_changes, meta=None):
     title, artist, effect (chart author, ksh_format.md's name for it),
     jacket (filename), illustrator, difficulty (light/challenge/extended/
     infinite - overrides the DIFF_MAP guess from the filename suffix),
-    level (difnum, 1..20), m (audio filename, overrides "dummy.ogg").
+    level (difnum, 1..20), m (audio filename, overrides "dummy.ogg"), po / plength (the song-select preview window in ms, measured by ../audio/preview.py; 0/0 is "no preview", which is what KSM assumes anyway).
     """
     meta = meta or {}
     base = os.path.splitext(os.path.basename(chart.path))[0]
@@ -419,8 +414,8 @@ def _header(chart, bpm_changes, beat_changes, meta=None):
         "o=0",
         "bg=desert",
         "layer=arrow",
-        "po=0",
-        "plength=0",
+        "po=%s" % meta.get("po", 0),
+        "plength=%s" % meta.get("plength", 0),
         "total=0",
         "chokkakuvol=0",
         "chokkakuautovol=1",
@@ -453,14 +448,40 @@ def build_arg_parser():
                           "next-free-tick placement renders as a near-invisible hairline "
                           "and can force a measure's grid down to near-native resolution "
                           "to fit just one point - see laser.py's module docstring")
+    ap.add_argument("--preview", action="store_true",
+                     help="fill in po=/plength= by locating the song's _pre.s3v inside its "
+                          ".s3v, both taken from the chart's own folder. Off by default: it "
+                          "needs ffmpeg and the audio files, which a notes-only conversion "
+                          "otherwise never touches. See ../audio/preview.py")
     return ap
+
+
+def _preview_meta(vox_path):
+    """`--preview`: the (po, plength) meta for the chart's own song folder.
+
+    A chart is `<folder>/<folder>_<diff>.vox`, so the track is named after the folder, not after the chart. The import is deferred to here so a conversion without the flag needs neither numpy nor ffmpeg.
+    """
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "audio"))
+    import preview
+
+    folder = os.path.dirname(os.path.abspath(vox_path))
+    s3v = os.path.join(folder, os.path.basename(folder) + ".s3v")
+    got = preview.measure(s3v)
+    if got is None:
+        print("preview: no offset found for %s - leaving po=0 plength=0"
+              % os.path.basename(folder))
+        return {}
+    print("preview: po=%d plength=%d" % got)
+    return {"po": got[0], "plength": got[1]}
 
 
 def main():
     args = build_arg_parser().parse_args()
     out = args.output or os.path.splitext(os.path.basename(args.vox))[0] + ".ksh"
     slam_gap_frac = 0 if args.no_slam_gap else laser.SLAM_GAP_FRAC
-    path = convert(args.vox, out, slam_gap_frac=slam_gap_frac, ksh_version=args.ksh_version)
+    meta = _preview_meta(args.vox) if args.preview else None
+    path = convert(args.vox, out, meta=meta, slam_gap_frac=slam_gap_frac,
+                    ksh_version=args.ksh_version)
     print("wrote %s" % path)
 
 

@@ -15,6 +15,7 @@ _DEFAULTS = {
     "difficulties": ["novice", "advanced", "exhaust", "top"],
     "ksh_version": 1,
     "pretilt_fix": True,
+    "preview_meta": True,
     "debug": False,
     "advanced": False,
     "advanced_values": {},

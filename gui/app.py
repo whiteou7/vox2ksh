@@ -200,6 +200,11 @@ class App:
         self.settings["standard_slam_gap"] = self.slam_gap_var.get()
         settings_store.save(self.settings)
 
+    def _save_preview_meta(self):
+        # convert_worker's BatchOptions.preview_meta - finds each song's 10-second _pre.s3v inside its full track and writes the window as po=/plength=. Costs about half a second per song (one extra decode + correlation, cached across that song's difficulties), and needs ffmpeg; off leaves both fields at 0, which is what every conversion wrote before.
+        self.settings["preview_meta"] = self.preview_meta_var.get()
+        settings_store.save(self.settings)
+
     def _save_pretilt_fix(self):
         # notes_convert.convert()'s pretilt_fix - camera.py brackets the lasers
         # KSM would tilt into early. Off by default; see specs/camera.md.
@@ -343,6 +348,10 @@ class App:
         ttk.Checkbutton(notes_row, text="Remove pretilt",
                          variable=self.pretilt_var,
                          command=self._save_pretilt_fix).pack(anchor="w")
+        self.preview_meta_var = tk.BooleanVar(value=bool(self.settings.get("preview_meta", True)))
+        ttk.Checkbutton(notes_row, text="Preview offset (po/plength)",
+                         variable=self.preview_meta_var,
+                         command=self._save_preview_meta).pack(anchor="w")
 
         ttk.Label(self.advanced_frame, text="apply_chart.py options",
                   font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(4, 0))
@@ -567,6 +576,7 @@ class App:
             se_bank_dir=self._resolve_se_bank_dir(),
             ffmpeg_path=self._resolve_ffmpeg(),
             render_audio=True,
+            preview_meta=self.preview_meta_var.get(),
             standard_slam_gap=self.slam_gap_var.get(),
             ksh_version=self._ksh_version(),
             pretilt_fix=self.pretilt_var.get(),

@@ -164,11 +164,21 @@ class Song:
         update folder, ~20% of its songs. `fallback_music_dir` (typically a
         fuller/older install's data/music) is checked second when given.
         """
-        p = os.path.join(music_dir, self.folder, self.folder + ".s3v")
+        return self._audio_path(self.folder + ".s3v", music_dir, fallback_music_dir)
+
+    def pre_s3v_path(self, music_dir, fallback_music_dir=None):
+        """The song's pre-cut 10-second selection-screen preview, or None.
+
+        Same two-install search as s3v_path, and resolved independently of it, so an update folder that reshipped one and not the other still yields both. Nothing rests on the two coming from the same install: scripts/audio/preview.py verifies the pairing by correlation rather than assuming it.
+        """
+        return self._audio_path(self.folder + "_pre.s3v", music_dir, fallback_music_dir)
+
+    def _audio_path(self, name, music_dir, fallback_music_dir=None):
+        p = os.path.join(music_dir, self.folder, name)
         if os.path.exists(p):
             return p
         if fallback_music_dir:
-            p2 = os.path.join(fallback_music_dir, self.folder, self.folder + ".s3v")
+            p2 = os.path.join(fallback_music_dir, self.folder, name)
             if os.path.exists(p2):
                 return p2
         return None
