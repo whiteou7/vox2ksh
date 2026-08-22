@@ -384,7 +384,7 @@ def _header(chart, bpm_changes, beat_changes, meta=None):
     title, artist, effect (chart author, ksh_format.md's name for it),
     jacket (filename), illustrator, difficulty (light/challenge/extended/
     infinite - overrides the DIFF_MAP guess from the filename suffix),
-    level (difnum, 1..20), m (audio filename, overrides "dummy.ogg"), po / plength (the song-select preview window in ms, measured by ../audio/preview.py; 0/0 is "no preview", which is what KSM assumes anyway).
+    level (difnum, 1..20), m (audio filename, overrides "dummy.ogg"), po / plength (the song-select preview window in ms, measured by ../audio/preview.py; 0/0 is "no preview", which is what KSM assumes anyway), information (shown in song select - the GUI fills this with the un-rounded chart constant, "CC: 18.2", ahead of level's rounded-down int), icon (defaults to the fixed "../sdvx07.png" - every converted chart shares the one icon file, placed a level above each song's output folder).
     """
     meta = meta or {}
     base = os.path.splitext(os.path.basename(chart.path))[0]
@@ -417,6 +417,8 @@ def _header(chart, bpm_changes, beat_changes, meta=None):
         "po=%s" % meta.get("po", 0),
         "plength=%s" % meta.get("plength", 0),
         "total=0",
+        "information=%s" % meta.get("information", ""),
+        "icon=%s" % meta.get("icon", "../sdvx07.png"),
         "chokkakuvol=0",
         "chokkakuautovol=1",
         "filtertype=peak",

@@ -46,6 +46,9 @@ class Job:
     audio_out: str
     s3v_path: str          # may be None -> audio render is skipped for this job
     jacket_src: str         # may be None
+    jacket_out_name: str    # "" when jacket_src is None; "jak.png" when every
+                             # difficulty being converted for this song shares
+                             # one source image, else "<short>.png" - see plan_jobs
     pre_s3v_path: str = None   # may be None -> po=/plength= stay 0
 
 
@@ -121,6 +124,12 @@ def plan_jobs(songs, music_dir, output_dir, diff_keys, fallback_music_dir=None):
                 wanted.add(top.key)
         base_name = out_name(song)
         song_out_dir = os.path.join(output_dir, base_name)
+
+        # Collect every (key, diff, vox_path, jacket_src) this song is
+        # actually getting converted for first, so the shared-jacket check
+        # below sees exactly the set of difficulties the jobs themselves
+        # will use - not the full DIFF_ORDER.
+        entries = []
         for key in music_db.DIFF_ORDER:
             if key not in wanted or key not in song.difficulties:
                 continue
@@ -129,13 +138,29 @@ def plan_jobs(songs, music_dir, output_dir, diff_keys, fallback_music_dir=None):
             if not vox_path:
                 continue
             jacket_src = song.jacket_path(music_dir, key, fallback_music_dir)
+            entries.append((key, diff, vox_path, jacket_src))
+
+        # Most songs ship one jacket shared across every difficulty - when
+        # that's true here too, write it once as "jak.png" instead of one
+        # identical copy per difficulty. Only if the resolved source images
+        # actually differ (or are missing for some difficulties) does each
+        # difficulty get its own "<short>.png".
+        jacket_srcs = {js for _k, _d, _v, js in entries if js}
+        shared_jacket = len(jacket_srcs) == 1
+
+        for key, diff, vox_path, jacket_src in entries:
+            short = music_db.DIFF_SHORT[key].lower()  # nov/adv/exh/inf/mxm
+            jacket_out_name = ""
+            if jacket_src:
+                jacket_out_name = "jak.png" if shared_jacket else "%s.png" % short
             jobs.append(Job(
                 song=song, diff_key=key, vox_path=vox_path,
                 song_out_dir=song_out_dir,
-                ksh_out=os.path.join(song_out_dir, "%s_%s.ksh" % (base_name, diff.suffix)),
-                audio_out=os.path.join(song_out_dir, "%s.ogg" % diff.suffix),
+                ksh_out=os.path.join(song_out_dir, "%s_%s.ksh" % (base_name, short)),
+                audio_out=os.path.join(song_out_dir, "%s.ogg" % short),
                 s3v_path=song.s3v_path(music_dir, fallback_music_dir),
                 jacket_src=jacket_src,
+                jacket_out_name=jacket_out_name,
                 pre_s3v_path=song.pre_s3v_path(music_dir, fallback_music_dir),
             ))
     return jobs
@@ -143,9 +168,6 @@ def plan_jobs(songs, music_dir, output_dir, diff_keys, fallback_music_dir=None):
 
 def _meta_for(job, preview_window=None):
     diff = job.song.difficulties[job.diff_key]
-    jacket_name = ""
-    if job.jacket_src:
-        jacket_name = "%s.png" % diff.suffix
     po, plength = preview_window or (0, 0)
     return {
         "title": job.song.title,
@@ -153,7 +175,8 @@ def _meta_for(job, preview_window=None):
         "effect": diff.effected_by,
         "illustrator": diff.illustrator,
         "level": diff.level_int,
-        "jacket": jacket_name,
+        "information": "CC: %s" % diff.level_display,
+        "jacket": job.jacket_out_name,
         "m": os.path.basename(job.audio_out),
         "po": po,
         "plength": plength,

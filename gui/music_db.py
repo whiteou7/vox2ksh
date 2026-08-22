@@ -113,9 +113,9 @@ class Song:
 
     def jacket_path(self, music_dir, diff_key, fallback_music_dir=None):
         """Best-effort jacket path for a difficulty key - tries that
-        difficulty's own jk_<id>_<DIFF_JACKET_NUM>.png first, falls back to
-        jk_<id>_1.png (many songs share one jacket across every difficulty),
-        then to any jk_<id>_*.png present, then to `fallback_music_dir` (same
+        difficulty's own jk_<id>_<DIFF_JACKET_NUM>_b.png first, falls back to
+        jk_<id>_1_b.png (many songs share one jacket across every difficulty),
+        then to any jk_<id>_*_b.png present, then to `fallback_music_dir` (same
         precedence as s3v_path), then None."""
         n0 = DIFF_JACKET_NUM.get(diff_key, 1)
         for mdir in (music_dir, fallback_music_dir):
@@ -123,13 +123,12 @@ class Song:
                 continue
             base = os.path.join(mdir, self.folder)
             for n in (n0, 1):
-                p = os.path.join(base, "jk_%04d_%d.png" % (self.id, n))
+                p = os.path.join(base, "jk_%04d_%d_b.png" % (self.id, n))
                 if os.path.exists(p):
                     return p
             if os.path.isdir(base):
                 for fn in sorted(os.listdir(base)):
-                    if fn.startswith("jk_%04d_" % self.id) and fn.endswith(".png") \
-                            and "_b" not in fn and "_s" not in fn:
+                    if fn.startswith("jk_%04d_" % self.id) and fn.endswith("_b.png"):
                         return os.path.join(base, fn)
         return None
 
