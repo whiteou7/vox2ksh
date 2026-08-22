@@ -156,7 +156,7 @@ def plan_jobs(songs, music_dir, output_dir, diff_keys, fallback_music_dir=None):
             jobs.append(Job(
                 song=song, diff_key=key, vox_path=vox_path,
                 song_out_dir=song_out_dir,
-                ksh_out=os.path.join(song_out_dir, "%s_%s.ksh" % (base_name, short)),
+                ksh_out=os.path.join(song_out_dir, "%s.ksh" % short),
                 audio_out=os.path.join(song_out_dir, "%s.ogg" % short),
                 s3v_path=song.s3v_path(music_dir, fallback_music_dir),
                 jacket_src=jacket_src,
