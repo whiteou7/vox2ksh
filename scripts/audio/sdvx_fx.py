@@ -1134,6 +1134,210 @@ def fx_pitchshift(L, R, mix, amount, block=512, legacy_cursor=False):
 
 
 # --------------------------------------------------------------------------
+# 4.11  pitch + speed (composite, .vox id 13 / engine kind 14)
+# --------------------------------------------------------------------------
+
+# The wrapper is FUN_180632c10 @ 0x180632c10; it does no DSP of its own, it
+# builds four std::function<float(float)> out of the definition's three chart
+# columns and hands them to a statically-linked routine the RTTI names in full:
+#
+#   std::shared_ptr<BMSoundLib2017::WaveBuffer> ApplyPitchAndSpeed(
+#       short const*, unsigned __int64, int, int,
+#       std::function<float(float)>,   // 1: PITCH, in semitones
+#       std::function<float(float)>,   // 2: SPEED, a playback-rate multiplier
+#       std::function<float(float)>,   // 3: MIX,   percent
+#       std::function<float(float)>)   // 4: TIME,  progress remap, identity here
+#
+# so the .vox row `13, p1, p2, p3` is (mix%, semitones, speed) and nothing about
+# it is a keyframe. Each of the first three functions is only built when its
+# column differs from that parameter's neutral value - |p2| > FLT_EPSILON for
+# pitch, |p3 - 1| for speed, |p1 - 100| for mix (0x180632cf6 / 0x180632db8 /
+# 0x180632e5b) - and an absent function means "leave that alone", which is why
+# `13, 100, 0, 1` is a complete no-op. The corpus ranges agree: p2 in [-24, 24]
+# (+-2 octaves), p3 in {0, 0.5, 1, 2}, p1 in [0, 100].
+#
+# The engine underneath is PhaseGear (BMSoundLib2017::PhaseGearDriverImpl,
+# ctor 0x180620010, per-block driver 0x180620860), an FFT phase vocoder from a
+# third-party library. Its geometry is readable in PhaseGearCore::Initialize
+# @ 0x180784910: frame = 1 << (log2(sampleRate) - 4) = 2048 at 44100, hop =
+# frame >> 2, and the ring buffer is primed with frame/2 zeros. Pitch and speed
+# reach it through two setters, 0x180784600 -> core+0x38 and 0x180784620 ->
+# core+0x34, snapshotted per frame by 0x180784e10 - which is also where the
+# speed axis is legible: it advances a 16.16 accumulator by
+# `(int)(65536.0/speed + 0.5)` per input frame, so speed 2 eats two input
+# frames per output frame (twice as fast), 0.5 eats half, and `speed <= 0`
+# short-circuits the accumulator to full without consuming input at all, a
+# freeze. Pitch is a plain `powf(2, semitones/12)` at 0x18062d92e.
+#
+# What is transcribed below is that contract - parameter meanings, guards,
+# buffer geometry, the dry reference and the mix. The vocoder itself is a
+# textbook phase vocoder rather than a transcription: PhaseGear's analysis and
+# synthesis stages are a library this project does not have and did not trace
+# to the sample. Treat the timbre as behavioural, not bit-exact.
+
+PV_FRAME = 2048         # 0x180784910: 1 << (log2(44100) - 4)
+PV_HOP = PV_FRAME >> 2  # 0x180784910: frame >> 2, i.e. 4x overlap
+
+
+def _pv_window():
+    """Periodic Hann - the analysis and the synthesis window both."""
+    return np.hanning(PV_FRAME + 1)[:PV_FRAME].astype(np.float64)
+
+
+def _pv_render(x, hop_a, n_out):
+    """Phase-vocode `x` with analysis hop `hop_a` and synthesis hop PV_HOP.
+
+    Returns `n_out` samples. `hop_a == 0` freezes the analysis window at the
+    note's first frame, which is what the engine's `speed <= 0` branch does by
+    filling its position accumulator without consuming any input. A frozen
+    window has no phase difference to estimate frequency from, so the bin
+    frequencies are measured once from the two frames either side of the freeze
+    point and then held; letting the bins fall back to their centres instead
+    detunes the held note by up to half a bin.
+    """
+    if n_out <= 0:
+        return np.zeros(0, np.float64)
+    win = _pv_window()
+    nbins = PV_FRAME // 2 + 1
+    omega = 2.0 * np.pi * np.arange(nbins) / PV_FRAME
+
+    # frame/2 of leading zeros is the engine's ring-buffer priming; trimming
+    # the same amount back off the output leaves the effect time-aligned with
+    # the note instead of starting half a window late.
+    pad = PV_FRAME // 2
+    src = np.concatenate([np.zeros(pad), np.asarray(x, dtype=np.float64)])
+    nframes = int(np.ceil((n_out + pad) / float(PV_HOP))) + 1
+    # `pad + PV_HOP` keeps room for the freeze path's second probe below, which
+    # a very short note would not otherwise reach
+    need = max(int(np.ceil(hop_a * nframes)), pad + PV_HOP) + PV_FRAME
+    if src.size < need:
+        src = np.concatenate([src, np.zeros(need - src.size)])
+
+    def analyse(a):
+        spec = np.fft.rfft(src[a:a + PV_FRAME] * win)
+        return np.abs(spec), np.angle(spec)
+
+    def deviate(ang, prev, hop):
+        d = ang - prev - omega * hop
+        d -= 2.0 * np.pi * np.round(d / (2.0 * np.pi))
+        return omega + d / hop
+
+    def lock(syn, mag, ang):
+        """Identity phase locking (Laroche & Dolson).
+
+        Propagating every bin independently lets the bins of one partial's
+        main lobe drift apart, and the lobe stops summing coherently: a held
+        sine loses about 4 dB over a second and gains the classic vocoder
+        phasiness. Locking each bin's phase to its region's peak - keeping the
+        peak's propagated phase and each neighbour's ORIGINAL offset from it -
+        holds the lobe rigid. Not from the DLL; PhaseGear's own synthesis was
+        not traced, and this is the standard fix.
+        """
+        p = np.flatnonzero((mag[1:-1] > mag[:-2]) & (mag[1:-1] >= mag[2:])) + 1
+        if p.size == 0:
+            return syn
+        edges = np.concatenate([[0], (p[:-1] + p[1:] + 1) // 2, [mag.size]])
+        owner = np.repeat(p, np.diff(edges))
+        return syn[owner] + (ang - ang[owner])
+
+    acc = np.zeros(nframes * PV_HOP + PV_FRAME)
+    norm = np.zeros_like(acc)
+    frozen = None
+    if hop_a <= 0.0:
+        # measure past the priming zeros: a window that is half silence has no
+        # usable phase difference to read a frequency out of
+        mag0, ang0 = analyse(pad)
+        frozen = (mag0, deviate(analyse(pad + PV_HOP)[1], ang0, PV_HOP), ang0)
+
+    prev = np.zeros(nbins)
+    phase = None
+    for i in range(nframes):
+        if frozen is not None:
+            mag, freq, ang = frozen
+            phase = ang.copy() if phase is None else lock(phase + freq * PV_HOP, mag, ang)
+        else:
+            mag, ang = analyse(int(i * hop_a))
+            if phase is None:
+                phase = ang.copy()
+            else:
+                phase = lock(phase + deviate(ang, prev, hop_a) * PV_HOP, mag, ang)
+            prev = ang
+        o = i * PV_HOP
+        acc[o:o + PV_FRAME] += np.fft.irfft(mag * np.exp(1j * phase)) * win
+        norm[o:o + PV_FRAME] += win * win
+
+    out = acc[pad:pad + n_out] / np.maximum(norm[pad:pad + n_out], 1e-9)
+    if out.size < n_out:
+        out = np.concatenate([out, np.zeros(n_out - out.size)])
+    return out
+
+
+def _pv_channel(x, ratio, speed, n_out):
+    """One channel through the vocoder at `speed`, pitched by `ratio`.
+
+    The vocoder alone moves the time axis; pitch is then a resample, which
+    moves it back. To land on `n_out` samples having consumed `n_out * speed`
+    of input, the vocoder must emit `n_out * ratio` samples - analysis hop
+    `PV_HOP * speed / ratio` - and the resample reads that at `ratio` samples
+    per output sample. (The engine reaches the same mapping the other way
+    round, shifting pitch inside the spectrum and leaving its analysis hop at
+    `PV_HOP * speed`.)
+    """
+    if ratio == 1.0:
+        return _pv_render(x, PV_HOP * speed, n_out)
+    m = int(np.ceil(n_out * ratio)) + 2
+    mid = _pv_render(x, PV_HOP * speed / ratio, m)
+    pos = np.arange(n_out) * ratio
+    return np.interp(pos, np.arange(mid.size), mid)
+
+
+def fx_pitch_speed(L, R, mix, semitones, speed, block=512, lookahead=None):
+    """Composite kind 14 - `ApplyPitchAndSpeed`, see the block comment above.
+
+    `out = (1-mix)*reference + mix*pitched`, and the reference is NOT the dry
+    track whenever speed != 1: FUN_18062ca80 renders the region a SECOND time
+    with the same speed but a pitch function that is the constant-0.0 lambda at
+    0x1802be750, and mixes against that (0x18062cf79). It has to - a
+    speed-shifted signal and the untouched track are no longer the same audio
+    at the same instant, so crossfading them would flam. At speed == 1 that
+    second pass is skipped and the raw input is the reference (0x18062ce2b).
+
+    Input runs from the note's first frame to the END of the buffer, not to the
+    note's end, so a speed > 1 note pulls in audio from after itself: pass
+    `lookahead=(fullL, fullR, offset)` to allow that. Output is always exactly
+    the note's own length.
+    """
+    n = L.size
+    semitones, speed = float(semitones), float(speed)
+    # the engine's own two guards; with both parameters neutral no function is
+    # built, PhaseGear's pitch/speed section stays disabled (core+0x30 = 0,
+    # 0x180620922) and the region passes through untouched
+    if n <= 0 or (semitones == 0.0 and speed == 1.0):
+        return L.astype(np.float32), R.astype(np.float32)
+
+    m = mixof(mix)
+    ratio = math.pow(2.0, semitones / 12.0)      # 0x18062d92e
+    speed = max(speed, 0.0)
+
+    srcL, srcR = L, R
+    if lookahead is not None:
+        need = int(n * max(speed, 1.0)) + PV_FRAME * 2
+        fl, fr, off = lookahead
+        srcL, srcR = fl[off:off + need], fr[off:off + need]
+
+    wetL = _pv_channel(srcL, ratio, speed, n)
+    wetR = _pv_channel(srcR, ratio, speed, n)
+    if speed == 1.0:
+        refL, refR = L.astype(np.float64), R.astype(np.float64)
+    else:
+        refL = _pv_channel(srcL, 1.0, speed, n)
+        refR = _pv_channel(srcR, 1.0, speed, n)
+
+    outL = ((1.0 - m) * refL + m * wetL).astype(np.float32)
+    outR = ((1.0 - m) * refR + m * wetR).astype(np.float32)
+    return outL, outR
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
@@ -1148,6 +1352,7 @@ EFFECTS = {
     "wobble":        (fx_wobble,         "mix,filterType,waveType,freqA,freqB,periodSec,Q"),
     "bitcrush":      (fx_bitcrush,       "mix,rate"),
     "pitchshift":    (fx_pitchshift,     "mix,amount"),
+    "pitch_speed":   (fx_pitch_speed,    "mix,semitones,speed"),
     "lpf":           (fx_lpf,            "mix,freq,Q"),
     "hpf":           (fx_hpf,            "mix,freq,Q"),
     "peak":          (fx_peak,           "mix,freq,Q"),

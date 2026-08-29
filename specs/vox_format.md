@@ -153,7 +153,7 @@ Single timing defining the end of the chart. This is the arcade chart's official
 | `10` | Tape Stop Ex                 |
 | `11` | Low Pass Filter              |
 | `12` | High Pass Filter             |
-| `13` | composite / keyframed effect |
+| `13` | Pitch & Speed                |
 
 + The number of columns per line depends on the effect type. Exact per-type column order:
 
@@ -164,7 +164,10 @@ Single timing defining the end of the chart. This is the arcade chart's official
     7  -> %d, %f,  %d                      8  -> %d, %d, %f, %f, %f, %f, %f, %f
     9  -> %d, %f,  %f                      10 -> %d, %f, %f, %f, %f, %f
     11 -> %d, %f,  %f, %f, %f              12 -> %d, %f, %f, %f, %f
+    13 -> %d, %f,  %f, %f
     ```
+
++ **Id 13 is `mix%, pitch in semitones, speed multiplier`** — the engine's own routine is named `ApplyPitchAndSpeed` and each of the three columns is only honoured when it differs from its neutral value (`100`, `0`, `1`), so the very common row `13, 100.00, 0.00, 1.00` is an inert pair filler. Speed is a playback-rate multiplier on the source, independent of pitch: `2` plays the region twice as fast, `0.5` half, `0` freezes it. See [`audio_engine.md`](audio_engine.md) §4.11.
 
 + **Units are not uniform, and are not all seconds.** Period/length fields are mostly in **beats** (converted with `60/BPM` by each effect's wrapper), but not all:
 
@@ -431,4 +434,4 @@ Things this document does not settle. Everything above is what the format does; 
 + **`#REVERB EFFECT PARAM`** — empty in every chart.
 + **`AIRL_ScaX`/`AIRR_ScaX`**, and whether `BAR` works without `BAROFF`.
 + **Echo's 7th field (id 8).** Described as a grid alignment / update period, but the Echo wrapper demonstrably does not call the grid snap, so that reading is at best imprecise. It is `0.00` on every row of every chart examined.
-+ **Composite effect id 13.** Stores `{tick, value}` keyframes and interpolates between them, dispatched like any other effect kind; what the interpolated value modulates was never reached. `p2 ∈ [-24,24]` reads plausibly as semitones, making an animated pitch bend the leading guess. See [`audio_engine.md`](audio_engine.md) §8.
++ **Id 13's fourth parameter function.** The wrapper builds four `std::function<float(float)>` for the routine, not three: mix, pitch, speed, and a *time* function that remaps the note's 0..1 progress before the other three are sampled at it. In this build that fourth one is the identity lambda at `0x1802be750`, so nothing exercises it. See [`audio_engine.md`](audio_engine.md) §4.11.

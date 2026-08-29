@@ -315,7 +315,8 @@ def parse_effects(sec, key):
 FX_NAMES = {
     1: "Retrigger", 2: "Gate", 3: "Flanger", 4: "TapeStop", 5: "SideChain",
     6: "Wobble", 7: "BitCrusher", 8: "Echo(RetriggerEx)", 9: "PitchShift",
-    10: "TapeStopEx", 11: "LowPassFilter", 12: "HighPassFilter", 13: "kind14",
+    10: "TapeStopEx", 11: "LowPassFilter", 12: "HighPassFilter",
+    13: "PitchSpeed",
 }
 TAB_NAMES = {1: "LowPassFilter", 2: "HighPassFilter", 3: "BitCrusher"}
 
@@ -385,13 +386,15 @@ def grid_snap_offset(tl, tick, length_beats):
 
 # Persistent per-effect DSP state, keyed by .vox effect type.
 #
-# The engine keeps these counters as members of one long-lived object - Wobble's
-# LFO lives at this+0x238 and is written back every block - so they run on across
-# notes instead of restarting at each one. There is one counter per effect type,
-# not per chart definition or per note, which is why this is keyed by type.
-# Cleared per render in main(). See audio_engine.md 4.9.
+# Wobble's LFO counter lives at `this+0x238` on a long-lived object and is
+# written back every block, which was read here as "it runs on across notes".
+# It does not: its wrapper FUN_180632820 stores zero into it before the
+# per-block loop of EVERY note (`mov dword ptr [rax+0x238], 0` @ 0x1806329eb).
+# The write-back is what carries the LFO from block to block WITHIN a note, and
+# nothing more. So nothing is threaded by default; `--wobble-persist` restores
+# the old model. Cleared per render in main(). See audio_engine.md 4.9.
 FXSTATE = {}
-PERSIST = {6}           # effect types whose state is threaded (6 = Wobble)
+PERSIST = set()         # effect types whose state is threaded across notes
 
 
 MIXSCALE = [1.0]        # diagnostic: scale every effect's wet/dry mix parameter
@@ -411,6 +414,12 @@ PITCHSHIFT_LEGACY_CURSOR = [False]
 # Tape Stop Ex was unimplemented for a long time; this restores that so the
 # implementation can be A/B'd against doing nothing. See audio_engine.md 4.6b.
 TAPESTOP_EX = [True]
+
+# Composite kind 14 (.vox id 13) was the last unimplemented effect; this
+# restores that so the implementation can be A/B'd against doing nothing, and
+# it matters more here than for the others because the vocoder underneath is
+# behavioural rather than transcribed. See audio_engine.md 4.11.
+PITCH_SPEED = [True]
 
 # Diagnostic: read Wobble's C6 as a period in beats (the old, wrong reading)
 # instead of a rate in cycles per beat. See run_fx and audio_engine.md 4.9.
@@ -534,7 +543,14 @@ def run_fx(L, R, eff, tl, tick, block, knob=None, lookahead=None):
     if t == 12:                                         # High Pass Filter
         return FX.fx_laser_hpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block,
                                res_scale=RES_SCALE[0], res_max_db=RES_MAX_DB[0])
-    return None                                         # 13 -> not implemented
+    if t == 13 and PITCH_SPEED[0]:                      # composite kind 14
+        # C1 mix%, C2 pitch in SEMITONES, C3 a playback-SPEED multiplier - no
+        # BPM scaling on any of them. `13, 100, 0, 1` is the neutral row and
+        # fx_pitch_speed returns the input untouched for it, exactly as the
+        # engine leaves PhaseGear disabled. audio_engine.md 4.11.
+        return FX.fx_pitch_speed(L, R, p[0], p[1], p[2], block=block,
+                                 lookahead=lookahead)
+    return None
 
 
 def run_tab(L, R, eff, knob, block):
@@ -758,11 +774,11 @@ def build_arg_parser():
                     help="per-block coefficient/LFO update size in frames "
                          "(the engine uses the audio callback size; 512 measured "
                          "closest against a capture)")
-    ap.add_argument("--no-persist", action="store_true",
-                    help="diagnostic: restart each effect's internal counter at "
-                         "every note instead of resuming. The engine keeps them "
-                         "in object members, so this is the wrong model - it "
-                         "exists to A/B the difference")
+    ap.add_argument("--wobble-persist", action="store_true",
+                    help="diagnostic: carry Wobble's LFO counter across notes "
+                         "instead of restarting it at each one. The wrapper "
+                         "zeroes the counter per note (0x1806329eb), so this is "
+                         "the wrong model - it exists to A/B the difference")
     ap.add_argument("--no-grid-snap", action="store_true",
                     help="diagnostic: start grid-locked effects at the note "
                          "instead of at the previous grid boundary. The engine "
@@ -808,6 +824,24 @@ def build_arg_parser():
                     help="diagnostic: leave Pitch Shift (.vox id 9) notes dry, "
                          "which is what this renderer did before 4.10 was "
                          "transcribed. Exists to A/B the implementation")
+    ap.add_argument("--fx-chain-overlap", action="store_true",
+                    help="diagnostic: let a second FX-button note read what the "
+                         "first one wrote, instead of the dry track. The engine "
+                         "restores the generator's source between notes "
+                         "(FUN_18062e3d0), so this is the wrong model - it "
+                         "doubles every simultaneous FX-L/FX-R hold. Exists to "
+                         "A/B the difference")
+    ap.add_argument("--fx-order-rl", action="store_true",
+                    help="diagnostic: process FX-R before FX-L, so FX-L wins "
+                         "where the two overlap. Which note the engine puts "
+                         "last is the order of the list at gen+0x20, which was "
+                         "not traced")
+    ap.add_argument("--no-pitch-speed", action="store_true",
+                    help="diagnostic: leave composite kind 14 (.vox id 13) "
+                         "notes dry, which is what this renderer did before "
+                         "4.11. Worth having: the parameter contract is "
+                         "transcribed but the phase vocoder underneath is a "
+                         "stand-in for PhaseGear, not a transcription of it")
     ap.add_argument("--pitchshift-legacy-cursor", action="store_true",
                     help="diagnostic: advance Pitch Shift's input cursor by a "
                          "running TOTAL of hops rather than the current pass's "
@@ -944,6 +978,7 @@ def main():
     TAPESTOP_EX[0] = not args.no_tapestop_ex
     TSE_FLOOR[0] = args.tapestop_ex_floor
     PITCHSHIFT[0] = not args.no_pitchshift
+    PITCH_SPEED[0] = not args.no_pitch_speed
     PITCHSHIFT_LEGACY_CURSOR[0] = args.pitchshift_legacy_cursor
     WOBBLE_LEGACY[0] = args.wobble_legacy_period
     GATE_HARD_BINARY[0] = args.gate_hard_binary
@@ -953,8 +988,8 @@ def main():
     PARAM_ASSIGN_SWEEP[0] = not args.no_param_assign_sweep
     RES_SCALE[0] = args.filter_resonance_scale
     RES_MAX_DB[0] = args.filter_max_resonance
-    if args.no_persist:
-        PERSIST.clear()
+    if args.wobble_persist:
+        PERSIST.add(6)
     folder = os.path.abspath(args.folder)
     base = os.path.basename(folder)
     voxes = sorted(f for f in os.listdir(folder) if f.endswith(".vox"))
@@ -1013,18 +1048,41 @@ def main():
     FXSTATE.clear()          # persistent DSP counters are per-render
 
 
-    # The FX dispatcher (FUN_18062e3d0) chains its two buttons by swapping the
-    # generator's source pointer to the partial result... but on the way out it
-    # RESTORES the source to the original track:
+    # The FX dispatcher (FUN_18062e3d0) chains the two effects OF ONE PAIR by
+    # swapping the generator's source pointer to the partial result:
+    #     if (lVar19 == 1 && iVar6 != -1) {          // second pair member
+    #         memcpy(param_5, param_4, param_6*2);   // scratch <- destination
+    #         puVar5 = *param_1; *puVar5 = param_5;  // source := scratch
+    #     }
+    # ...but on the way out it RESTORES the source to the original track:
     #     if (1 < lVar19) { puVar5 = *param_1; *puVar5 = param_2; ... }
-    # The laser dispatcher FUN_18062ea60 then runs against that restored source
-    # and memcpy's its result over the destination. So lasers read the DRY track
-    # and OVERWRITE whatever the FX buttons wrote - the two stages do not stack.
+    # and one call handles one NOTE (`lVar19 < 2` walks the pair's two map
+    # entries at stride 8, not the two buttons). So every FX note reads the DRY
+    # track, and the laser dispatcher FUN_18062ea60 then runs against that same
+    # restored source and memcpy's its result over the destination. Neither
+    # lasers nor a second FX note stack onto what an earlier one wrote.
     dryL, dryR = L.copy(), R.copy()
 
     # ---------------- FX buttons: TRACK2 = FX-L, TRACK7 = FX-R --------------
+    #
+    # FX-L and FX-R holding at once is common - 18776 same-pair and 9664
+    # different-pair overlaps across the 8255-chart corpus - and they do NOT
+    # chain: each note reads dry and writes the destination, so over the overlap
+    # the note processed LAST wins outright. Chaining them instead doubles every
+    # simultaneous hold; on `2337_recipinoriddle_oster` 5m m114 b4, where both
+    # buttons hold the same Wobble+PitchSpeed pair for a bar, chaining puts two
+    # sweeps in series at whatever relative LFO phase the persisted counter
+    # happens to hand them, which buries the 4-8 kHz band 11 dB below the
+    # cabinet capture. `--fx-chain-overlap` restores that older behaviour.
+    #
+    # Which note is "last" is the one thing here the disassembly does not pin:
+    # it is the order of the list at gen+0x20, whose producer was not traced.
+    # Iterating FX-L then FX-R (so FX-R wins a tie) is the assumption;
+    # `--fx-order-rl` swaps it. See audio_engine.md 8.1.
     if not args.no_fx:
-        for trk, label in (("#TRACK2", "FX-L"), ("#TRACK7", "FX-R")):
+        order = (("#TRACK7", "FX-R"), ("#TRACK2", "FX-L")) if args.fx_order_rl \
+            else (("#TRACK2", "FX-L"), ("#TRACK7", "FX-R"))
+        for trk, label in order:
             for line in sec.get(trk, []):
                 f = line.split()
                 if len(f) < 3:
@@ -1040,32 +1098,47 @@ def main():
                 i0, i1 = max(0, i0), min(n, i1)
                 if i1 - i0 < 16:
                     continue
-                # both halves of the pair, chained, as the dispatcher does
+
+                # Grid-locked effects start their phase at the previous grid
+                # boundary, which is BEFORE the note - so feed the DSP that much
+                # extra audio and keep only the part the note covers. The two
+                # pair members can want different amounts; the working slice
+                # starts at the earliest of them.
+                plan = []
                 for eff in fxdefs[di]:
                     if eff is None:
                         continue
-                    # Grid-locked effects start their phase at the previous grid
-                    # boundary, which is BEFORE the note - so feed the DSP that
-                    # much extra audio and keep only the part the note covers.
                     snap = 0
                     if (not args.no_grid_snap and int(eff[0]) in GRID_LOCKED
                             and len(eff) > 3):
                         snap = grid_snap_offset(tl, t0, eff[3])
-                    j0 = max(0, i0 - snap)
-                    pre = i0 - j0
+                    plan.append((eff, snap))
+                if not plan:
+                    continue
+
+                jmin = max(0, i0 - max(s for _, s in plan))
+                srcL, srcR = (L, R) if args.fx_chain_overlap else (dryL, dryR)
+                wl, wr = srcL[jmin:i1].copy(), srcR[jmin:i1].copy()
+
+                wrote = False
+                for eff, snap in plan:              # the pair, chained
+                    off = max(0, i0 - snap) - jmin
                     # lookahead lets Tape Stop Ex record past this note's end,
                     # as the engine's snapshot does (sdvx_fx.fx_tapestop_ex)
-                    res = run_fx(L[j0:i1].copy(), R[j0:i1].copy(), eff, tl, t0,
-                                 args.block, lookahead=(L, R, j0))
+                    res = run_fx(wl[off:].copy(), wr[off:].copy(), eff, tl, t0,
+                                 args.block, lookahead=(srcL, srcR, jmin + off))
                     name = FX_NAMES.get(int(eff[0]), "?")
                     if res is None:
                         skipped[name] = skipped.get(name, 0) + 1
                         continue
-                    L[i0:i1], R[i0:i1] = stage(res[0][pre:]), stage(res[1][pre:])
+                    wl[off:], wr[off:] = stage(res[0]), stage(res[1])
+                    wrote = True
                     key = "%s (%s)" % (name, label)
                     applied[key] = applied.get(key, 0) + 1
                     if snap:
                         snapped[key] = snapped.get(key, 0) + 1
+                if wrote:
+                    L[i0:i1], R[i0:i1] = wl[i0 - jmin:], wr[i0 - jmin:]
 
     # ---------------- #TRACK AUTO TAB: lasers borrowing an FX-button effect ---
     #

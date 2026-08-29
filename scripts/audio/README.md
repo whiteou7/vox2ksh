@@ -49,7 +49,7 @@ Those three are wired to the single kamui capture. The two below work on any son
 
 | file | what it does |
 |---|---|
-| `xcheck.py` | Aligns any recording to any chart — offset **and** clock drift, fitted over several correlation windows — renders, and scores **per effect**. `python xcheck.py <song folder> <recording> [-d 5m]`. Use `--render` to score a file you already have, `--extra=--no-persist` to pass flags to `apply_chart.py`. |
+| `xcheck.py` | Aligns any recording to any chart — offset **and** clock drift, fitted over several correlation windows — renders, and scores **per effect**. `python xcheck.py <song folder> <recording> [-d 5m]`. Use `--render` to score a file you already have, `--extra=--wobble-persist` to pass flags to `apply_chart.py`. |
 | `masscheck.py` | Runs `xcheck.py` across every recording in `../shared/reference/ksh/` and aggregates the per-effect gains. `python masscheck.py [-n 10] [--csv out.csv]`. 41 of the 86 reference folders currently match a chart in `data/music`. |
 
 ### Reading `xcheck` output — the one thing that will mislead you

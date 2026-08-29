@@ -80,7 +80,7 @@ The `.vox` chart id (`#FXBUTTON EFFECT INFO`, first column) maps to an internal 
 | 10 | 8  | 0x130 | 5  | `0x1806320d0` | `0x180640c20` | **Tape Stop Ex** |
 | 11 | 12 | 0x70  | 4  | `0x180630110` | `0x18063df40` | **Low Pass Filter** |
 | 12 | 13 | 0x88  | 4  | `0x180630760` | `0x18063e500` | **High Pass Filter** |
-| 13 | 14 | 0x190 | 3  | `0x180632c10` | (composite) | parameter-animated effect |
+| 13 | 14 | 0x190 | 3  | `0x180632c10` | `ApplyPitchAndSpeed` | **Pitch & Speed** (§4.11) |
 
 Names above are what the DSP actually *does*. Four ids are labelled differently in the inherited community notes; this trace is where the correction comes from:
 
@@ -453,7 +453,15 @@ periodSec = (60 / BPM) / C6
 
 So `6, 0, 3, 80.00, 500.00, 18000.00, 4.00, 1.40` = LPF, log-triangle, 80 % wet, 500↔18000 Hz, **4 wobbles per beat**, Q = 1.4 — not a 4-beat sweep. Reading it as a period runs that ubiquitous row 16× too slow: measured, the correct reading improves 13/13 capture-matched charts, mean exclusive gain +0.077 → +0.955 dB over 3247 frames. `--wobble-legacy-period` restores the old reading.
 
-The effect's LFO counter is an object member that runs continuously across notes. `apply_chart.py` threads it (`this+0x238`, written back every block); `--no-persist` restores per-note restarts. BitCrusher's sample-and-hold position and Gate's step counter are almost certainly members too, but were not traced and are not threaded — both score well (+2.3 / +3.2) so there is no measured pressure to change them.
+**The LFO counter restarts at every note.** It is an object member at `this+0x238`, written back every block, and that was read here as "it runs on across notes" — wrong, and it took a capture to notice. The wrapper `FUN_180632820` stores zero into it before the per-block loop of every note:
+
+```
+mov dword ptr [rax + 0x238], 0        ; 0x1806329eb, once per note, before the loop
+```
+
+The write-back carries the LFO from block to block *within* a note and does nothing more. Threading it across notes is audible on any chart where the wobble fires repeatedly: on `2337_recipinoriddle_oster` 5m at m114 b4 the persisted phase puts the sweep in the wrong part of its cycle and the region scores 3.671 against the capture where a per-note restart scores **1.877** (dry is 4.456), and the restart reproduces the capture's whole 3–15 kHz modulation profile row for row. `--wobble-persist` restores the old model. BitCrusher's sample-and-hold position and Gate's step counter are not threaded either — both score well (+2.3 / +3.2), and given this, neither should be threaded without finding the same kind of reset first.
+
+That capture also confirms the `max(periodSec, 0.1)` clamp independently. This chart asks for `(60/245)/4` = 61 ms, which the clamp holds at 100 ms, and the capture's envelope modulation peaks sharply at **10.0 Hz** — not the 16.3 Hz the unclamped rate would give.
 
 ### 4.10 Pitch Shift — `0x1806429b0`
 
@@ -523,6 +531,38 @@ for i in [0, count):                       # count = hop+lag (down) / hop (up)
 **One reading was settled by measurement rather than by disassembly.** The pass tail at `0x180643472` (`lea esi, [rsi + r12*2]`) advances the source cursor, and `r12` at that point holds a running *total* of hops rather than the current pass's hop — read literally, the input read position accelerates through a held note. That is what the register dataflow appears to say, but it renders badly (`-0.815` dB against the per-pass hop over the same 8 charts, and a +12 semitone shift collapses to near-silence because the cursor outruns the note). The per-pass hop is therefore the default; `--pitchshift-legacy-cursor` reproduces the accelerating reading. The likeliest explanation is a misattribution of which spilled stack slot `r12` is reloaded from across the vectorized tail, not an engine bug — but that has not been proven instruction-by-instruction, so it stays flagged here.
 
 The independent reimplementation of §9 also renders this effect, but not by reimplementing the engine's algorithm — it shells out to a generic pitch-shift library (`librosa` by default, optionally `pyrubberband`/Rubber Band). That is a different kind of approximation, not a second trace of the same DSP, so it neither corroborates nor contradicts anything above and does not appear in §9's agreement/disagreement tables.
+
+### 4.11 Pitch & Speed — `.vox` id 13, engine kind 14, wrapper `0x180632c10`
+
+This was the last effect in the table still labelled "composite / keyframed, purpose unknown". It is neither composite nor keyframed. The wrapper does no DSP: it reads the definition's three chart columns out of §3's parameter vector at `+0x190` (which the wrapper's own base pointer, 8 bytes lower, addresses as `+0x188`), builds `std::function<float(float)>` objects from them and calls one statically-linked routine whose RTTI carries the full signature:
+
+```
+std::shared_ptr<BMSoundLib2017::WaveBuffer> ApplyPitchAndSpeed(
+    short const*, unsigned __int64, int, int,
+    std::function<float(float)>,   // 1: PITCH, semitones
+    std::function<float(float)>,   // 2: SPEED, playback-rate multiplier
+    std::function<float(float)>,   // 3: MIX,   percent
+    std::function<float(float)>)   // 4: TIME,  progress remap
+```
+
+So the row `13, p1, p2, p3` is **`mix%, semitones, speed`**, and the earlier `{i32 tick, float value}` keyframe reading was a misparse of the 12-byte record — setup case `0xd` in `FUN_18022db60` pushes three consecutive floats from the parsed definition (`+0x16c`, `+0x170`, `+0x174`), exactly like case `0xb`/`0xc` push four for the two filters. There is one record per definition, indexed by the note's effect index, and nothing in it is a tick.
+
+**Each parameter is only honoured when it differs from its own neutral value.** The wrapper guards each function's construction with a `FLT_EPSILON` comparison — `|p2| > ε` at `0x180632cf6`, `|p3 − 1| > ε` at `0x180632db8`, `|p1 − 100| > ε` at `0x180632e5b` — and passes an *empty* `std::function` otherwise, which the routine reads as "leave that alone". Two consequences worth stating plainly:
+
+* `13, 100.00, 0.00, 1.00` is a **complete no-op**. It is also the single most common id-13 row in the corpus, which is why so many pairs look like they carry a mystery second stage and audibly carry nothing.
+* At mix 100 there is no mixing stage at all — the wet signal is the output.
+
+**Speed is a playback rate, not a duration.** `FUN_180784e10` snapshots the two values per synthesis frame and advances a 16.16 position accumulator by `(int)(65536.0/speed + 0.5)` per input frame consumed. Speed `2` therefore eats two input frames per output frame (the region plays twice as fast, pulling in audio from after the note), `0.5` eats half, and `speed <= 0` short-circuits the accumulator to full without consuming any input — a **freeze**. That is precisely the corpus range: `p3 ∈ {0, 0.5, 1, 2}`. Pitch is independent of it and is a plain `powf(2, semitones/12)` at `0x18062d92e`, unclamped (`p2 ∈ [−24, 24]`, ±2 octaves).
+
+**The dry reference is not the dry track when speed ≠ 1.** `FUN_18062ca80` renders the region twice: once with both parameters, and once more with the same speed but a pitch function that is the constant-`0.0` lambda at `0x1802be750` (`0x18062cf79`). The mix crossfades against *that* second render, not against the untouched audio — it has to, because a speed-shifted signal and the original are no longer the same audio at the same instant and crossfading them would flam. At speed 1 the second pass is skipped and the raw input is the reference (`0x18062ce2b`).
+
+**Buffer geometry.** Input runs from the note's first frame to the **end of the buffer**, not to the note's end (`0x18062cd2f`) — that is what lets a speed > 1 note pull audio in from after itself. Output is exactly `end − start + 1` frames and is `memcpy`d back over that range (`0x180633227`).
+
+**The engine underneath is a third-party FFT phase vocoder**, PhaseGear (`BMSoundLib2017::PhaseGearDriverImpl`, ctor `0x180620010`, per-block driver `0x180620860`, core `PhaseGearCore` / `PhaseGearSignalProc` / `PhaseGearLib::FFTHandler`). Its geometry is legible in `PhaseGearCore::Initialize` `0x180784910`: frame `= 1 << (log2(sampleRate) − 4)` = **2048** at 44100, synthesis hop `= frame >> 2` (4× overlap), ring buffer primed with `frame/2` zeros. Pitch and speed reach it through `0x180784600` → `core+0x38` and `0x180784620` → `core+0x34`, gated by the enable flag at `core+0x30`; a further formant section (`core+0x44..0x4c`) and a four-band section (`core+0x60`, stride `0x18`) exist but this caller leaves both off.
+
+**Implemented** in `sdvx_fx.fx_pitch_speed` (`--no-pitch-speed` restores the old do-nothing behaviour). **The parameter contract above is transcribed; the vocoder is not.** PhaseGear's analysis and synthesis stages are a library this project does not have, and tracing them to the sample was not attempted — `fx_pitch_speed` uses a textbook phase vocoder at PhaseGear's own frame and hop, with identity phase locking, plus a resample for pitch. The time and pitch mapping is exact (verified on synthetic sweeps: measured output frequency lands within 0.4 % of `f(t · speed) · 2^(semitones/12)` for every combination of `speed ∈ {0.5, 1, 2}` and `semitones ∈ {0, ±7, ±12}`); the timbre is behavioural. Treat any score change against a capture as evidence about the contract, not about the vocoder.
+
+One consequence of the guards is worth keeping in mind when reading a render report: an id-13 note now counts as *applied* even when all three columns are neutral, because that is what the engine does — it runs the effect and the effect changes nothing.
 
 ---
 
@@ -655,10 +695,13 @@ the layered SE (6.1)
 effect behaviour
   --laser-mode M   chain | dry | add - how a laser combines with an FX hold (8.1)
   --no-grid-snap   start Retrigger at the note instead of the grid boundary (5.2)
-  --no-persist     restart each effect's counter per note instead of resuming (4.9)
+  --wobble-persist carry Wobble's LFO across notes instead of restarting (4.9)
+  --fx-chain-overlap  let a second FX note read what the first wrote (8.1)
+  --fx-order-rl    process FX-R before FX-L, so FX-L wins an overlap (8.1)
   --no-auto-tab    skip #TRACK AUTO TAB spans (6.3)
   --no-param-assign-sweep   run borrowed effects at authored parameters (6.3)
   --no-tapestop-ex leave Tape Stop Ex notes dry (4.6b)
+  --no-pitch-speed leave composite kind 14 (id 13) notes dry (4.11)
   --tapestop-ex-floor X     Tape Stop Ex envelope floor, the one fitted value (4.6b)
   --tapestop-ex-3phase      the alternative phase model (9.5)
   --wobble-legacy-period    read Wobble's C6 as a period, not a rate (4.9)
@@ -1048,8 +1091,8 @@ Which slam sample plays is settled for this chart: `virtical_shot[0]` scores 1.9
 
 * **The SE-versus-music level is derived (§6.1.4) but ~2 dB under the fit.** A constant ×0.8 on the music path would reconcile the two exactly; nothing found so far puts one there.
 * **What selects `fs00_virtical_se01` vs `fs01_virtical_se02`** is authored into the kind-6 event stream, and the producer of that vector was not found (§6.1.1). Worth revisiting during the notes element: note and laser gameplay events very likely live in the same vector.
-* **Pitch Shift (id 9)** — algorithm identified (PSOLA, §4.10) but not implemented.
-* **Composite kind 14 (id 13)** — partly transcribed. Setup case `0xd` in `FUN_18022db60` appends one 12-byte `{i32 tick, float value}` **keyframe** per definition into a vector at `this+400`, separate from §3's parameter-vector table. At playback it is dispatched through the ordinary per-block switch (`case 0xe`), so it behaves like a normal in-place effect. Wrapper `FUN_180632c10` binary-searches that vector for the current note and builds a `std::function<float(float)>` over the two neighbouring keyframes — constant if their values match within `FLT_EPSILON`, linear otherwise. **What the interpolated value drives was never reached.** Chart ranges for further probing: `p1 ∈ [0,100]` (mix), `p2 ∈ [-24,24]`, `p3 ∈ {0, 0.5, 1, 2}`, 316 occurrences. An independent reimplementation types it `PITCH_SHIFT_EX` with fields `(mix, semitones, ex_param)`, which matches `p2`-as-semitones and makes an animated pitch bend the leading guess.
+* **Kind 14 (id 13) — PhaseGear's internals.** The effect's contract is transcribed (§4.11) and shipped; the FFT phase vocoder it drives is not. `fx_pitch_speed` substitutes a textbook vocoder at PhaseGear's own frame (2048) and hop (512), so pitch and time land exactly where the engine puts them but the timbre is a stand-in. Transcribing `PhaseGearSignalProc` (`0x180787e20` init, `0x1807894b0` synthesis, `PhaseGearLib::FFTHandlerF`) is what would close this.
+* **Kind 14's fourth parameter function.** The wrapper builds four callables, not three: mix, pitch, speed, and a *time* function that remaps the note's 0..1 progress before the other three are sampled at it. In this build it is the identity lambda at `0x1802be750` and nothing exercises it, so what it exists for is unknown.
 * **Tape Stop Ex's envelope floor** (`this+0x46`) and its phase-tracking field (`this+0x224`) are untraced; the metric cannot pin the floor (§4.6b).
 * **Effect state continuity** is threaded for Wobble only; BitCrusher's hold position and Gate's step counter are almost certainly object members too (§4.9).
 * **Block size** in the game is the audio device's callback size (`gen+0x1a0`). Since coefficients and LFOs update per block, output is block-size dependent — match `--block` when diffing against a capture.
@@ -1067,7 +1110,22 @@ Charts routinely have two effects live at once. Three possible models, with `x` 
 
 Order matters in `chain` and not in `add`: a bit crusher into a lowpass filters already-aliased audio, a lowpass into a bit crusher aliases already-smooth audio.
 
-**FX-L + FX-R, both held — genuinely chained.** The FX dispatcher `FUN_18062e3d0` loops its sub-index and swaps the generator's source pointer to the partial result, so the second button reads the first's output.
+**FX-L + FX-R, both held — NOT chained; the later note overwrites.** This was read backwards here for a long time, and the correction is worth stating precisely because the two readings look identical in the decompiler.
+
+`FUN_18062e3d0` handles **one note**, and its `lVar19 < 2` loop walks **the pair's two effects**, not the two buttons: the map at `gen+0x38` stores each pair as two `{kind, index}` entries at stride 8 under a single key, and the loop indexes them as `*(int *)(entry + lVar19 * 8 + 0x24)`. Those two *do* chain, by exactly the mechanism previously credited to the buttons —
+
+```
+if (lVar19 == 1 && iVar6 != -1) {            // second member of the pair
+    memcpy(param_5, param_4, param_6 * 2);   // scratch <- destination
+    puVar5 = *param_1; *puVar5 = param_5;    // generator source := scratch
+}
+```
+
+— and on the way out the source is restored to the original track (`if (1 < lVar19) { puVar5 = *param_1; *puVar5 = param_2; ... }`). The caller `FUN_18062ef70` then invokes the dispatcher once **per FX note** over a list at `gen+0x20`, all reading the same restored `param_2` and writing the same destination `param_4`, which was seeded with a straight copy of the dry track. So a second FX note reads dry and overwrites the first wherever they overlap.
+
+This is not an edge case: across the 8255-chart corpus FX-L and FX-R overlap on **18776 same-pair and 9664 different-pair holds**. Chaining them doubles every one of those. The instance that exposed it is `2337_recipinoriddle_oster` 5m at measure 114 beat 4, where both buttons hold the same Wobble + PitchSpeed pair for a full bar: chained, the two LFO sweeps run at whatever relative phase the persisted counter hands them, the composite cutoff tracks the lower of the two at every instant, and the 4–8 kHz band sits **11 dB** below the cabinet capture with the sweep's modulation depth halved (0.083 against the capture's 0.165). Reading dry per note puts the band within 0.8 dB of the capture and the depth at 0.192, and improves every scored region of that chart — Wobble's gain +0.301 → +0.592, PitchSpeed +0.461 → +0.697, Tape Stop Ex +3.204 → +3.552, with `idle` and `laser` unmoved. `--fx-chain-overlap` restores the old model.
+
+**Which** note is last is the one part still open: it is the order of the list at `gen+0x20`, whose producer was not traced. The renderer iterates FX-L then FX-R, so FX-R wins a tie; `--fx-order-rl` swaps that. It makes no difference on a same-pair overlap (the majority), and no capture-matched chart with a long different-pair overlap has been scored both ways yet.
 
 **The default peak filter + anything — a separate stage.** The C4 = 0 laser sound is a device `_DSFXParamEq` (§7.1), downstream of the whole generator and upstream of the SE mix, so it always stacks on top in that fixed order.
 
@@ -1082,7 +1140,9 @@ Measurement says `chain`, decisively. Rendering the 20 charts with the most FX-h
   add    mean +0.895   frame-weighted +0.978   wins  0/16
 ```
 
-The three charts preferring `dry` do so by 0.1–0.5 dB, inside the spread; `add` is ruled out outright. An independent reimplementation reads the same path as `chain` (§9.1). So `chain` ships, and **the binary reading is what needs re-examining** — specifically whether `FUN_18062e3d0`'s source-pointer restore applies only to the FX sub-chain, or whether `param_2` already points at the FX result by the time it is restored.
+The three charts preferring `dry` do so by 0.1–0.5 dB, inside the spread; `add` is ruled out outright. An independent reimplementation reads the same path as `chain` (§9.1). So `chain` ships, and the disagreement stands.
+
+**That disagreement got sharper, not softer, when the FX-note path above was straightened out.** The escape hatch this section used to leave open — that `param_2` might already point at the FX result by the time the source is restored — is gone: `param_2` is the dispatcher's own source argument, the same value the caller passes on every note, and the destination `param_4` is a separate buffer seeded from the dry track. The restore genuinely restores the original. So the binary says `dry` for the laser stage without ambiguity, and the capture still says `chain` by 0.6 dB over 4656 frames. One of the two is measuring something this model does not represent — a candidate worth testing is that the laser stage is not reading the generator's source pointer at all on the path that actually runs.
 
 **Two consequences wherever effects stack.** *Mix compounds rather than averages*: every effect computes `out = (1-mix)·dry + mix·wet` against **its own input**, so two effects at 50 % leave the original at 25 %, not 50 %. And *there is an int16 requantisation between stages* (`FUN_18063dc40` → `FUN_18063d9e0`, §2), so a chain can clip **mid-chain** — a resonant filter feeding a boosting effect hard-clips at the boundary in a way an all-float implementation would not reproduce. `--no-stage-clip` disables it; the engine does clip, so the default keeps it. This is per *stage*, and is not licence to requantise inside a DSP leaf — §4.1 is what happens when that line gets crossed.
 
@@ -1113,7 +1173,7 @@ An independent reimplementation of the same engine (`https://github.com/Rosemoe/
 * **Wobble's rate field** (§4.9) — their code names C6 `frequency` and divides by it. Confirmed in our own disassembly before adopting; 13/13 charts improved, +0.878 dB. This alone justified the comparison.
 * **A concrete model for the `#TAB PARAM ASSIGN INFO` sweep** (§6.3), whose direction was unresolved here: `min + (max − min) · laserValue` with `laserValue` clamped 0‥1, `param1`/`param2` by chain position, refreshed every 512 samples. Adopted and confirmed by measurement.
 * **`C4 = 6` is the param-assign control source**, not an inert laser.
-* **Composite id 13 typed as `PITCH_SHIFT_EX`** — an independent trace landing on the same reading upgrades §8's guess from speculation to probable. Still not transcribed at the sample level by either side.
+* **Composite id 13 typed as `PITCH_SHIFT_EX` with fields `(mix, semitones, ex_param)`** — half right, and the half that was right is the half that mattered. §4.11 later settled it from the DLL: the routine is `ApplyPitchAndSpeed`, `p2` really is semitones, and the third field they left as `ex_param` is a **playback-speed multiplier**, not a pitch modifier. Neither side transcribes the vocoder itself.
 
 ### 9.3 Where the two disagreed
 

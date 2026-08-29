@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run xcheck.py across every reference recording and aggregate by effect.
 
-    python masscheck.py [-n 10] [-j 8] [--extra=--no-persist] [--csv out.csv]
+    python masscheck.py [-n 10] [-j 8] [--extra=--wobble-persist] [--csv out.csv]
 
 Pairs run concurrently across -j worker threads (default: cpu count). Each
 xcheck.py call is its own subprocess doing numpy/ffmpeg work, so subprocess.run

@@ -8,7 +8,7 @@ Conversion splits into three independent problems. They share the `.vox` parser 
 
 | element | what it covers | status |
 |---|---|---|
-| **audio** | The FX/laser effect engine, the device ParamEq, the music duck, the layered SE bank, the per-sample `S3V0` header gains. | **Largely done.** Composite kind 14 (id 13) is still only partly transcribed. |
+| **audio** | The FX/laser effect engine, the device ParamEq, the music duck, the layered SE bank, the per-sample `S3V0` header gains. | **Largely done.** Every effect id is now implemented; kind 14 (id 13) is a Pitch & Speed effect whose parameter contract is transcribed but whose phase vocoder is a stand-in — see `specs/audio_engine.md` §4.11. |
 | **notes** | BT/FX/laser note data, timing, BPM and time-signature changes, slams, curve types, chip vs hold — the `.ksh` chart body. | **Done** |
 | **camera** | `#SPCONTROLER` track data: lane tilt, spin/swing, top/bottom zoom. `.ksh` expresses only a subset, so this needs mapping decisions on top of transcription. | **Largely done.** Zoom top/bottom is implemented. Spin needs more researching on types. Pretilt is a massive headache. |
 
