@@ -2,4 +2,4 @@
 GitHub releases by release_check.py. Bump this on every tagged release -
 it is what gets compared against the repo's latest release tag."""
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
