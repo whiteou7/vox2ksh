@@ -824,6 +824,12 @@ def build_arg_parser():
                     help="diagnostic: leave Pitch Shift (.vox id 9) notes dry, "
                          "which is what this renderer did before 4.10 was "
                          "transcribed. Exists to A/B the implementation")
+    ap.add_argument("--laser-chain-overlap", action="store_true",
+                    help="diagnostic: let a second laser run read what the "
+                         "first one wrote, so VOL-L and VOL-R stack. The engine "
+                         "snapshots its source once before dispatching any run "
+                         "(FUN_18062ef70), so this is the wrong model - it "
+                         "doubles every overlapping laser. Exists to A/B it")
     ap.add_argument("--fx-chain-overlap", action="store_true",
                     help="diagnostic: let a second FX-button note read what the "
                          "first one wrote, instead of the dry track. The engine "
@@ -1250,6 +1256,11 @@ def main():
     # run rather than an effect of its own.
     peak_knob = np.zeros(n, np.float32)     # device-EQ knob, 0..127, per sample
     peak_off = np.zeros(n, bool)            # a laser with C4 != 0 mutes the EQ
+
+    # The source every laser run reads: the FX-button result, snapshotted ONCE
+    # before any laser runs. See _apply_run. --laser-chain-overlap points this
+    # at the live buffer instead, which lets VOL-L and VOL-R stack.
+    chainL, chainR = (L, R) if args.laser_chain_overlap else (L.copy(), R.copy())
     if not args.no_laser:
         for trk, label in (("#TRACK1", "VOL-L"), ("#TRACK8", "VOL-R")):
             pts = []
@@ -1313,8 +1324,8 @@ def main():
                     peak_off[i0:i1] = True
 
             for run in runs:
-                _apply_run(L, R, dryL, dryR, run, tabdefs, tl, args.block,
-                           applied, skipped, label, n)
+                _apply_run(L, R, dryL, dryR, chainL, chainR, run, tabdefs, tl,
+                           args.block, applied, skipped, label, n)
 
     # ---------------- the default laser sound: one device-level ParamEq -----
     #
@@ -1492,11 +1503,17 @@ def main():
     return 0
 
 
-def _apply_run(L, R, dryL, dryR, run, tabdefs, tl, block, applied, skipped, label, n):
+def _apply_run(L, R, dryL, dryR, chainL, chainR, run, tabdefs, tl, block,
+               applied, skipped, label, n):
     """One contiguous run of laser events that all share the same filter index.
 
-    Reads from the DRY track and overwrites the output, matching the engine -
-    see the note in main() about FUN_18062e3d0 restoring the source pointer.
+    `chainL/chainR` is the source every run reads in `chain` mode: a snapshot of
+    the track taken ONCE, after the FX buttons and before any laser. The engine
+    takes exactly that snapshot - `memcpy(scratch, destination, len)` then
+    `*generatorSource = scratch` in FUN_18062ef70, immediately before the loop
+    that calls FUN_18062ea60 once per run - so overlapping laser runs each read
+    it and `memcpy` their own result over the destination. Lasers stack onto the
+    FX buttons but NOT onto each other; the later run wins the overlap.
     """
     filt = run[0][4]
     if filt >= 6 or (filt > 0 and (filt - 1) >= len(tabdefs)):
@@ -1544,7 +1561,7 @@ def _apply_run(L, R, dryL, dryR, run, tabdefs, tl, block, applied, skipped, labe
     # the disassembly points at "dry", the capture prefers "chain", and "chain"
     # is what ships.
     if MODE[0] == "chain":
-        srcL, srcR = L[i0:i1].copy(), R[i0:i1].copy()
+        srcL, srcR = chainL[i0:i1].copy(), chainR[i0:i1].copy()
     else:
         srcL, srcR = dryL[i0:i1].copy(), dryR[i0:i1].copy()
 

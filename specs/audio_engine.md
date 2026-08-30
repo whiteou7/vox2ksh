@@ -698,6 +698,7 @@ effect behaviour
   --wobble-persist carry Wobble's LFO across notes instead of restarting (4.9)
   --fx-chain-overlap  let a second FX note read what the first wrote (8.1)
   --fx-order-rl    process FX-R before FX-L, so FX-L wins an overlap (8.1)
+  --laser-chain-overlap  let VOL-L and VOL-R stack instead of overwriting (8.1)
   --no-auto-tab    skip #TRACK AUTO TAB spans (6.3)
   --no-param-assign-sweep   run borrowed effects at authored parameters (6.3)
   --no-tapestop-ex leave Tape Stop Ex notes dry (4.6b)
@@ -1129,9 +1130,20 @@ This is not an edge case: across the 8255-chart corpus FX-L and FX-R overlap on 
 
 **The default peak filter + anything — a separate stage.** The C4 = 0 laser sound is a device `_DSFXParamEq` (§7.1), downstream of the whole generator and upstream of the SE mix, so it always stacks on top in that fixed order.
 
-**Tab-laser effect (C4 = 1..5) + FX button — the one place the disassembly and the capture disagree.** The disassembly points at `dry`: `FUN_18062e3d0` restores the generator's source to the original track on the way out (`if (1 < lVar19) { puVar5 = *param_1; *puVar5 = param_2; ... }`), and the laser dispatcher `FUN_18062ea60` then runs against that restored source and `memcpy`s its result over the destination.
+**Tab-laser effect (C4 = 1..5) + FX button — `chain`, and the disassembly agrees.** This was written up here for a long time as "the one place the disassembly and the capture disagree", on the strength of `FUN_18062e3d0` restoring the generator's source to the original track on the way out. That restore is real but it is about **FX notes**, not about lasers — it happens at the end of each note so the *next note* reads dry. What the laser stage reads is set later, in `FUN_18062ef70`, immediately before the loop that dispatches the runs:
 
-Measurement says `chain`, decisively. Rendering the 20 charts with the most FX-hold/tab-laser overlap in all three modes and scoring the overlap frames themselves against each chart's own capture (low-confidence alignments dropped):
+```
+memcpy(scratch, param_4, len);      // scratch <- the DESTINATION, i.e. the FX result
+puVar23 = *param_1;
+*puVar23 = scratch;                 // generator source := that snapshot
+...
+for (run = first; run != last; run += 0x18)
+    FUN_18062ea60(param_1, param_4, run);
+```
+
+So a laser reads what the FX buttons wrote. There is no disagreement: `chain` is what the binary says and what the capture says.
+
+The measurement that established `chain` still stands on its own. Rendering the 20 charts with the most FX-hold/tab-laser overlap in all three modes and scoring the overlap frames themselves against each chart's own capture (low-confidence alignments dropped):
 
 ```
 16 charts, 4656 overlap frames:
@@ -1140,9 +1152,11 @@ Measurement says `chain`, decisively. Rendering the 20 charts with the most FX-h
   add    mean +0.895   frame-weighted +0.978   wins  0/16
 ```
 
-The three charts preferring `dry` do so by 0.1–0.5 dB, inside the spread; `add` is ruled out outright. An independent reimplementation reads the same path as `chain` (§9.1). So `chain` ships, and the disagreement stands.
+The three charts preferring `dry` do so by 0.1–0.5 dB, inside the spread; `add` is ruled out outright. An independent reimplementation reads the same path as `chain` (§9.1).
 
-**That disagreement got sharper, not softer, when the FX-note path above was straightened out.** The escape hatch this section used to leave open — that `param_2` might already point at the FX result by the time the source is restored — is gone: `param_2` is the dispatcher's own source argument, the same value the caller passes on every note, and the destination `param_4` is a separate buffer seeded from the dry track. The restore genuinely restores the original. So the binary says `dry` for the laser stage without ambiguity, and the capture still says `chain` by 0.6 dB over 4656 frames. One of the two is measuring something this model does not represent — a candidate worth testing is that the laser stage is not reading the generator's source pointer at all on the path that actually runs.
+**Laser + laser — snapshot, then overwrite.** The snapshot above is taken **once**, before the run loop, and each `FUN_18062ea60` call `memcpy`s its own result over the destination. So two laser runs live at the same time both read the same pre-laser audio and the later one wins the overlap; VOL-L and VOL-R stack onto the FX buttons but never onto each other. This is the laser twin of the FX-note rule and was found the same way, from a capture: `2335_specterchaser_coyaan` 5m measure 62 beats 3–4 has VOL-L held at position 1.0 and VOL-R sweeping, both on `C4 = 2` (LPF 600↔15000 Hz, Q 5), with no FX button live — as clean a laser-versus-laser isolation as the corpus offers. VOL-L's held knob pins that LPF at 600 Hz for the whole two beats, so chaining the two buries the region: mean band deviation from the capture **9.78 dB**, against **2.51 dB** for the later run alone. `--laser-chain-overlap` restores the stacking model.
+
+The same region says something about §4.1b's resonance cap, which is a listening-comfort default rather than a transcription. The capture shows the authored Q = 5 resonance plainly — its 0.8–1.6 kHz band sits at −7.2 dB where the dry track is at −12.8 — and running that Q uncapped takes the deviation from 2.51 dB to **0.94 dB**, i.e. essentially onto the capture. On a high-Q laser the cap is not a rounding difference.
 
 **Two consequences wherever effects stack.** *Mix compounds rather than averages*: every effect computes `out = (1-mix)·dry + mix·wet` against **its own input**, so two effects at 50 % leave the original at 25 %, not 50 %. And *there is an int16 requantisation between stages* (`FUN_18063dc40` → `FUN_18063d9e0`, §2), so a chain can clip **mid-chain** — a resonant filter feeding a boosting effect hard-clips at the boundary in a way an all-float implementation would not reproduce. `--no-stage-clip` disables it; the engine does clip, so the default keeps it. This is per *stage*, and is not licence to requantise inside a DSP leaf — §4.1 is what happens when that line gets crossed.
 
