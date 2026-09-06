@@ -89,17 +89,21 @@ class Timeline:
             self.bpms = [(0, 0, 0, 120.0)]
         self.bpms.sort()
 
-        # cumulative ticks at the start of each measure, and each measure's
-        # own tick length - computed far enough to cover any real chart.
+        # cumulative ticks at the start of each measure, each measure's own
+        # tick length, and the cell-count of one of its beats - computed far
+        # enough to cover any real chart.
         self._measure_tick = {}
         self._measure_len = {}
+        self._measure_cpb = {}
         acc, mi = 0, 0
         for meas in range(0, 4000):
             while mi + 1 < len(self.beats) and self.beats[mi + 1][0] <= meas:
                 mi += 1
             self._measure_tick[meas] = acc
             num, den = self.beats[mi][1], self.beats[mi][2]
-            length = int(round(num * (4.0 / den) * self.res))
+            cpb = int(round((4.0 / den) * self.res))
+            self._measure_cpb[meas] = cpb
+            length = num * cpb
             self._measure_len[meas] = length
             acc += length
         self._last_measure_tick = acc
@@ -118,7 +122,7 @@ class Timeline:
     # ---- measure/beat/cell <-> tick ----
 
     def abs_tick(self, m0, b0, t):
-        return self._measure_tick[m0] + b0 * self.res + t
+        return self.measure_start_tick(m0) + b0 * self.cells_per_beat(m0) + t
 
     def tick_of(self, poss):
         return self.abs_tick(*parse_pos(poss))
@@ -128,7 +132,7 @@ class Timeline:
             return self._measure_tick[measure0]
         # fall back to extrapolating with the last known time signature
         num, den = self.beats[-1][1], self.beats[-1][2]
-        length = int(round(num * (4.0 / den) * self.res))
+        length = num * int(round((4.0 / den) * self.res))
         base_m = max(self._measure_tick)
         return self._measure_tick[base_m] + (measure0 - base_m) * length
 
@@ -136,7 +140,24 @@ class Timeline:
         if measure0 in self._measure_len:
             return self._measure_len[measure0]
         num, den = self.beats[-1][1], self.beats[-1][2]
-        return int(round(num * (4.0 / den) * self.res))
+        return num * int(round((4.0 / den) * self.res))
+
+    def cells_per_beat(self, measure0):
+        """Cells in one *beat column* step at `measure0` - res*4/den, NOT res.
+
+        The beat column of a `mmm,bb,cc` timing counts the time signature's
+        own denominator unit, not quarter notes: a 15/16 measure runs
+        `bb` = 1..15 and each step is a 16th note, so with the usual
+        res = 48 (cells per 1/4 note) that is 12 cells, not 48. Reading it
+        as quarter notes puts every event past the first beat of such a
+        measure several measures late - vox_format.md, "Number of cells per
+        beat = x / beat value". Cell counts are absolute either way: `cc`
+        stays 0..cells_per_beat-1 in the same 1/res-of-a-quarter unit.
+        """
+        if measure0 in self._measure_cpb:
+            return self._measure_cpb[measure0]
+        den = self.beats[-1][2]
+        return int(round((4.0 / den) * self.res))
 
     def measure_of_tick(self, tick):
         """tick -> (measure0, offset_within_measure)."""

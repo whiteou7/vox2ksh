@@ -647,6 +647,32 @@ Through the metric this does not look like a timing bug: it looks like *every DS
 
 `scripts/shared/vox.py` has always read the tag correctly; `Timeline` now takes the resolution from the chart, with `res=` as an override.
 
+### 5.3b The beat column is in denominator units, not quarter notes
+
+The other half of the same triple, and the same class of bug. `Timeline.abs_tick` read the beat of `measure,beat,cell` as *quarter notes* — `measure_tick + beat * res + cell`. It is only the denominator that says how long a beat is: `res * 4 / den` cells, so 48 in 4/4 but 12 in 15/16. Measure *lengths* were already computed from the denominator, so the bug was confined to positions inside a non-`/4` measure, and there it is large: `2152_nemsysarena_tonarinoniwa_3e`'s 12/16 measure 55 addresses beat 12, whose true offset is 132 cells; the old reading put it at 528, in a measure only 144 cells long — 2¾ measures late.
+
+Scoped by the corpus rather than guessed at: **501 of 8254 charts** carry a non-`/4` signature, 416 of them place events where this moves, and 47,156 timing rows were pushed outside their own measure. On the 7751 charts that are `/4` throughout the fix is a proven no-op — `res * 4 / 4 == res`, and re-deriving every tick both ways moves not one of them.
+
+Measured on the 34 (chart, capture) pairs of the 645 whose chart has a non-`/4` measure at all; the other 611 render identically by construction. **Every effect improves and none regresses**, 84 chart-rows up against 4 down:
+
+| effect | before | after | Δ | frame-wtd | up/down |
+|---|---|---|---|---|---|
+| PitchShift | +2.137 | +2.137 | +0.000 | +0.000 | 0/0 |
+| HighPassFilter | +5.254 | +5.407 | +0.153 | +0.163 | 1/0 |
+| SideChain | +2.612 | +3.104 | +0.492 | +0.503 | 6/1 |
+| Flanger | +0.901 | +1.401 | +0.500 | +0.500 | 13/0 |
+| Wobble | +1.518 | +2.045 | +0.526 | +0.605 | 10/1 |
+| Echo(RetriggerEx) | +2.111 | +2.781 | +0.670 | +0.856 | 11/0 |
+| Retrigger | +1.917 | +2.595 | +0.678 | +0.889 | 4/1 |
+| BitCrusher | +1.439 | +2.119 | +0.680 | +0.420 | 17/0 |
+| Gate | +2.099 | +2.993 | +0.895 | +1.162 | 13/0 |
+| TapeStop | +3.271 | +4.350 | +1.079 | +0.945 | 7/0 |
+| PitchSpeed | +2.388 | +4.056 | +1.668 | +1.524 | 2/0 |
+
+The shape of the win is the tell that this is a timing fix and not a DSP one: the big movers are charts where an effect was scoring *negative* — actively making its own region worse — and crosses to positive intact. Gate on `re_call/mxm` goes −2.198 → +3.536 over 367 frames, Tape Stop on `extridia/mxm` −3.478 → +4.881, Wobble on `extridia/mxm` −1.745 → +2.813. That is a region that was in the wrong place, not a filter with the wrong coefficients.
+
+All four regressions are on one chart, `spear_of_justice/mxm` (SideChain −0.937, Retrigger −0.148), and both of those rows were already negative before the change; §4's rule 3 applies — the metric ranks, it cannot diagnose, and one chart against 84 is not a finding.
+
 ---
 
 ## 6. Reference implementation

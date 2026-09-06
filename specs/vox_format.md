@@ -40,6 +40,8 @@ All VOX files begin with the following three lines:
 mmm,bb,cc
 ```
 
+**The beat column counts the local time signature's own denominator unit, not quarter notes.** A 15/16 measure runs `bb` = 1..15 one *16th note* apart; a 4/4 measure runs `bb` = 1..4 one quarter apart. This is worth stating twice because reading `bb` as quarter notes is silent and plausible — it is right on the 94 % of charts that are 4/4 throughout, and puts every event past the first beat of a `/8`, `/16` or `/32` measure whole measures late on the rest.
+
 **Time signatures** describe the division of each measure into beats and cells, and are made up of a top and a bottom number:
 
 + The top number is the **number of beats per measure**.
@@ -49,7 +51,9 @@ mmm,bb,cc
     + This is usually a power of 2 (although other divisors of $x$ should work).
     + **Number of cells per beat** = $x$ / beat value
 
-For example: with $x$ = 192, a bar with time signature 4/4 has 4 beats per measure and 192/4 = 48 cells per beat.
+For example: with $x$ = 192, a bar with time signature 4/4 has 4 beats per measure and 192/4 = 48 cells per beat; a 15/16 bar has 15 beats and 192/16 = 12 cells per beat, so the bar is 180 cells long and its last addressable position is `bbb,15,11`.
+
+Both halves hold across the whole 8254-chart corpus: over 7,492,359 timing rows, **no row has `bb` >= the numerator and none has `cc` >= $x$ / beat value**, for any resolution or denominator present (48, 144, 240 and 480; `/1` through `/36`).
 
 Time signature changes live in `#BEAT INFO`, BPM changes in `#BPM INFO`.
 

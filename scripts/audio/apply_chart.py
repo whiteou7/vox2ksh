@@ -110,15 +110,19 @@ class Timeline:
             raise SystemExit("chart has no #BPM INFO")
         self.bpms.sort()
 
-        # cumulative ticks at the start of each measure
+        # cumulative ticks at the start of each measure, plus the cell count
+        # of one beat *column* step there (see abs_tick)
         self._measure_tick = {}
+        self._measure_cpb = {}
         acc, mi = 0, 0
         for meas in range(0, 2000):
             while mi + 1 < len(self.beats) and self.beats[mi + 1][0] <= meas:
                 mi += 1
             self._measure_tick[meas] = acc
             num, den = self.beats[mi][1], self.beats[mi][2]
-            acc += int(num * (4.0 / den) * self.res)
+            cpb = int(round((4.0 / den) * self.res))
+            self._measure_cpb[meas] = cpb
+            acc += num * cpb
 
         # BPM changes as absolute ticks, plus the elapsed seconds at each
         self._bpm_pts = []
@@ -132,7 +136,17 @@ class Timeline:
             self._bpm_sec.append(self._bpm_sec[-1] + dt / self.res * spb)
 
     def abs_tick(self, m0, b0, t):
-        return self._measure_tick[m0] + b0 * self.res + t
+        """A `mmm,bb,cc` timing -> absolute cells.
+
+        The beat column counts the time signature's *denominator* unit, not
+        quarter notes: in a 15/16 measure `bb` runs 1..15 a 16th note apart,
+        so one step is res*4/16 cells, not res. Cells (`cc`) are absolute
+        1/res-of-a-quarter either way. See vox_format.md's "Number of cells
+        per beat = x / beat value", and shared/vox.py, which has the same
+        rule (both timelines have to agree, or a chart's audio render and
+        its note grid drift apart on any non-/4 measure).
+        """
+        return self._measure_tick[m0] + b0 * self._measure_cpb[m0] + t
 
     def tick_of(self, poss):
         return self.abs_tick(*parse_pos(poss))
