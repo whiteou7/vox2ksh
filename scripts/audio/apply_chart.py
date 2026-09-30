@@ -1432,7 +1432,24 @@ def main():
                     return args.se_gain
                 return samples[idx][3] * args.se_trim
 
-            # laser slams: two points on the same tick with different positions
+            # laser slams: two points on the same tick with different
+            # positions, *within one section* - see audio_engine.md 5.1. C2 == 2
+            # ends a section, so a `2` followed by a `1` on the same tick is not
+            # a slam at all: it is one laser ending and an unrelated one starting
+            # elsewhere on the lane, which the game draws as two sections and
+            # plays silently. Without this guard that handoff mixes in a slam SE
+            # the chart has no slam for - heard against 2406_saihate_namv_5m
+            # measures 9 and 10, whose VOL-L and VOL-R each hand off that way on
+            # a downbeat (user-reported), and confirmed against the cabinet
+            # capture of the one affected chart that has one.
+            #
+            # Rare - 18 such pairs against 584760 genuine slams across the 8254
+            # charts installed here, in 4 of them - but each is a loud, obviously
+            # wrong noise on a downbeat. The knob feed above already refuses to
+            # span the boundary for the same reason, and so does the note
+            # converter (notes/laser.py's "run boundary" paragraph, found
+            # independently against 2397_ultracharge_yutaimai - which is also
+            # the worst offender here, with 12).
             slam_onsets = []
             for trk, label in (("#TRACK1", "VOL-L"), ("#TRACK8", "VOL-R")):
                 pts = []
@@ -1443,11 +1460,12 @@ def main():
                     pos = float(f[1])
                     if pos > 1.0:
                         pos /= 127.0
-                    pts.append((tl.tick_of(f[0]), pos))
+                    pts.append((tl.tick_of(f[0]), pos, int(f[2])))
                 pts.sort(key=lambda x: (x[0],))
                 onsets = [tl.samples(pts[i][0]) for i in range(len(pts) - 1)
                           if pts[i][0] == pts[i + 1][0]
-                          and abs(pts[i][1] - pts[i + 1][1]) > 1e-6]
+                          and abs(pts[i][1] - pts[i + 1][1]) > 1e-6
+                          and pts[i][2] != 2]
                 slam_onsets.extend(onsets)
 
             slam_onsets = sorted(set(o for o in slam_onsets if 0 <= o < n))

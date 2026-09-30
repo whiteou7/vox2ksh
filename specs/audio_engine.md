@@ -603,6 +603,12 @@ Two consequences for any reimplementation:
 
 Isolated slams (a run shorter than one block) genuinely produce nothing in this engine.
 
+**"Two points on the same tick" is not the whole test — the pair has to be inside one section.** A vox laser point carries a node type in C2 (`1` starts a section, `0` continues it, `2` ends it), and a chart can end one laser and start an unrelated one on the *identical* tick: `2` then `1`, positions unrelated. That is a handoff, not a slam. The game draws two sections and plays nothing; the knob feed simply restarts at the new position, and no kind-6 event is scheduled. Reading only the ticks and positions turns every such handoff into a phantom slam twice over: an event spanning the two sections, which puts a zero-duration step inside one run's knob curve, and a layered slam SE (§6.1) the chart never asked for. The knob feed is not entitled to the first of those — the two sections really do sit at different positions, so the knob steps there either way — but the event must still not cross the boundary, or the run picks up the wrong section's effect index. `apply_chart.py` guarded the event builder from the start (`if a[2] == 2: continue`) and the SE trigger not at all, which is why only the SE was audible.
+
+Rare but not negligible: 18 such pairs against 584760 genuine ones across the 8254 distinct vox charts installed here, in 4 of them (`2397_ultracharge_yutaimai_5m` 12, `2385_cyanotype_synthion_5m` 4, `0697_syousitsu_cosmo_4i` 1, `2088_xinca_tonarinoniwa_5m` 1), plus 2 in the `2406_saihate_namv_5m` that is not in this install. Each is a loud, obviously wrong noise on a downbeat, which is how it was found — `2406_saihate_namv_5m` measures 9 and 10, whose VOL-L and VOL-R each hand off that way (user-reported). Measured against the one affected chart that has a cabinet capture, `2088_xinca_tonarinoniwa` MXM at 35.74 s: over the 0.4 s the phantom SE covers, the render's error against the capture drops from 5.584 to 3.158 dB when the guard is applied (gain over dry +1.723 → +4.149); over 0.8 s, 4.245 → 2.858. Two 4 s control windows elsewhere in the same chart move by 0.000, and `xcheck`'s per-effect table moves only the `laser` row (+1.558 → +1.572) with every other effect identical to three decimals. So the capture agrees: the cabinet plays no slam sound at a `2`→`1` handoff.
+
+The note converter needs the same guard for its own reasons — see `scripts/notes/laser.py`'s "run boundary" paragraph, found independently against the same `2397_ultracharge_yutaimai`.
+
 ### 5.2 Retrigger's phase is locked to the musical grid, not to the note
 
 Retrigger's repeat cycle runs on the song's grid, so a note beginning mid-cycle **joins it partway through** — the effect can open by replaying audio from *before* the note. No other effect does this.
@@ -806,7 +812,7 @@ if ((0 < (int)idx) && (idx != 255)) {
 
 Same function, case 3, also carries the laser mirroring (`if (field == 2) v = 1.0f - v;`), independently confirming §7.1.
 
-**Laser slam** — a two-stage path. Event **kind 6** (`0x18040773a`, variant tag 5) is a *scheduled play* request; the dispatcher converts it to a queue entry at `gameAudio+0x80`:
+**Laser slam** — a two-stage path, and only a genuine same-section slam schedules one (§5.1). Event **kind 6** (`0x18040773a`, variant tag 5) is a *scheduled play* request; the dispatcher converts it to a queue entry at `gameAudio+0x80`:
 
 ```c
 entry.index = event.a;                                     // event+0x08, verbatim
