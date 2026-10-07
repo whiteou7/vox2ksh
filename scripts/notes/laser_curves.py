@@ -64,10 +64,20 @@ def _rdp(pts, tol):
 def _enforce_min_gap(pts, min_gap, lead=0):
     if len(pts) <= 2:
         return pts, (len(pts) == 2 and pts[1][0] - (pts[0][0] + lead) < min_gap)
+    turns = [pts[i][0] for i in _direction_breaks(pts, CURVE_DEAD_ZONE)]
+    turn_at = set(turns)
     out = [pts[0]]
     eff = [pts[0][0] + lead]
     dropped_after = {}
     for t, v in pts[1:-1]:
+        if t in turn_at:
+            while len(out) > 1 and out[-1][0] not in turn_at and t - eff[-1] < min_gap:
+                dropped = dropped_after.pop(len(out) - 1, [])
+                dropped_after.setdefault(len(out) - 2, []).extend([out.pop()] + dropped)
+                eff.pop()
+        elif any(0 < ta - t < min_gap for ta in turns):
+            dropped_after.setdefault(len(out) - 1, []).append((t, v))
+            continue
         if t - eff[-1] >= min_gap:
             out.append((t, v))
             eff.append(t)
@@ -98,7 +108,36 @@ def _enforce_min_gap(pts, min_gap, lead=0):
         out[i] = (best_t, best_v)
         eff[i] = best_t
 
+    if turn_at:
+        out = _fill_between_turns(pts, out, eff, turn_at, min_gap)
     return out, tight
+
+
+def _interp(pts, t):
+    for (t0, v0), (t1, v1) in zip(pts, pts[1:]):
+        if t0 <= t <= t1:
+            return v0 if t1 == t0 else v0 + (v1 - v0) * (t - t0) / (t1 - t0)
+    return pts[-1][1]
+
+
+def _fill_between_turns(pts, out, eff, turn_at, min_gap):
+    fixed = [0] + [i for i in range(1, len(out) - 1) if out[i][0] in turn_at] + [len(out) - 1]
+    ticks = [t for t, _v in pts]
+    res = [out[0]]
+    for a, b in zip(fixed, fixed[1:]):
+        ta, tb = out[a][0], out[b][0]
+        start, span = eff[a], tb - eff[a]
+        k = span // min_gap - 1
+        lo, hi = ticks.index(ta), ticks.index(tb)
+        dense = all(y - x <= min_gap for x, y in zip(ticks[lo:hi], ticks[lo + 1:hi + 1]))
+        if dense and k > b - a - 1:
+            for j in range(1, k + 1):
+                t = start + j * span // (k + 1)
+                res.append((t, _interp(pts[lo:hi + 1], t)))
+        else:
+            res.extend(out[a + 1:b])
+        res.append(out[b])
+    return res
 
 
 def decimate_segment(pts, min_gap, tol=RDP_TOL, lead=0):

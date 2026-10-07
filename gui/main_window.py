@@ -171,10 +171,11 @@ class App:
         frame = ttk.Frame(self.root, padding=(6, 4))
         frame.pack(side="top", fill="both", expand=True)
 
-        cols = ("id", "title", "artist", "source")
-        headings = {"id": "ID", "title": "Title", "artist": "Artist", "source": "Source"}
+        cols = ("id", "title", "artist", "source", "released")
+        headings = {"id": "ID", "title": "Title", "artist": "Artist", "source": "Source", "released": "Date released"}
         self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended")
-        for c, w, anchor in (("id", 50, "e"), ("title", 340, "w"), ("artist", 220, "w"), ("source", 130, "w")):
+        for c, w, anchor in (("id", 50, "e"), ("title", 300, "w"), ("artist", 200, "w"), ("source", 130, "w"),
+                             ("released", 100, "w")):
             self.tree.heading(c, text=headings[c], command=lambda c=c: self._sort_by(c))
             self.tree.column(c, width=w, anchor=anchor, stretch=(c == "title"))
         vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
@@ -440,7 +441,8 @@ class App:
         for song in sorted(self.songs, key=lambda s: s.id):
             if query and query not in song.title.lower() and query not in song.artist.lower():
                 continue
-            iid = self.tree.insert("", "end", values=(song.id, song.title, song.artist, song.version_name))
+            iid = self.tree.insert("", "end", values=(song.id, song.title, song.artist, song.version_name,
+                                                      song.distribution_date or "-"))
             self.row_to_song[iid] = song
         self._update_selected_count()
 
