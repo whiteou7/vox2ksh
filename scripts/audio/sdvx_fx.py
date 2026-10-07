@@ -349,11 +349,11 @@ PEAK_CENTER_MAX = 16000.0
 # The knob value below which the game leaves the EQ flat and the music at unity.
 PEAK_KNOB_DEADZONE = 4
 
-# Music-voice target gain vs knob (voice vtable+0x60 -> ramped gain, bank 2).
+# Music-voice gain vs knob (voice vtable+0x60, bank 2). The setter FUN_1806a21f0 writes the voice's current gain and its target together and clears the fade mode, so the duck lands on the next update - it is not chased.
 PEAK_DUCK_MAX = 0.8
 PEAK_DUCK_MIN = 0.57
 PEAK_DUCK_SLOPE = 0.0025274728          # per knob step over 4..94
-PEAK_DUCK_RAMP = 0.33                   # gain units per second (FUN_1806a2520)
+PEAK_DUCK_RAMP = 0.33                   # gain units per second - FUN_1806a2520's fade chase, which the duck setter cancels; only --duck-rate uses it
 
 
 def paramq_from_knob(knob, gain_scale=1.0, max_gain_db=None):

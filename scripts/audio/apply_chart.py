@@ -904,9 +904,10 @@ def build_arg_parser():
                     help="seconds the knob value lags before it reaches the device "
                          "ParamEq (default %g, the engine's queue threshold)"
                          % PEAK_DELAY)
-    ap.add_argument("--duck-rate", type=float, default=FX.PEAK_DUCK_RAMP,
-                    help="how fast the music-voice gain chases its target, in gain "
-                         "units per second (default %g)" % FX.PEAK_DUCK_RAMP)
+    ap.add_argument("--duck-rate", type=float, default=None,
+                    help="diagnostic: chase the music-voice duck at this many gain "
+                         "units per second instead of applying it instantly (the old "
+                         "model used %g, the voice's fade rate)" % FX.PEAK_DUCK_RAMP)
     ap.add_argument("--peak-always", action="store_true",
                     help="diagnostic: run the device ParamEq during every laser, "
                          "not only C4 = 0 ones")
@@ -1358,10 +1359,11 @@ def main():
             knob = np.concatenate([np.zeros(d, np.float32), knob[:-d]])
 
         if not args.no_duck:
-            # voice target gain, reached at PEAK_DUCK_RAMP gain-units per second
+            # voice gain, set outright on each update: FUN_1806a21f0 writes the voice's current gain and its target together and cancels any fade, so FUN_1806a2520's 0.33/s chase never runs for the duck. Chasing it left the EQ boost on an un-ducked track for about a second - the +2 dB swell at xb10r 5m m58 that the capture doesn't have. --duck-rate restores the chase.
             tgt = np.array([FX.peak_duck_target(v) for v in
                             knob[::args.block].astype(np.int32)], np.float64)
-            step = args.duck_rate * args.block / float(sr)
+            step = (np.inf if args.duck_rate is None
+                    else args.duck_rate * args.block / float(sr))
             g = np.empty_like(tgt)
             cur = 1.0
             kb = knob[::args.block].astype(np.int32)
