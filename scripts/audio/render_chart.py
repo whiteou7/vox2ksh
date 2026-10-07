@@ -530,7 +530,7 @@ def build_arg_parser():
                          "(default <song>_fx.ogg). Use a .wav name for a "
                          "lossless render - e.g. when scoring against the "
                          "capture with spectral_metric.py")
-    ap.add_argument("--ogg-quality", type=float, default=10,
+    ap.add_argument("--ogg-quality", type=float, default=6,
                     help="libvorbis -q:a for .ogg output, -1..10 (default 6, "
                          "~192 kbps). Ignored for .wav")
     ap.add_argument("-b", "--block", type=int, default=512,
@@ -685,7 +685,7 @@ def build_arg_parser():
                          "round-tripping through int16 as the engine does")
     ap.add_argument("--no-peak", action="store_true",
                     help="skip the default (C4=0) laser peak filter")
-    ap.add_argument("--peak-gain-scale", type=float, default=0.8,
+    ap.add_argument("--peak-gain-scale", type=float, default=1.0,
                     help="NOT authentic - multiplies the default laser EQ's resonant "
                          "boost (default %(default)g; the transcribed engine value is "
                          "1.0, up to +15 dB - pass --peak-gain-scale 1.0 for that). The "
@@ -693,7 +693,7 @@ def build_arg_parser():
                          "at some knob positions; this tames it for listening comfort. "
                          "Everything in specs/audio_engine.md §7.1/§9 was measured at "
                          "1.0 - see that section's 'deliberate deviation' note")
-    ap.add_argument("--peak-max-gain", type=float, default=8,
+    ap.add_argument("--peak-max-gain", type=float, default=15,
                     help="NOT authentic - hard ceiling in dB on the default laser EQ's "
                          "boost (default %(default)g dB; the transcribed engine is "
                          "unclamped up to +15 dB - pass --peak-max-gain 15 to disable "
@@ -709,7 +709,7 @@ def build_arg_parser():
                          "i.e. +9.5 or +14 dB, which is the loud sweep 'whoosh'; this "
                          "is the LPF/HPF twin of --peak-gain-scale. Does not touch "
                          "Wobble, whose filter carries its own makeup gain")
-    ap.add_argument("--filter-max-resonance", type=float, default=6.0,
+    ap.add_argument("--filter-max-resonance", type=float, default=99.0,
                     help="NOT authentic - hard ceiling in dB on that same resonant "
                          "boost (default %(default)g dB; the engine is uncapped - pass "
                          "--filter-max-resonance 99 for that). This is the flag that "

@@ -12,7 +12,7 @@ Converts SOUND VOLTEX `.vox` charts to `.ksh` (KSM/USC), with the reverse-engine
 
 ## Layout
 
-* `specs/`: the notes. `vox_format.md` and `ksh_format.md` cover the formats, `audio_engine.md`, `audio_engine_primer.md`, `camera.md` and `notes.md` cover the conversion.
+* `specs/`: the notes. `specs/evidence/` holds the measurements behind them. `vox_format.md` and `ksh_format.md` cover the formats, `audio_engine.md`, `audio_engine_primer.md`, `camera.md` and `notes.md` cover the conversion.
 * `scripts/audio`, `scripts/notes`, `scripts/camera`: the three converters. `scripts/shared` has the `.vox` parser, path resolution and the DLL analysis tools. Each script describes itself in its header.
 * `gui/`: the Tkinter app. `build/`: packaging, see [`build/README.md`](build/README.md).
 * `output/`: everything scripts write. Git-ignored and safe to delete, except `scripts/audio/reference/kamui_goal.ogg`, which lives elsewhere because it can't be regenerated.

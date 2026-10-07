@@ -25,27 +25,6 @@ KSH_VERSIONS = [
 ]
 
 
-class ScrollableFrame(ttk.Frame):
-    def __init__(self, master, height=180, **kw):
-        super().__init__(master, **kw)
-        canvas = tk.Canvas(self, height=height, highlightthickness=0)
-        vsb = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
-        self.inner = ttk.Frame(canvas)
-        self.inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        canvas.configure(yscrollcommand=vsb.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
-        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", self._wheel(canvas)))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
-
-    @staticmethod
-    def _wheel(canvas):
-        def handler(event):
-            canvas.yview_scroll(int(-event.delta / 120), "units")
-        return handler
-
-
 class App:
     def __init__(self, root):
         self.root = root
@@ -324,12 +303,12 @@ class App:
         ttk.Label(self.advanced_frame, text="render_chart.py options",
                   font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(4, 0))
         self.advanced_vars = {}
-        scroller = ScrollableFrame(self.advanced_frame, height=190)
-        scroller.pack(fill="both", expand=True)
+        options_frame = ttk.Frame(self.advanced_frame)
+        options_frame.pack(fill="x")
 
         saved_values = self.settings.get("advanced_values") or {}
         for spec in advanced_options.advanced_options():
-            row = ttk.Frame(scroller.inner, padding=(2, 3))
+            row = ttk.Frame(options_frame, padding=(2, 3))
             row.pack(fill="x", anchor="w")
             label = "%s (default: %s)" % (spec.flag, spec.default)
             if spec.kind == "bool":

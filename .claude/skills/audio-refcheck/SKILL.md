@@ -70,4 +70,4 @@ Adopt if the target improves and nothing else regresses. An even split inside no
 
 ## Recording the result
 
-Put the number, chart count and what was ruled out in the owning section of `specs/audio_engine.md`. Rejected hypotheses count too.
+State the adopted rule in the owning section of `specs/audio_engine.md`, plainly, as fact: no "X is real" emphasis and no account of readings that turned out wrong. Put the number, chart count and any rejected hypotheses under the matching heading in `specs/evidence/audio_engine.md`.

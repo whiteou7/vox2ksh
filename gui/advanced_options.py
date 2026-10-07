@@ -1,4 +1,4 @@
-"""Builds the Advanced panel from render_chart.build_arg_parser(), skipping options the worker sets per chart (-d, -a, -o, --se-bank-dir, --dry).
+"""Builds the Advanced panel from render_chart.build_arg_parser(), showing only the options in SHOWN_DESTS. Everything else runs at its default.
 """
 import os
 import sys
@@ -7,7 +7,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import paths  # noqa: F401,E402  (adds scripts/audio to sys.path)
 import render_chart  # noqa: E402
 
-PER_CHART_DESTS = {"folder", "difficulty", "audio", "output", "dry", "se_bank_dir", "help"}
+# argparse dest names: the flag without "--", hyphens as underscores
+SHOWN_DESTS = {"ogg_quality"}
 
 
 class OptionSpec:
@@ -40,7 +41,7 @@ def advanced_options():
     ap = render_chart.build_arg_parser()
     out = []
     for action in ap._actions:
-        if action.dest in PER_CHART_DESTS:
+        if action.dest not in SHOWN_DESTS:
             continue
         out.append(OptionSpec(action))
     return out
