@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Diff two masscheck.py --csv runs, per effect.
+"""Diff two check_all_charts.py --csv runs, per effect.
 
-    python compare.py before.csv after.csv [--worst 6] [--flat 0.02]
+    python compare_runs.py before.csv after.csv [--worst 6] [--flat 0.02]
 
-masscheck writes `song,effect,excl_gain,frames`, one row per (chart, effect)
+check_all_charts writes `song,effect,excl_gain,frames`, one row per (chart, effect)
 pair it could score exclusively. Only charts present in BOTH runs are compared,
 so a run that matched a different number of pairs does not silently shift a
 mean - a paired comparison is the only honest one here.
@@ -29,7 +29,7 @@ def load(path):
             except (KeyError, ValueError):
                 continue
     if not out:
-        sys.exit("no usable rows in %s (expected masscheck --csv output)" % path)
+        sys.exit("no usable rows in %s (expected check_all_charts.py --csv output)" % path)
     return out
 
 

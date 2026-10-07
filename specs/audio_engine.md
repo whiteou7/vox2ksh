@@ -181,7 +181,7 @@ ALL (40 pairs)             +0.914   +0.918   +0.004
 every other effect row              unchanged, |delta| <= 0.004
 ```
 
-`masscheck.py` drops the `laser` and `idle` regions from its CSV (they have no exclusive column), so its aggregate cannot see this change's main target at all — the laser row above was scored separately by re-rendering both ways. The `HighPassFilter` row is the FX-button filter (id 12) and is carried almost entirely by one chart (`aimai_chocolate` 5m, +0.551); read it as "not a regression" rather than as the win.
+`check_all_charts.py` drops the `laser` and `idle` regions from its CSV (they have no exclusive column), so its aggregate cannot see this change's main target at all — the laser row above was scored separately by re-rendering both ways. The `HighPassFilter` row is the FX-button filter (id 12) and is carried almost entirely by one chart (`aimai_chocolate` 5m, +0.551); read it as "not a regression" rather than as the win.
 
 ### 4.1b Resonance damping — a second deliberate deviation
 
@@ -213,7 +213,7 @@ Damping is monotonically *worse* against the recordings, which is the expected s
 
 Whole-corpus cost of that default, 40 (chart, capture) pairs: `ALL` **+0.918 → +0.901**. Every FX-button row also drops by 0.003–0.026 dB, which is not a per-effect regression — it is the capped *laser* filters showing up inside those regions' frames, since an FX region's "exclusive" mask excludes other FX effects but not lasers. A uniform small decline across every row is the expected signature of a laser-path change, and is how to tell one from a real single-effect regression.
 
-**Consequence for re-measuring:** like the peak-EQ flags, `xcheck.py`/`masscheck.py` invoke `apply_chart.py` without these, so a fresh corpus run now scores capped filters. Pass `--extra="--filter-max-resonance 99"` (alongside the §7.1 peak flags) to reproduce any number in this document taken before the cap landed — which includes every figure in §4.1 and §9.
+**Consequence for re-measuring:** like the peak-EQ flags, `check_one_chart.py`/`check_all_charts.py` (the `audio-refcheck` skill) invoke `apply_chart.py` without these, so a fresh corpus run now scores capped filters. Pass `--extra="--filter-max-resonance 99"` (alongside the §7.1 peak flags) to reproduce any number in this document taken before the cap landed — which includes every figure in §4.1 and §9.
 
 ### 4.2 Laser / knob sweep (wrappers `0x180630110` LPF, `0x1806303f0`+`0x180630760` HPF)
 
@@ -605,7 +605,7 @@ Isolated slams (a run shorter than one block) genuinely produce nothing in this 
 
 **"Two points on the same tick" is not the whole test — the pair has to be inside one section.** A vox laser point carries a node type in C2 (`1` starts a section, `0` continues it, `2` ends it), and a chart can end one laser and start an unrelated one on the *identical* tick: `2` then `1`, positions unrelated. That is a handoff, not a slam. The game draws two sections and plays nothing; the knob feed simply restarts at the new position, and no kind-6 event is scheduled. Reading only the ticks and positions turns every such handoff into a phantom slam twice over: an event spanning the two sections, which puts a zero-duration step inside one run's knob curve, and a layered slam SE (§6.1) the chart never asked for. The knob feed is not entitled to the first of those — the two sections really do sit at different positions, so the knob steps there either way — but the event must still not cross the boundary, or the run picks up the wrong section's effect index. `apply_chart.py` guarded the event builder from the start (`if a[2] == 2: continue`) and the SE trigger not at all, which is why only the SE was audible.
 
-Rare but not negligible: 18 such pairs against 584760 genuine ones across the 8254 distinct vox charts installed here, in 4 of them (`2397_ultracharge_yutaimai_5m` 12, `2385_cyanotype_synthion_5m` 4, `0697_syousitsu_cosmo_4i` 1, `2088_xinca_tonarinoniwa_5m` 1), plus 2 in the `2406_saihate_namv_5m` that is not in this install. Each is a loud, obviously wrong noise on a downbeat, which is how it was found — `2406_saihate_namv_5m` measures 9 and 10, whose VOL-L and VOL-R each hand off that way (user-reported). Measured against the one affected chart that has a cabinet capture, `2088_xinca_tonarinoniwa` MXM at 35.74 s: over the 0.4 s the phantom SE covers, the render's error against the capture drops from 5.584 to 3.158 dB when the guard is applied (gain over dry +1.723 → +4.149); over 0.8 s, 4.245 → 2.858. Two 4 s control windows elsewhere in the same chart move by 0.000, and `xcheck`'s per-effect table moves only the `laser` row (+1.558 → +1.572) with every other effect identical to three decimals. So the capture agrees: the cabinet plays no slam sound at a `2`→`1` handoff.
+Rare but not negligible: 18 such pairs against 584760 genuine ones across the 8254 distinct vox charts installed here, in 4 of them (`2397_ultracharge_yutaimai_5m` 12, `2385_cyanotype_synthion_5m` 4, `0697_syousitsu_cosmo_4i` 1, `2088_xinca_tonarinoniwa_5m` 1), plus 2 in the `2406_saihate_namv_5m` that is not in this install. Each is a loud, obviously wrong noise on a downbeat, which is how it was found — `2406_saihate_namv_5m` measures 9 and 10, whose VOL-L and VOL-R each hand off that way (user-reported). Measured against the one affected chart that has a cabinet capture, `2088_xinca_tonarinoniwa` MXM at 35.74 s: over the 0.4 s the phantom SE covers, the render's error against the capture drops from 5.584 to 3.158 dB when the guard is applied (gain over dry +1.723 → +4.149); over 0.8 s, 4.245 → 2.858. Two 4 s control windows elsewhere in the same chart move by 0.000, and `check_one_chart.py`'s per-effect table moves only the `laser` row (+1.558 → +1.572) with every other effect identical to three decimals. So the capture agrees: the cabinet plays no slam sound at a `2`→`1` handoff.
 
 The note converter needs the same guard for its own reasons — see `scripts/notes/laser.py`'s "run boundary" paragraph, found independently against the same `2397_ultracharge_yutaimai`.
 
@@ -1017,7 +1017,7 @@ Worked example: `0002_broken_iroha`'s single AUTO TAB row `021,03,00  96  8` sel
 
 `scripts/audio/reference/kamui_goal.ogg` is a recording of the actual cabinet playing `2229_kamui_tjhangneil`. It is **not** a clean render — polarity-inverted, Ogg-coded, and its clock drifts against the game's audio by +0.346 samples/second (7.9 ppm), i.e. +45 samples over the track. Sample-exact diffing is therefore impossible: coherent averaging over 124 slams gave correlations ≤ 0.06.
 
-What works is a **phase-insensitive spectral metric**: 46 log-spaced bands per 46 ms frame, level-normalised, mean |dB| difference (`metric.py`). The floor is codec noise — on frames where the chart does nothing, an untouched track already scores 1.22. `xcheck.py` generalises this to any chart/capture pair with automatic alignment, and `masscheck.py` aggregates it across the reference corpus.
+What works is a **phase-insensitive spectral metric**: 46 log-spaced bands per 46 ms frame, level-normalised, mean |dB| difference (`metric.py`). The floor is codec noise — on frames where the chart does nothing, an untouched track already scores 1.22. `check_one_chart.py` generalises this to any chart/capture pair with automatic alignment, and `check_all_charts.py` aggregates it across the reference corpus.
 
 | render | all | FX | peak-laser | tab-laser | idle |
 |---|---|---|---|---|---|
@@ -1096,7 +1096,7 @@ Where the EQ sits was settled by measurement: **before** the layered SE are mixe
 
 **Deliberate deviation: the CLI's default gain is tamed, not authentic.** Every number above was scored against the plain transcription, and `paramq_from_knob`'s own defaults are still `gain_scale=1.0, max_gain_db=None`. But `apply_chart.py`'s CLI defaults `--peak-gain-scale` to `0.8` and `--peak-max-gain` to `8`, so a plain run renders a *dampened* EQ. This is a product choice, not a modelling correction: the boost is authentic (an ablation against the kamui capture makes the render measurably worse without it) but unpleasant enough for chart-conversion listening that comfort won by default, with the untamed model one flag away.
 
-**Consequence for re-measuring:** `xcheck.py`/`masscheck.py` invoke `apply_chart.py` without those flags, so a fresh corpus run scores the dampened default. Pass `--extra="--peak-gain-scale 1.0 --peak-max-gain 15"` to reproduce this section's numbers.
+**Consequence for re-measuring:** `check_one_chart.py`/`check_all_charts.py` (the `audio-refcheck` skill) invoke `apply_chart.py` without those flags, so a fresh corpus run scores the dampened default. Pass `--extra="--peak-gain-scale 1.0 --peak-max-gain 15"` to reproduce this section's numbers.
 
 ### 7.2 SE levels
 

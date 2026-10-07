@@ -1,11 +1,11 @@
 ---
 name: notes-refcheck
-description: Regression-test the .vox to .ksh notes conversion against the hand-made reference conversions. Use whenever anything under scripts/notes/ changes — convert.py, laser.py, decimation constants, grid/measure logic, slam handling — or when shared/vox.py parsing changes, and before calling any such change good. Also use when asked to "crosscheck the notes", "check the conversion" or "run the notes xcheck".
+description: Regression-test the .vox to .ksh notes conversion against the hand-made reference conversions. Use whenever anything under scripts/notes/ changes — convert.py, laser.py, decimation constants, grid/measure logic, slam handling — or when shared/vox.py parsing changes, and before calling any such change good. Also use when asked to "crosscheck the notes", "check the conversion" or "run the notes xcheck" or "check the notes".
 ---
 
 # Notes reference check
 
-`scripts/notes/xcheck.py` converts every chart it can match to a hand-made reference `.ksh` under `scripts/shared/reference/ksh/`, and compares counts — bars, BT chips/holds, FX chips/holds, laser runs, laser points — on both sides. It is a structural comparison, not a diff: the references are hand conversions, so they are a strong signal about "is this the same chart" and a weak one about exact byte equality.
+`check_all_charts.py` (in this skill) converts every chart it can match to a hand-made reference `.ksh` under `scripts/shared/reference/ksh/`, and compares counts — bars, BT chips/holds, FX chips/holds, laser runs, laser points — on both sides. It is a structural comparison, not a diff: the references are hand conversions, so they are a strong signal about "is this the same chart" and a weak one about exact byte equality.
 
 Python is `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`. Run everything from the `vox2ksh` directory.
 
@@ -20,17 +20,17 @@ Python is `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`. Run everything 
 Baselines live in `output/refcheck/` (git-ignored). Reuse one only if it came from the pre-change tree.
 
 ```bash
-git stash push -m notescheck-baseline && python scripts/notes/xcheck.py --csv output/refcheck/notes_before.csv ; git stash pop
+git stash push -m notescheck-baseline -- scripts && python .claude/skills/notes-refcheck/check_all_charts.py --csv output/refcheck/notes_before.csv ; git stash pop
 ```
 
 Confirm the stash popped cleanly.
 
 ### 2. Iterate
 
-For a single chart while developing:
+For one song while developing, `check_one_chart.py` prints our counts against the reference side by side, with per-lane splits (BT A-D, FX L/R, laser L/R) so you can see where a chart differs, and writes the converted `.ksh` to `output/work` for opening next to the reference. It checks every difficulty the reference folder holds unless `-d` picks one.
 
 ```bash
-python scripts/notes/xcheck.py --only <song-substring>
+python .claude/skills/notes-refcheck/check_one_chart.py <song-substring> [-d mxm]
 ```
 
 `convert.py <chart.vox> -o out.ksh` renders one chart if you need to read the output directly. A conversion that raises is counted as a failure, not a mismatch — check the "failed to convert" list, it is easy to miss under the aggregate.
@@ -38,13 +38,13 @@ python scripts/notes/xcheck.py --only <song-substring>
 ### 3. Full run, after
 
 ```bash
-python scripts/notes/xcheck.py --csv output/refcheck/notes_after.csv
+python .claude/skills/notes-refcheck/check_all_charts.py --csv output/refcheck/notes_after.csv
 ```
 
 ### 4. Compare
 
 ```bash
-python .claude/skills/notes-refcheck/compare.py output/refcheck/notes_before.csv output/refcheck/notes_after.csv
+python .claude/skills/notes-refcheck/compare_runs.py output/refcheck/notes_before.csv output/refcheck/notes_after.csv
 ```
 
 It prints, per category: mean and median absolute error before/after, exact-match percentage, how many charts improved versus regressed, and the charts that moved most.

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Run xcheck.py across every reference recording and aggregate by effect.
+"""Run check_one_chart.py across every reference recording and aggregate by effect.
 
-    python masscheck.py [-n 10] [-j 8] [--extra=--wobble-persist] [--csv out.csv]
+    python check_all_charts.py [-n 10] [-j 8] [--extra=--wobble-persist] [--csv out.csv]
 
 Pairs run concurrently across -j worker threads (default: cpu count). Each
-xcheck.py call is its own subprocess doing numpy/ffmpeg work, so subprocess.run
+check_one_chart.py call is its own subprocess doing numpy/ffmpeg work, so subprocess.run
 blocks on a released GIL and threads here get real parallelism rather than
 fighting each other for it.
 
@@ -30,83 +30,14 @@ import argparse
 import collections
 import concurrent.futures
 import os
-import re
 import subprocess
 import sys
 import threading
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)
-sys.path.insert(0, os.path.join(_HERE, os.pardir, "shared"))
-from _paths import GAME, MUSIC, SCRIPTS, WORK
-
-REF = os.path.join(SCRIPTS, "shared", "reference", "ksh")
-
-# ksh/ogg basename -> vox difficulty suffix. inf/grv/hvn/vvd/xcd are all the
-# same difficulty *slot* (the one above EXH) under different game-version
-# skins, not synonyms for mxm - matches scripts/notes/xcheck.py's DIFF_SUFFIX,
-# which this was ported from after the mismatch below was found there first.
-DIFF_SUFFIX = {
-    "nov": "1n", "adv": "2a", "exh": "3e",
-    "inf": "4i", "grv": "4i", "hvn": "4i", "vvd": "4i", "xcd": "4i",
-    "mxm": "5m",
-}
-
-
-def match_songs():
-    """reference folder -> data/music folder, preferring an exact
-    normalized-title match over a substring one.
-
-    A short reference folder name (e.g. "e", "oz", "akasha") can be a prefix
-    of several unrelated data/music titles ("evans", "ozone", "akasha
-    assembly mizonokuchi" vs the real match "akasha"). Matching on substring
-    alone silently picks whichever sorts first, which is wrong more than
-    once in this corpus - "oz" -> "ozone" and "akasha" -> "akasha assembly
-    mizonokuchi" were both confirmed wrong this way (the wrong candidate's
-    hardest chart differs in difficulty from what the capture actually is).
-
-    Resolution order:
-      1. exact normalized-title match
-      2. unambiguous substring match (exactly one candidate)
-      3. a *small* (<=5), substring-matching candidate set where the
-         data/music folder name is `<ref title>_<artist>` - in that case the
-         part of each candidate's name AFTER the ref key is (usually) just
-         the artist, and the real match is reliably the SHORTEST such
-         remainder: junk matches are prefixes of a much longer, unrelated
-         title ("akasha" + "assemblymizonokuchi", 20 chars) while the real
-         match is "akasha" + an artist name ("blacky", 6 chars). Only trusted
-         when the shortest remainder is strictly shorter than the next one,
-         and the candidate pool is small enough that a false rescue is
-         implausible - a key like "e" has 70+ candidates and is left
-         unmatched rather than guessed at.
-    """
-    music = collections.defaultdict(list)
-    for d in sorted(os.listdir(MUSIC)):
-        m = re.match(r"^(\d+)_(.*)$", d)
-        if m:
-            music[m.group(2).replace("_", "")].append(d)
-
-    out = {}
-    for r in sorted(os.listdir(REF)):
-        if not os.path.isdir(os.path.join(REF, r)):
-            continue
-        key = r.replace("_", "")
-        if key in music:
-            cands = music[key]
-        else:
-            cands = [(k, v) for k, vs in music.items()
-                     for v in vs if (k.startswith(key) or key.startswith(k))]
-            cands = [v for k, v in cands]
-            keyed = [(k, v) for k, vs in music.items() for v in vs if k.startswith(key)]
-            if len(keyed) >= 1 and len(cands) > 1 and len(keyed) <= 5:
-                keyed.sort(key=lambda kv: len(kv[0]) - len(key))
-                if len(keyed) == 1 or len(keyed[0][0]) < len(keyed[1][0]):
-                    cands = [keyed[0][1]]
-        if len(cands) == 1:
-            out[r] = cands[0]
-        # otherwise ambiguous or absent - skip rather than guess; logged by
-        # main() under --verbose-match
-    return out
+sys.path.insert(0, os.path.join(_HERE, os.pardir, os.pardir, os.pardir, "scripts", "shared"))
+from _paths import MUSIC, WORK
+from refmatch import REF, DIFF_SUFFIX, match_songs, music_index
 
 
 def find_pairs():
@@ -131,13 +62,13 @@ def find_pairs():
 
 
 def run_pair(i, ref_name, folder, ref, suffix, args):
-    """Run xcheck.py for one (chart, capture) pair and return its raw result.
+    """Run check_one_chart.py for one (chart, capture) pair and return its raw result.
 
     Runs in a worker thread - subprocess.run releases the GIL while the child
     (a separate Python process, mostly numpy/ffmpeg) is running, so several of
     these overlap real CPU work despite the GIL.
 
-    xcheck.py's render filename always embeds the song folder name, which
+    check_one_chart.py's render filename always embeds the song folder name, which
     differs per pair almost every time (nothing to overwrite, unlike the
     same-song-different-difficulty case) - so the pile of temp WAVs in WORK
     only ever grows over a run, concurrent or not. A sequential run just grew
@@ -150,8 +81,8 @@ def run_pair(i, ref_name, folder, ref, suffix, args):
     only ever wanted the score, not a persistent copy.
     """
     label = "%s/%s(%s)" % (ref_name, folder, suffix)
-    render = os.path.join(WORK, "%s_w%d_xcheck.wav" % (folder, threading.get_ident()))
-    cmd = [sys.executable, os.path.join(_HERE, "xcheck.py"),
+    render = os.path.join(WORK, "%s_w%d_check_one.wav" % (folder, threading.get_ident()))
+    cmd = [sys.executable, os.path.join(_HERE, "check_one_chart.py"),
            os.path.join(MUSIC, folder), ref, "-d", suffix,
            "-b", str(args.block), "--quiet",
            "--work-tag", "w%d" % threading.get_ident()]
@@ -182,18 +113,14 @@ def main():
     ap.add_argument("--extra", default="", help="flags passed through to apply_chart.py")
     ap.add_argument("-b", "--block", type=int, default=512)
     ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4,
-                    help="parallel xcheck.py workers (default: cpu count, %d here)" % (os.cpu_count() or 4))
+                    help="parallel check_one_chart.py workers (default: cpu count, %d here)" % (os.cpu_count() or 4))
     ap.add_argument("--csv", default=None)
     ap.add_argument("--verbose-match", action="store_true",
                     help="list reference folders that failed to match (ambiguous or absent)")
     args = ap.parse_args()
 
     if args.verbose_match:
-        music = collections.defaultdict(list)
-        for d in sorted(os.listdir(MUSIC)):
-            m = re.match(r"^(\d+)_(.*)$", d)
-            if m:
-                music[m.group(2).replace("_", "")].append(d)
+        music = music_index()
         matched = set(match_songs())
         unmatched, ambiguous = [], []
         for r in sorted(os.listdir(REF)):

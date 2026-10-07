@@ -47,7 +47,7 @@ Where the different-render tail matters is which audio the correlation is run ag
 
 ## Crosscheck
 
-`xcheck.py` matches every reference chart it can (30 pairs currently, same name-matching as `audio/masscheck.py`) and compares note/hold/laser-point counts, not text. BT/FX/laser-run counts match almost exactly; laser points land within ~4% mean (curve decimation approximates a shape, it isn't meant to reproduce one charter's exact point choices). See `RDP_TOL`/`min_gap_frac` in `laser.py` for the tuned constants.
+The `notes-refcheck` skill's `check_all_charts.py` matches every reference chart it can (30 pairs currently, name-matching shared with the audio check via `scripts/shared/refmatch.py`) and compares note/hold/laser-point counts, not text. BT/FX/laser-run counts match almost exactly; laser points land within ~4% mean (curve decimation approximates a shape, it isn't meant to reproduce one charter's exact point choices). See `RDP_TOL`/`min_gap_frac` in `laser.py` for the tuned constants.
 
 It stays on v1 deliberately, and a v2 flag would be meaningless there: the reference charts are hand v1 conversions, so v2's ~30% fewer laser points would read as a 30% error against a target that isn't the one v2 aims at. What v2 is measured against instead is the vox samples themselves - the shape it is supposed to reproduce - across the whole corpus rather than the 30 matched pairs.
 

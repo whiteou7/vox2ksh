@@ -25,7 +25,7 @@ resolution gets picked.
 
 `camera=True` additionally places tilt/zoom_top/zoom_bottom option lines and
 lane-spin tokens computed by ../camera/camera.py into the same grid. Off by
-default so every existing caller (notably notes/xcheck.py) keeps its exact
+default so every existing caller (notably the notes-refcheck skill's check_all_charts.py) keeps its exact
 prior output; see specs/camera.md for what's approximate about the camera
 values themselves - this module only places them, it doesn't compute them.
 
@@ -236,7 +236,7 @@ def convert(vox_path, out_path, camera=False, meta=None, slam_gap_frac=laser.SLA
     # #END POSITION is the arcade chart's official end (used for gauge/score
     # purposes) and routinely runs well past the last real event - a trailing
     # note-less outro adds measures no reference conversion bothers keeping.
-    # Crosschecked via xcheck.py: ending at the last real event lands on or
+    # Crosschecked via the notes-refcheck skill's check_all_charts.py: ending at the last real event lands on or
     # within 1 measure of every one of the 5 matched reference conversions;
     # #END POSITION overshoots all of them, by 8 measures on the worst one.
     #

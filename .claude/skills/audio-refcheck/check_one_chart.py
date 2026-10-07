@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cross-check a render against a gameplay recording, broken down by effect.
 
-    python xcheck.py <song folder> <reference audio> [-d 5m]
+    python check_one_chart.py <song folder> <reference audio> [-d 5m]
 
 Unlike metric.py - which is wired to the one kamui capture - this takes any
 song and any recording, aligns them itself, and reports the closeness metric
@@ -30,10 +30,11 @@ import sys
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)
-sys.path.insert(0, os.path.join(_HERE, os.pardir, "shared"))
+sys.path.insert(0, os.path.join(_HERE, os.pardir, os.pardir, os.pardir, "scripts", "shared"))
+from _paths import SCRIPTS, WORK, ensure_work, find_ffmpeg
 
-from _paths import WORK, ensure_work, find_ffmpeg
+AUDIO = os.path.join(SCRIPTS, "audio")
+sys.path.insert(0, AUDIO)
 from metric import bands, spectrogram, N, HOP, SR
 from apply_chart import read_sections, Timeline, parse_fx_pairs, FX_NAMES
 
@@ -186,9 +187,9 @@ def main():
                     help="reuse an existing render instead of making one")
     ap.add_argument("--work-tag", default=None,
                     help="disambiguate the render filename (default: the difficulty). "
-                         "Needed when multiple xcheck.py runs for the same song folder "
+                         "Needed when multiple check_one_chart.py runs for the same song folder "
                          "(different difficulties) may be in flight at once, e.g. from "
-                         "masscheck.py -j - otherwise they'd race on the same temp WAV.")
+                         "check_all_charts.py -j - otherwise they'd race on the same temp WAV.")
     ap.add_argument("--extra", default="",
                     help="extra flags passed through to apply_chart.py")
     ap.add_argument("--quiet", action="store_true",
@@ -216,8 +217,8 @@ def main():
     render = args.render
     if render is None:
         tag = args.work_tag or args.difficulty or "auto"
-        render = os.path.join(WORK, "%s_%s_xcheck.wav" % (base, tag))
-        cmd = [sys.executable, os.path.join(_HERE, "apply_chart.py"), folder,
+        render = os.path.join(WORK, "%s_%s_check_one.wav" % (base, tag))
+        cmd = [sys.executable, os.path.join(AUDIO, "apply_chart.py"), folder,
                "-o", render, "-b", str(args.block)]
         if args.difficulty:
             cmd += ["-d", args.difficulty]

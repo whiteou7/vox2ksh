@@ -53,7 +53,7 @@ The three problems named in HANDOFF.md 3.1:
    tail (e.g. a sine ease-in landing its last sample inside 1/32 of the
    measure - a real bug caught against 2393_alive_dadadaizu, not this
    limitation). `Run.tight` now only fires when even the run's true start
-   is too close to its true end - across all 30 charts xcheck.py currently
+   is too close to its true end - across all 30 charts check_all_charts.py currently
    matches, that's zero runs.
 
 A true vox slam - two points at the identical tick - is different from all of the above: it is not a curve to approximate, it is a real instantaneous jump, and both values must survive untouched. Ksh has no "same row, two values" - the second point needs a tick of its own. By default it lands a 32nd note after the first (`SLAM_GAP_FRAC`, a divisor of the whole note - so 1/8 of a beat, 6 ticks at the default 48-cell resolution), which is what the reference hand charts use: 1/8 of a beat is the most common slam gap in every time signature they contain. Not just the very next free tick, which technically works too but renders as a near-invisible hairline next to a normal hand-charted slam and forces that measure's grid down to near-native resolution just to place one point (see convert.py's resolution picker).
@@ -99,15 +99,15 @@ N_STEPS = len(KSH_STEPS) - 1   # 50 - the top index
 # Half a step (1/100) is the quantisation floor - a point closer to the
 # straight line than that is literally invisible after rounding - but that
 # alone simplifies harder than the reference conversions do (crosschecked
-# against scripts/shared/reference/ksh via notes/xcheck.py: half a step
+# against scripts/shared/reference/ksh via notes-refcheck/check_all_charts.py: half a step
 # keeps noticeably fewer points than the manual charts on every song tried).
-# Swept 0..half-a-step against all 30 charts xcheck.py currently matches
+# Swept 0..half-a-step against all 30 charts check_all_charts.py currently matches
 # (every difficulty in every reference folder with a corresponding .vox,
 # not just the 5 first tried) and took the total point-count error's
 # minimum, a broad, shallow plateau from about 1/500 to 1/475 - 1/500 sits
 # in it. Not derived from anything in the format, just the best empirical
 # fit; re-sweep (see the sweep in this file's git history, or redo it
-# inline) if xcheck.py picks up more reference charts.
+# inline) if check_all_charts.py picks up more reference charts.
 RDP_TOL = 1.0 / 500
 
 # Default gap from a genuine same-tick vox slam's start to where its end lands in the ksh output, as a divisor of the whole note - 32 is a 32nd note, i.e. 1/8 of a beat, which is what the reference hand charts use in every time signature. Deliberately not a fraction of the local measure; see the module docstring's "true vox slam" paragraph for why that breaks outside 4/4. `build_runs(slam_gap_frac=0)` disables this and falls back to the old bare next-free-tick placement.

@@ -5,7 +5,7 @@ description: Regression-test the SDVX audio engine against the cabinet-recording
 
 # Audio reference check
 
-Every audio change is measured against real cabinet recordings, never eyeballed. `scripts/shared/reference/ksh/` holds 713 gameplay folders (`mxm.ogg`, `exh.ogg` … — the difficulty tag names the take; `music.ogg` is bare song audio, **not** a capture), and `masscheck.py` matches them to charts in `data/music`, renders each, and scores per effect.
+Every audio change is measured against real cabinet recordings, never eyeballed. `scripts/shared/reference/ksh/` holds 713 gameplay folders (`mxm.ogg`, `exh.ogg` … — the difficulty tag names the take; `music.ogg` is bare song audio, **not** a capture), and `check_all_charts.py` matches them to charts in `data/music`, renders each, and scores per effect.
 
 Python is `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`. Run everything from the `vox2ksh` directory.
 
@@ -26,27 +26,27 @@ Baselines live in `output/refcheck/` (git-ignored, regenerable). Reuse an existi
 Otherwise stash the change and produce one:
 
 ```bash
-git stash push -m refcheck-baseline && python scripts/audio/masscheck.py -j 8 --csv output/refcheck/before.csv ; git stash pop
+git stash push -m refcheck-baseline -- scripts && python .claude/skills/audio-refcheck/check_all_charts.py -j 8 --csv output/refcheck/before.csv ; git stash pop
 ```
 
 Confirm the stash popped cleanly before continuing.
 
 ### 3. Iterate fast on a few charts
 
-A full run is slow. While developing, use `xcheck.py` on charts that actually contain the effect you touched — it renders and scores one chart/capture pair with automatic alignment:
+A full run is slow. While developing, use `check_one_chart.py` on charts that actually contain the effect you touched — it renders and scores one chart/capture pair with automatic alignment:
 
 ```bash
-python scripts/audio/xcheck.py ../data/music/2229_kamui_tjhangneil scripts/shared/reference/ksh/<song>/mxm.ogg -d 5m
+python .claude/skills/audio-refcheck/check_one_chart.py ../data/music/2229_kamui_tjhangneil scripts/shared/reference/ksh/<song>/mxm.ogg -d 5m
 ```
 
-To find charts that exercise an effect, run `masscheck.py -n 40` and read the per-chart lines — each prints the effects it scored. `--only <substring>` then narrows to one song.
+To find charts that exercise an effect, run `check_all_charts.py -n 40` and read the per-chart lines — each prints the effects it scored. `--only <substring>` then narrows to one song.
 
 ### 4. Full run, after
 
 Same flags as the baseline, no exceptions:
 
 ```bash
-python scripts/audio/masscheck.py -j 8 --csv output/refcheck/after.csv
+python .claude/skills/audio-refcheck/check_all_charts.py -j 8 --csv output/refcheck/after.csv
 ```
 
 Run it in the background; it takes a long time and the corpus is large.
@@ -54,7 +54,7 @@ Run it in the background; it takes a long time and the corpus is large.
 ### 5. Compare
 
 ```bash
-python .claude/skills/audio-refcheck/compare.py output/refcheck/before.csv output/refcheck/after.csv
+python .claude/skills/audio-refcheck/compare_runs.py output/refcheck/before.csv output/refcheck/after.csv
 ```
 
 It prints, per effect: mean and frame-weighted exclusive gain before/after, the delta, how many charts improved versus regressed, and the largest per-chart swings.
@@ -84,9 +84,9 @@ Also: alignment correlation below ~0.15 means the capture never locked onto the 
 
 ## Gotchas
 
-* **Score in PCM.** `apply_chart.py` defaults to `.ogg`; a lossy container stacks a second layer of codec noise on the capture's own. Pass a `.wav` name when rendering by hand. `xcheck.py`/`masscheck.py` handle this themselves.
-* **`masscheck.py` scores the dampened peak EQ *and* the capped filter resonance**, because it invokes `apply_chart.py` without `--peak-gain-scale`/`--peak-max-gain` (§7.1) or `--filter-max-resonance` (§4.1b), and all three CLI defaults are deliberately tamed. That is fine for before/after comparison as long as both runs match. To reproduce the spec's transcribed-model numbers, pass `--extra="--peak-gain-scale 1.0 --peak-max-gain 15 --filter-max-resonance 99"` to **both** runs.
-* **`masscheck.py`'s CSV has no `laser` or `idle` row** — it drops both, because neither has an exclusive column to attribute with. So its aggregate cannot see a change to the tab-laser filters or the device ParamEq at all, no matter how large. Score those by re-rendering both ways and reading `xcheck.py`'s `laser` row directly; a flat masscheck table is not evidence that a laser-path change did nothing.
+* **Score in PCM.** `apply_chart.py` defaults to `.ogg`; a lossy container stacks a second layer of codec noise on the capture's own. Pass a `.wav` name when rendering by hand. `check_one_chart.py`/`check_all_charts.py` handle this themselves.
+* **`check_all_charts.py` scores the dampened peak EQ *and* the capped filter resonance**, because it invokes `apply_chart.py` without `--peak-gain-scale`/`--peak-max-gain` (§7.1) or `--filter-max-resonance` (§4.1b), and all three CLI defaults are deliberately tamed. That is fine for before/after comparison as long as both runs match. To reproduce the spec's transcribed-model numbers, pass `--extra="--peak-gain-scale 1.0 --peak-max-gain 15 --filter-max-resonance 99"` to **both** runs.
+* **`check_all_charts.py`'s CSV has no `laser` or `idle` row** — it drops both, because neither has an exclusive column to attribute with. So its aggregate cannot see a change to the tab-laser filters or the device ParamEq at all, no matter how large. Score those by re-rendering both ways and reading `check_one_chart.py`'s `laser` row directly; a flat `check_all_charts.py` table is not evidence that a laser-path change did nothing.
 * **Block size changes output.** Coefficients and LFOs update per block, so `-b` must match between runs.
 * **Effects with few firing frames need targeted scoring.** Tape Stop Ex fires on a fraction of its own notes; scored over note spans it looks inert. Score the frames the effect is actually live in.
 * **No measured floor exists for the non-kamui recordings**, so a raw "+1.07 dB" elsewhere has no yardstick. Only kamui has one (1.14). Compare deltas, not absolutes, outside kamui.

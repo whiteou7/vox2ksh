@@ -9,6 +9,7 @@ Element-agnostic tooling: static analysis of `modules/soundvoltex.dll`, a bulk c
 | file | what it does |
 |---|---|
 | `_paths.py` | Resolves the game install, the DLL, `data/music`, `data/sound`, the output and work directories, the Ghidra symbol dump, and ffmpeg. Everything else imports this. Overrides: `SDVX_GAME`, `SDVX_DLL`, `SDVX_SYMS`, `FFMPEG`. |
+| `refmatch.py` | Matches the reference corpus in `reference/ksh/` to charts in `data/music` (`match_songs()`, `DIFF_SUFFIX`). Used by both refcheck skills. |
 
 ## Static analysis
 
@@ -32,7 +33,7 @@ Manual `.ksh` conversions, one folder per song. Each folder's `.ogg` files are *
 
 Confirmed rather than assumed: on `777`, `mxm.ogg` correlates 0.81 with the game's own clean `.s3v` — same audio, modified — while the four difficulty `.ogg`s are all distinct files.
 
-[`../audio/masscheck.py`](../audio/masscheck.py) matches these to charts in `data/music` by name (41 of 86 folders currently match) and scores every one. `feelsseasickness` is **not** in this set; it has its own YouTube recording at the project root.
+[`refmatch.py`](refmatch.py) matches these to charts in `data/music` by name (41 of 86 folders currently match); the [`audio-refcheck`](../../.claude/skills/audio-refcheck/SKILL.md) and [`notes-refcheck`](../../.claude/skills/notes-refcheck/SKILL.md) skills score every one. `feelsseasickness` is **not** in this set; it has its own YouTube recording at the project root.
 
 ## Chart survey
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Diff two notes/xcheck.py --csv runs, per category.
+"""Diff two check_all_charts.py --csv runs, per category.
 
-    python compare.py before.csv after.csv [--worst 6]
+    python compare_runs.py before.csv after.csv [--worst 6]
 
-xcheck writes `chart,category,ours,theirs`, one row per (chart, category).
+check_all_charts writes `chart,category,ours,theirs`, one row per (chart, category).
 `theirs` is the hand-made reference conversion and does not change between
 runs; what moves is `ours`. The error compared here is |ours - theirs|, so a
 category improves when that absolute error shrinks.
@@ -30,7 +30,7 @@ def load(path):
             except (KeyError, ValueError):
                 continue
     if not out:
-        sys.exit("no usable rows in %s (expected notes xcheck --csv output)" % path)
+        sys.exit("no usable rows in %s (expected check_all_charts.py --csv output)" % path)
     return out
 
 

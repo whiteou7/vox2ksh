@@ -45,14 +45,14 @@ Only needed if you change the DSP or the chain. Dormant otherwise.
 | `regions.py` | The same metric broken down by what the chart is doing per frame — FX / peak-laser / tab-laser / idle. |
 | `blendfit.py` | Fits `β` in `\|ref\| ≈ (1-β)·\|dry\| + β·\|mine\|` per effect region. `β ≈ 1` means the blend depth is right. Currently the diagnostic for the open effect-state-continuity item: Echo fits at 1.00 while Wobble (0.03) and BitCrusher (0.23) sit at the wrong *phase*. |
 
-Those three are wired to the single kamui capture. The two below work on any song with a recording, and are what to reach for now:
+Those three are wired to the single kamui capture. The two below work on any song with a recording, and are what to reach for now. They live with the [`audio-refcheck` skill](../../.claude/skills/audio-refcheck/SKILL.md), which owns the measurement procedure, rather than here:
 
 | file | what it does |
 |---|---|
-| `xcheck.py` | Aligns any recording to any chart — offset **and** clock drift, fitted over several correlation windows — renders, and scores **per effect**. `python xcheck.py <song folder> <recording> [-d 5m]`. Use `--render` to score a file you already have, `--extra=--wobble-persist` to pass flags to `apply_chart.py`. |
-| `masscheck.py` | Runs `xcheck.py` across every recording in `../shared/reference/ksh/` and aggregates the per-effect gains. `python masscheck.py [-n 10] [--csv out.csv]`. 41 of the 86 reference folders currently match a chart in `data/music`. |
+| `.claude/skills/audio-refcheck/check_one_chart.py` | Aligns any recording to any chart — offset **and** clock drift, fitted over several correlation windows — renders, and scores **per effect**. `python check_one_chart.py <song folder> <recording> [-d 5m]`. Use `--render` to score a file you already have, `--extra=--wobble-persist` to pass flags to `apply_chart.py`. |
+| `.claude/skills/audio-refcheck/check_all_charts.py` | Runs `check_one_chart.py` across every recording in `../shared/reference/ksh/` and aggregates the per-effect gains. `python check_all_charts.py [-n 10] [--csv out.csv]`. 41 of the 86 reference folders currently match a chart in `data/music`. |
 
-### Reading `xcheck` output — the one thing that will mislead you
+### Reading `check_one_chart.py` output — the one thing that will mislead you
 
 Each region is scored twice: over its raw mask, and over **exclusive** frames where that effect is the only FX running. Effects overlap constantly, so the raw column measures everything active in that region, not the named effect. **Attribute with the exclusive column.**
 
