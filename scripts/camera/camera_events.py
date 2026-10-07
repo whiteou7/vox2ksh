@@ -44,8 +44,6 @@ PRETILT_WINDOW_BEATS = 2.0
 
 PRETILT_LEAD_BEATS = 0.5
 
-PRETILT_MIN_FACTOR = 0.25
-
 PRETILT_SNAP_BEATS = 0.25
 
 
@@ -67,7 +65,7 @@ def _laser_sections(points):
     return out
 
 
-def _pretilt_brackets(chart, min_factor=PRETILT_MIN_FACTOR):
+def _pretilt_brackets(chart):
     tl = chart.tl
     window = max(1, int(round(PRETILT_WINDOW_BEATS * tl.res)))
     lead = max(0, int(round(PRETILT_LEAD_BEATS * tl.res)))
@@ -85,7 +83,7 @@ def _pretilt_brackets(chart, min_factor=PRETILT_MIN_FACTOR):
     out = []
     for (lane, start, pos, _end) in sections:
         factor = pos if lane == 0 else 1.0 - pos
-        if factor < min_factor:
+        if factor <= 0.0:
             continue
         win = start - window
         if any(a < start and b > win for (a, b) in spans):
@@ -133,7 +131,7 @@ def _triple_spin_tilt_points(chart):
     return ramp, restore, spans
 
 
-def compute_tilt_events(chart, pretilt_fix=False, min_factor=PRETILT_MIN_FACTOR):
+def compute_tilt_events(chart, pretilt_fix=False):
     manual = chart.camera["tilt"]
     manual_ranges = [(s.tick, s.end_tick) for s in manual]
 
@@ -143,7 +141,7 @@ def compute_tilt_events(chart, pretilt_fix=False, min_factor=PRETILT_MIN_FACTOR)
         points.append((seg.end_tick, fmt_tilt(TILT_VOX_TO_KSH * seg.end)))
 
     if pretilt_fix:
-        for (open_tick, close_tick) in _pretilt_brackets(chart, min_factor=min_factor):
+        for (open_tick, close_tick) in _pretilt_brackets(chart):
             points.append((open_tick, "zero"))
             points.append((close_tick, "normal"))
 
