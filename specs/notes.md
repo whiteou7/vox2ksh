@@ -1,172 +1,99 @@
-# The notes element — `.vox` buttons/lasers → `.ksh` chart body
+# Notes: `.vox` buttons and lasers to `.ksh`
 
-Implementation: [`../scripts/notes/`](../scripts/notes/). Formats: [`vox_format.md`](vox_format.md), [`ksh_format.md`](ksh_format.md).
+Code: [`../scripts/notes/`](../scripts/notes/). Formats: [`vox_format.md`](vox_format.md), [`ksh_format.md`](ksh_format.md).
 
-## Scope
-
-BT/FX/laser notes, plus just enough BPM/time-signature to build the grid. Out of scope: every sound-fx parameter (already in the audio track), roll/swing (camera element - see `camera.md`), `#TRACK AUTO TAB`. Header metadata is placeholder unless a caller supplies it - see "Metadata" below.
+Covers BT/FX/laser notes, plus the BPM and time signatures needed for the grid. Sound-fx parameters are in the audio track, roll/swing is in `camera.md`, `#TRACK AUTO TAB` is skipped. Header metadata is placeholder unless the caller passes `meta` to `convert()`; the GUI fills it from `music_db.xml`.
 
 ## Buttons
 
-Direct grid mapping - vox ticks are always a whole multiple of whatever line count ksh uses, so this is exact. Each measure's line count is picked independently via gcd over that measure's real events. BT: `1` chip / `2` hold. FX: `2` chip / `1` hold (swapped vs BT per `ksh_format.md`). Chart length is the last real event, not vox's `#END POSITION` (which is the arcade chart's official end and often runs measures past the last note into silence).
+Vox ticks are always a whole multiple of the ksh line count, so the mapping is exact. Each measure picks its own line count by gcd over its events. BT: `1` chip, `2` hold. FX: `2` chip, `1` hold. Chart length is the last real event, not `#END POSITION`, which often runs past the last note.
 
 ## Lasers
 
-Vox's laser tracks are pre-sampled curves (as fine as 1/64 of a measure), and ksh v1 only has discrete points joined by `:` or a slam - so every curve gets decimated (Douglas-Peucker + a minimum-spacing pass at a 24th note) before it's written. Three problems, all in `laser.py`. (Writing the same lasers as ksh v2 curves instead is a separate option, `--ksh-version 2` - see below. It re-fits rather than decimates, but everything in this section other than that one step applies to it unchanged.)
+Vox lasers are pre-sampled curves, as fine as 1/64 of a measure. ksh v1 only has points joined by `:` or a slam, so each curve is decimated (Douglas-Peucker, then a minimum-spacing pass). All in `laser_curves.py`.
 
-* **Width** - vox's normal/wide flag maps straight onto `laserrange_l`/`laserrange_r=2x`.
-* **Continuity** - decimation must never leave two non-slam points closer than a 24th note (1/6 of a beat), or ksh's engine reads the movement as an unintended slam (its own cutoff is 1/32). A note value, not a fraction of the local measure - see "Bugs found and fixed" item 10.
-* **Genuine same-tick slams** - kept exactly. A same-tick *run boundary* is a different thing and is not a slam: two sections handing off, separated by `MIN_RUN_GAP_TICKS` so a `-` row fits between them (see "Bugs found and fixed" item 11). By default the end lands `SLAM_GAP_FRAC` (1/64 of the local measure) after the start, matching hand-charted slam width, instead of the bare next free tick (`slam_gap_frac=0`, CLI `--no-slam-gap`, GUI "Standard slam gap" checkbox); a dense enough chain (8 slams to a beat is the densest seen) can leave less than that much room, in which case the end just backs off to one tick before the collision.
-* **The unrepresentable 32nd slam** - accepted as a real format limit when unavoidable, flagged via `Run.tight` rather than silently eaten.
+* Width: the vox wide flag maps to `laserrange_l`/`laserrange_r=2x`.
+* Continuity: two non-slam points must never be closer than a 24th note, or ksh reads a slam (its cutoff is 1/32). This is a note value, not a fraction of the measure (see bug 10).
+* Real same-tick slams are kept. By default the slam ends `SLAM_GAP_FRAC` (1/64 measure) after its start, like hand charts (`--no-slam-gap` disables it). If a dense chain leaves less room, the end backs off to one tick before the collision.
+* A 32nd-note slam can't be represented. `Run.tight` flags it.
 
-## Metadata
+A same-tick boundary between two runs is a handoff, not a slam. The runs are kept `MIN_RUN_GAP_TICKS` apart so a `-` row fits between them (bug 11).
 
-Everything above the `--` is a placeholder unless a caller passes `meta` to `convert()`; `gui/convert_worker.py` fills it from `music_db.xml`. One pair has no source to read: `po`/`plength`, the song-select preview window.
+## Preview offset
 
-SDVX has no such window. It ships the preview as its own pre-cut file, `<folder>_pre.s3v`, beside the track's `<folder>.s3v` — 2187 of this install's 2190 song folders carry one — and nothing in `music_db.xml` records which part of the track it was cut from. `.ksh` has no second audio file, only an offset into `m=`, so the offset has to be recovered: a normalised cross-correlation of the clip against every lag in the track, in [`../scripts/audio/preview.py`](../scripts/audio/preview.py).
+`po=` and `plength=` have no source in the game data. The preview is a separate pre-cut file, `<folder>_pre.s3v`, and nothing records where it was cut from. `preview_offset.py` finds the offset by normalised cross-correlation of the clip against the track.
 
-Swept over the whole library, 2184 songs scored, the winning lag's score has a **median of 0.973, a 5th percentile of 0.905 and a 1st percentile of 0.831**. `MIN_NCC = 0.5` refuses 6 of the 2184, all of them under 0.45. What keeps a typical score off 1.0 is a fade the game bakes into the clip — roughly 0.5 s in, 1 s out. `po` is the start of the clip, fade included, which is what it should be: KSM fades the preview in itself.
+Over 2184 songs the best lag scores a median 0.973 (5th percentile 0.905, 1st 0.831). `MIN_NCC = 0.5` refuses 6, all under 0.45. Scores stay below 1.0 because the game fades the clip in and out. `po` is the start of the clip, fade included.
 
-**Clip length is measured, not assumed**, because two conventions ship side by side. 2181 of the 2184 are the familiar faded ~10 s clip (2154 rounding to 10000 ms and 27 to 9980). The other three — `2120_hbfs_daffpunk`, `2168_garasuno_kneesormx_korsk`, `2170_icbmoflove_odenpa`, all recent — are a **~20 s cut starting at exactly 30.000 s with no fade whatsoever**, flat at unity from the first 100 ms window to the last. They score 0.995 to 0.998, the highest in the corpus, precisely because there is no fade to disagree about. Hard-coding a 10-second window would have written the wrong `plength` for all three. `plength` is rounded to 10 ms, which folds WMA decoder padding back out (10000 against 10003 is one clip encoded twice) without pretending to a precision the clip hasn't got.
+* Clip length is measured, not assumed. 2181 clips are about 10 s and faded. Three (`2120_hbfs_daffpunk`, `2168_garasuno_kneesormx_korsk`, `2170_icbmoflove_odenpa`) are 20 s starting at exactly 30.000 s with no fade. `plength` is rounded to 10 ms.
+* Some previews come from a different render of the same passage (`2336_ticktackchikupa_risyuu` scores 0.698, same music mixed differently), hence the low threshold. The lag is still right there. Always correlate against the game's own `.s3v`, never a render.
+* `2229_kamui_tjhangneil` has a 544-byte `_pre.s3v` stub that ffmpeg refuses, so it gets no answer.
+* Any failure leaves `po=0 plength=0`, which KSM treats as absent.
+* Off by default on the CLI (`--preview`), on in the GUI.
 
-The measurement runs at 11025 Hz mono (0.09 ms per lag step, about half a second per song, cached across that song's difficulties), and the answer holds against the **rendered** `.ogg` and not just the source `.s3v`: `apply_chart.py` writes its effects in place over the decoded track, so the two stay sample-aligned. Checked on `0001_albida_muryoku_3e` — 84393 ms either way, correlating 0.97 against the dry track and 0.80 against the FX render, same lag.
+`preview_offset.py --patch <folder>` rewrites `po=`/`plength=` in existing charts by editing just those lines, so BOM, line endings and field order survive. A missing field is appended to the header.
 
-A repetitive song can score nearly as well at a second lag (`0785_voltexes3_sota_fujimori`: 0.974 against 0.950), which is why the runner-up is reported but not gated on — where it happens, the two lags are the same passage and either is a correct preview. Any failure at all leaves `po=0 plength=0`, which is what every conversion wrote before this and what KSM assumes for a file without them. Off by default on the CLI (`--preview`, since it needs ffmpeg and the audio files that a notes-only conversion otherwise never opens), on by default in the GUI ("Preview offset (po/plength)").
+## Checking
 
-### Not every preview is the same bytes as its track
+The `notes-refcheck` skill compares note, hold and laser-point counts against 30 hand-made reference pairs. Button and laser-run counts match almost exactly; laser points are within about 4%. v1 only, since the references are v1 and v2 writes about 30% fewer points. Tuned constants: `RDP_TOL`, `min_gap_frac`.
 
-`MIN_NCC` is 0.5 and not somewhere up near the 0.83 first percentile because a tail of songs ship a preview cut from a **different render** of the same passage. `2336_ticktackchikupa_risyuu` is the worked example: 0.698 overall, and still only 0.734 over the unfaded middle at its exact peak lag — refining the search to 44100 Hz moves the lag by one sample and does not raise the score, so it is not a misalignment. Its envelope tracks the track at unity across that middle and its spectral centroid matches to 2 Hz (1601 against 1599), so it is the same music, mixed or mastered differently. The lag is not in doubt there: the dry `.s3v` and both of that song's rendered `.ogg`s peak at the same millisecond.
+## KSH v2
 
-The 6 the sweep refuses (0.235 to 0.448) are presumably the same thing taken further, and refusing is right: two of them (`0630_critical_line_kradness` at 0.316, `1852_crystalia_djtotto` at 0.339) beat their own runner-up by only about 0.01, so there is no lag worth standing behind. One more song scores nothing at all for a different reason — `2229_kamui_tjhangneil`, this project's own calibration track, has a **544-byte `_pre.s3v`** where every other preview in the corpus is at least 183 KB. It is a stub, not audio, and ffmpeg refuses it; `locate()` turns that into a clean "no answer" rather than an exception.
+Only `laser_l_curve`/`laser_r_curve` are implemented (`--ksh-version 2`). The rest of what `ksh_format.md` marks "(Not supported in KSM v1.xx)" is not: `title_translit`, `artist_translit`, `chokkakuse` with a filename, `scroll_speed`, `rotation_deg`, and the other `*_curve` options. All `*_curve` options take `"<a>;<b>"`, floats in 0..1.
 
-Where the different-render tail matters is which audio the correlation is run against. A heavily effected MXM render decorrelates further still, and `ticktackchikupa_risyuu`'s EXH render fell *under* `MIN_NCC` while the answer was known good from the dry track — so the measurement always runs against the game's own `.s3v`, never against a render, and relies on `apply_chart.py` writing its effects in place to keep the two sample-aligned.
+### Curve model
 
-### Filling the fields into charts that already exist
+One option covers one segment, from its laser point to the next. The segment is a quadratic bezier with control point `(a, b)` normalised within the segment. `a == b` is straight. Not verified against a KSM v2 build.
 
-`preview.py --patch <folder>` walks a converted output tree and rewrites `po=`/`plength=` in place, for a batch converted before any of this existed or hand-refined since. It edits the two lines in the byte stream rather than re-emitting a header, so the BOM, the line endings, the charter's own field order, and any field they added or removed all survive; a field that isn't there at all is appended to the end of the header rather than put back where `_header()` would have written it. It measures once per song folder rather than once per chart, since the window belongs to the track.
+* One option, one segment, so a multi-point run needs one per segment, and a reversal ends an option's reach.
+* A parabola can't change curvature sign, so one segment can't draw an S. Fitting smoothstep:
 
-## Crosscheck
+| fitted as | `<a>;<b>` | rms |
+|---|---|---|
+| one segment | degenerate | 0.0652 |
+| first half | `0.37;0.00` | 0.0051 |
+| second half | `0.63;1.00` | 0.0051 |
 
-The `notes-refcheck` skill's `check_all_charts.py` matches every reference chart it can (30 pairs currently, name-matching shared with the audio check via `scripts/shared/refmatch.py`) and compares note/hold/laser-point counts, not text. BT/FX/laser-run counts match almost exactly; laser points land within ~4% mean (curve decimation approximates a shape, it isn't meant to reproduce one charter's exact point choices). See `RDP_TOL`/`min_gap_frac` in `laser.py` for the tuned constants.
+A straight line scores 0.0682, so an unsplit S buys almost nothing. Splitting at the inflection cuts the error 12.8x.
 
-It stays on v1 deliberately, and a v2 flag would be meaningless there: the reference charts are hand v1 conversions, so v2's ~30% fewer laser points would read as a 30% error against a target that isn't the one v2 aims at. What v2 is measured against instead is the vox samples themselves - the shape it is supposed to reproduce - across the whole corpus rather than the 30 matched pairs.
+### What vox C7 is
 
-## KSH format version 2
+Over all 2447 v12/v13 charts, the gaps inside runs for every non-zero C7 (2, 3, 4, 5) have a median of 3/192 of a measure, p99 4/192. Type 0 gaps are a quarter note, 95% wider than 1/32. So type 0 rows are real control points and the rest are pre-sampled fill. C7 is a provenance tag, not a renderer instruction; the shape is in the points. The v2 path doesn't read it.
 
-Of the list below, `laser_l_curve`/`laser_r_curve` are implemented (`--ksh-version 2`); the rest are not. Everything [`ksh_format.md`](ksh_format.md) marks "(Not supported in KSM v1.xx)" — nothing else in the spec carries the marker:
+Monotonic stretches of 8 or more points, averaged, fit these curves:
 
-* `title_translit`, `artist_translit` — transliterated title/artist (header).
-* `chokkakuse` **with a filename value** — the presets (`up`/`down`/`swing`/`mute`) work in v1.xx, filenames don't.
-* `scroll_speed` — scroll multiplier, linear graph.
-* `rotation_deg` — rotation in degrees, linear graph.
-* `scroll_speed_curve`, `rotation_deg_curve`, `zoom_top_curve`, `zoom_bottom_curve`, `zoom_side_curve`, `center_split_curve`, `tilt_curve` — curve interpolation for the matching parameter.
-* `laser_l_curve`, `laser_r_curve` — curve interpolation for laser positions.
+| C7 | shape | best `<a>;<b>` |
+|---|---|---|
+| 4 | sine ease out | `0.6;1.0` |
+| 5 | sine ease in | `0.4;0.0` |
 
-All ten `*_curve` options share one payload: `"<a>;<b>"`, floats in [0.0, 1.0], applied at the same pulse in the same measure.
+Types 2 and 3 average to near-linear because instances differ (type 2's Hermite derivatives aren't in the file), so they need per-segment fits.
 
-### Laser curves (`laser_l_curve`/`laser_r_curve`)
+### The fit
 
-**ksh side.** One option covers one segment — its own laser point to the next. The segment is a quadratic bezier: endpoints are the two laser points, middle control point is `(a, b)` normalised within the segment (`a` time, `b` position). So `a == b` is neutral (control point on the diagonal, `x(s) == y(s)`, segment stays straight), and mirroring in time maps `(a, b)` to `(1-a, 1-b)`. Per `ksh_format.md`, to curve the line laser after a slam the option goes just before the slam. Stated v2 behaviour, **not** verified against a KSM v2 build.
+`laser_curves.py` "ksh v2: laser curves", via `build_runs(curves=True)`. It re-fits rather than translates:
 
-Two distinct limits, easily confused:
+* `decimate_segment_curved` replaces `decimate_segment`. Slam placement, width, run separation and the minimum gap are unchanged.
+* Subdivision tries a straight join, then one curve. If that misses, it splits at a turning point if the minimum-gap window has room, else at the inflection (only if there's no reversal), else at the worst-fitting point.
+* `_curve_or_none` writes a curve only if the chord misses by more than half a laser step and the curve beats it by at least a quarter step.
+* Fits sweep `a` coarse then fine, solving `b` in closed form, scored on the two-decimal values the option can carry.
+* Curves are only offered where every gap is a 32nd note or shorter (`CURVE_LEG_FRAC`). Sparse authored points can be threaded exactly by a parabola that bows anywhere between them.
 
-* **Scope** — one option, one segment. A multi-point run needs one option per segment. This is what bites a laser that reverses: the reversal forces a point there, ending the option's reach.
-* **Geometry** — a parabola's curvature cannot change sign, so **one segment can never make an S**. This bites even a laser that never reverses, since an ease-in-ease-out sweep is monotonic but has an inflection.
-
-So the bezier goes on twice, over the two halves of the sweep. Fitting smoothstep (`t²(3-2t)`, what a Hermite spline with zero end derivatives gives):
-
-| fitted as | best `<a>;<b>` | rms | laser steps |
-|---|---|---|---|
-| one segment, whole S | degenerate, see below | 0.0652 | 3.3 |
-| first half, renormalised | `0.37;0.00` | 0.0051 | 0.25 |
-| second half, renormalised | `0.63;1.00` | 0.0051 | 0.25 |
-
-"One segment" = emit only the sweep's two endpoints, one option on the start; the split versions add a laser point at the inflection to hang a second option on.
-
-The unsplit fit is degenerate, not merely inaccurate. Smoothstep is symmetric, so `0.95;1.00` and its mirror `0.05;0.00` tie exactly, and all 92 grid cells within 0.001 of the minimum have `|a - b|` in 0.03-0.08 — the solution band hugs the neutral diagonal, so every candidate is near-straight (`0.95;1.00` gives 0.000/0.262/0.521/0.775/1.000 against a true S of 0.000/0.156/0.500/0.844/1.000). A plain straight line scores 0.0682. **Fitting an unsplit S buys 0.003 rms over emitting no curve at all — 0.15 of a laser step.** The error flips sign across the midpoint (+5.3 steps at t = 0.25, -3.4 at t = 0.75): the parabola can do the ease-in or the ease-out, not both, so it does neither. Splitting drops the error 12.8×, worst point 0.2 steps. Inflection detection is the precondition for curve fitting to be worth doing at all, not a refinement on top of it.
-
-**vox side — C7 carries no shape the points don't already have.** All 2447 v12/v13 charts in `data/music/`, every gap between consecutive points *inside* one run (run boundaries excluded — a gap spanning two runs isn't a segment):
-
-| C7 | gaps | p50 | p90 | p99 | share > 1/32 measure | median \|Δpos\| on those |
-|---|---|---|---|---|---|---|
-| 0 (linear) | 237781 | 48.00 | 128.00 | 336.00 | 95.4 % | 0.0000 |
-| 2 (Hermite) | 224373 | 3.00 | 3.00 | 4.00 | 0.23 % | 0.021 |
-| 3 (interp. linear) | 11583 | 3.00 | 3.00 | 4.00 | 0.87 % | 0.012 |
-| 4 (sine ease out) | 567710 | 3.00 | 3.00 | 4.00 | 0.23 % | 0.017 |
-| 5 (sine ease in) | 327613 | 3.00 | 3.00 | 4.00 | 0.36 % | 0.024 |
-
-Gaps are in 192nds of a measure, comparable across charts with a non-48 `#BEAT RESOLUTION`. Every non-zero type sits at a **median gap of 3/192 = 1/64 of a measure**, p99 4/192; type `0` sits at a quarter note and is 95 % wider than 1/32 — type `0` rows are the real control points, everything else is pre-sampled fill. The sub-1 % of non-zero gaps exceeding 1/32 move the knob by a median 0.012-0.024, about one of ksh's 51 laser steps (1 step = 0.02), so those are near-stationary stretches carrying no shape either. `#TRACK ORIGINAL L`/`R` holds the pre-interpolation nodes, averaging 2.25× fewer points than the matching lane.
-
-So C7 is a **provenance tag on generated points**, not a renderer instruction: joining the points linearly reproduces the authored curve to well under one laser step, which is what `laser.py` already relies on. Reading C7 is neither required nor a shortcut — the shape lives in the points.
-
-**C7 is still useful going the other way**, naming the shape when we re-fit for v2. Monotonic same-C7 stretches of ≥ 8 points from 400 charts, normalised to the unit square and averaged:
-
-| C7 | measured y at t = .25/.50/.75 | ideal | best `<a>;<b>` |
-|---|---|---|---|
-| 4 (sine ease out) | 0.400 / 0.701 / 0.905 | sin(tπ/2) = 0.383 / 0.707 / 0.924 | `0.6;1.0` |
-| 5 (sine ease in) | 0.105 / 0.327 / 0.634 | 1-cos(tπ/2) = 0.076 / 0.293 / 0.617 | `0.4;0.0` |
-
-Exact mirrors under `(1-a, 1-b)`, and they agree from two directions — fitting the analytic sine and taking the median of per-stretch corpus fits both land there. Residual rms ≈ 0.005, a quarter of a laser step, so a quadratic approximates a sine ease *below ksh's own positional quantisation*. Half an S (`0.37;0.00`) and a sine ease (`0.41;0.00`) differ by rms 0.0133, about ⅔ of a step, so the inflection split matters far more than which easing family is picked. Types `2` and `3` average to near-linear (0.273/0.511/0.747 and 0.280/0.540/0.765) because instances differ — type `2`'s Hermite derivatives aren't in the vox file at all — so both need per-segment fitting rather than a per-type constant.
-
-**The conversion is a re-fit, not a translation:** split each run at direction changes *and* at inflections, then fit `(a, b)` per monotonic segment against the vox points it spans. Implemented in `laser.py`'s "ksh v2: laser curves" section, reached by `build_runs(curves=True)` - `convert.py --ksh-version 2`, the GUI's **KSH version** dropdown.
-
-`decimate_segment_curved` replaces `decimate_segment` and is the only thing that changes: slam placement, width, the run-boundary fixup and the minimum-gap rule are all version-independent, because a v2 chart's laser points are ordinary ksh laser points and the engine still reads two of them 1/32 of a measure apart as a slam whether an option line sits on them or not. That answers the second open question - the interaction is "none": `_split_window` hands the minimum-gap rule the same veto over a v2 split that `_enforce_min_gap` gives it over a v1 survivor, and a segment starting at a slam's landing point measures its gap from where that landing actually lands (`lead`), same as v1.
-
-One adaptive subdivision does all the point-choosing, and the priority order matters more than the fit does. A straight join is tried first, then one curve; only when that still misses does the stretch get a point in the middle, and it goes to a *turning point* if the minimum-gap window has room for one (a reversal is not something one option can draw at all), otherwise - and only on a stretch with no reversal in it - to the inflection, otherwise to the worst-fitting point. Getting that order wrong is not a small loss: the chord-crossing an inflection is read from fires just as happily on a zigzag, and an unsplit S is degenerate rather than merely inaccurate.
-
-The first open question - whether to emit a curve only where the fit earns its line - is answered by `_curve_or_none`: a curve is written only when the straight chord misses by more than half a laser step *and* the curve beats it by at least a quarter step. `a == b` is the neutral control point, so a fit that lands there never earns a line either. The fit itself is a coarse-then-fine sweep over `a` with `b` solved in closed form (`y(s)` is linear in `b` once `s` is known), scored on the two-decimal values the option line can actually carry, in real position units rather than normalised ones so a shallow segment is not held to a tall one's standard.
-
-**A curve is only offered where the vox points are dense enough to vouch for the shape between them** - every gap a 32nd note or shorter, `CURVE_LEG_FRAC`. This is the difference between recovering a shape and inventing one, and it is not something the fit can notice for itself: a fit is scored against the vox points *at their own ticks*, so where the points are the arcade's pre-sampled fill, 3 ticks apart, "between the points" is nothing and fitting the points fits the shape - but where a charter placed three points 200 ticks apart, almost the whole segment is between points, and a quadratic can thread all three exactly while bowing anywhere it likes in between. The cut is read off the C7 table above rather than picked: generated points sit at a median gap of 3/192 of a measure and a p99 of 4/192, type-0 gaps sit at a quarter note with 95.4 % wider than 1/32, so a 32nd note admits essentially all of the former and excludes essentially all of the latter.
-
-Against all 8255 charts in `data/music` plus the update folder, scored against the polyline the arcade actually draws (sampled *between* the vox points as well as at them - scoring only at the points is the blind spot the rule above exists to close): **1,492,920 laser points become 1,334,733 (-10.6 %) carrying 49,116 curve options, and the rms deviation drops from 0.423 to 0.185 of a laser step.** The averages understate it, since the easier difficulties are mostly straight lasers that both versions write identically - over the MXM/INF charts alone it is -29 % points at 0.518 -> 0.183 steps. What is left above a step of error is the plain minimum-gap squeeze both versions share: a stretch whose whole excursion fits inside a 24th note can't be drawn by either. (These figures predate item 10 below - the measure-relative minimum gap, which dominated the worst cases in both versions, has since been fixed.)
-
-An authored *discrete* laser therefore survives v2 intact. A staircase or zigzag at 24th-note spacing comes out point for point with no curve options at all - a corner or a reversal fails the fit at any amplitude down to about one laser step, so the point stays (`2061_stylus_humer_5m` measure 7 is a real one: a 9-point authored staircase, reproduced exactly). Below a laser step the shape is flattened, since half a step of error is finer than ksh's 51 positions can show; v1's `RDP_TOL` is five times tighter and does preserve some of that, which is the one axis on which v1 is the more faithful of the two. At 32nd-note spacing neither version survives - that is ksh's own slam cutoff, not a converter choice.
-
-Nothing in the v2 path reads C7, per the measurements above - the shape is re-derived from the points, which is also what lets the fit follow a type-`2` (Hermite) stretch whose defining derivatives are not in the vox file at all. `ver=` stays `171`: the v2 options are new syntax, not a new behaviour version, and none of `ksh_format.md`'s `ver` history entries gates them.
+Over all 8255 charts, scored against the polyline the arcade draws: 1,492,920 points become 1,334,733 (-10.6%) with 49,116 curve options, and rms error drops from 0.423 to 0.185 laser steps. Over MXM/INF only, -29% points. Authored staircases and zigzags at 24th-note spacing survive point for point. Below one laser step shapes are flattened, where v1's tighter `RDP_TOL` keeps more. `ver=` stays `171`.
 
 ## Bugs found and fixed
 
-1. `shared/vox.py` dropped `#END POSITION`'s data (an `#END`-prefix check also matched that opening tag).
-2. A fast curve tail could land its last kept point exactly on ksh's slam cutoff, rendering an unintended slam.
-3. A same-tick slam landing on a run *boundary* (rather than inside one run) lost its true endpoint entirely, drawing a diagonal instead of a vertical drop. The fix - move the earlier run's endpoint one tick back - turned out to be half of one; see item 11.
-4. The min-gap pass could keep a near-extremum instead of the true peak/trough, shifting turning points a few ticks early. Took three attempts to get right without regressing the 30-chart aggregate - see git history / `laser.py` comments for the two broken interim versions if this needs revisiting.
-5. A genuine same-tick slam's end used to land on the bare next free tick - technically valid but a near-invisible hairline next to a hand-charted slam, and it forced that measure's grid down to near-native resolution just to place one point. Switched the default to a fixed 1/64-of-a-measure gap (`SLAM_GAP_FRAC`); the first version of this only looked ahead within the same run for a collision, so a run whose *own last point* was a slam could land its end on or past the *next run's* start tick, silently swallowing the one-tick gap `LaserLane.anchors()` needs to keep two runs visually distinct - found via the 649-chart aggregate (`gryphone/mxm.ksh`'s laser-run count went 204→155). Fixed by also checking the next run's true start tick, not just the next point in the current run.
+All verified on the full reference aggregate (649 charts) and found on charts outside the original 30-chart matched set.
 
-All five found against charts outside the matched reference set; all verified against the full aggregate (649 charts as of this writing, up from the original 30 - see `reverse-engineering-corpus-scoring` in project memory) before being called fixed.
-
-Four more, all in the ksh v2 path and all found the same way - by sweeping the whole 8255-chart corpus, never by the matched set:
-
-6. **A curve fitted across authored linear points invented curvature that wasn't there.** The fit is scored at the vox points' own ticks, which says nothing about the shape between them when those points are far apart, so a quadratic could thread three sparse type-0 points exactly and bow half the lane away from the straight lines the arcade draws between them. Found against `2010_xroinrmx_xi_5m` tick 6708 - a hold at 0.0 into a dead-straight ramp, written as one `1.00;0.00` curve 24 laser steps out at its worst. 261 curves across the MXM charts did this, 2.3 % of all of them, and the metric in use at the time could not see any of it: it scored at the vox points too. Fixed by `CURVE_LEG_FRAC` (only fit where every gap is a 32nd note or shorter) and by re-scoring everything against the polyline instead - 261 cases down to 13, worst bow 24 steps down to 4.2, and those 13 are all a staircase too fine for ksh to hold at all, where the curve still beats the straight line it would otherwise get (4.16 steps against 5.94).
-7. **The inflection rule fired on stretches too sparse to fit a curve over.** It exists to find where one parabola stops being able to follow a shape; with no parabola in play the chord-crossing it reads lands near the chord's midpoint, which on a hold-then-ramp is nowhere near the corner. Found against `2242_hihouwaineat_shu_5m` tick 6504 immediately after fixing (6), which is what surfaced it: a 24-tick hold into a fast rise lost its corner and drew straight through it, 14 laser steps out. Gated on the same density test; that stretch went to 0.38 steps, better than v1's 4.76.
-8. **A split that landed too near an end was abandoned instead of moved.** Dropping the split dropped the stretch's *other*, perfectly legal split with it. Found against `2226_gryphone_etia` tick 12408: a dip bottoming out 6 ticks into a 72-tick stretch put the inflection inside the minimum gap, and the whole flat top afterwards got swallowed by one curve, 14 laser steps out.
-9. **Turning points were thinned greedily left to right**, so a stretch with room for one point spent it on whichever reversal came first rather than the one that mattered. Found against `0653_konransyojo_kameria_4i` measure 56 - a trough at 0.26 and a spike to 0.75 nine ticks apart with a twelve-tick minimum gap, where keeping the trough left the spike undrawable; 24.9 steps down to 4.9. Fixed by picking the reversal furthest from the stretch's own chord (`_most_deviant`).
-
-(6) is the one worth remembering: **the metric had the same blind spot as the code**, so the bug was invisible until the ground truth was changed from "the vox points" to "the polyline through the vox points". Both are now scored the latter way.
-
-And one that is neither v1's nor v2's, but shared:
-
-10. **The minimum point spacing was a fraction of the local measure rather than a note value** - the third and last constant in this file to have that bug, after `SLAM_GAP_FRAC` (item 5) and before `CURVE_LEG_FRAC` ever had it. `min_gap = measure_length // 24` gives a 24th note in 4/4 and something else in every other time signature, but what it exists to clear is ksh's slam-recognition cutoff, and that is beat-relative - a longer bar does not make the engine likelier to misread two points. It was wrong in both directions: a 3/4 measure got 6 ticks, which *is* the cutoff, while `0536_chase_in_the_shine_penoreri_3e`'s 41-beat measure got 82 ticks against laser features 12 ticks apart. That chart was the worst single stretch in the whole 8255-chart corpus for **both** ksh versions, at a full 50 laser steps: two bottom-to-top-and-back spikes where the second could not get a point at all, so the output drew a flat line straight through it. Now `whole_note // min_gap_frac`, chart-wide - identical in 4/4, so most charts don't move at all. `0536`'s stretch goes from 50 laser steps to **0.00**, every point kept, in both versions.
-
-The value of `min_gap_frac` did not move, only its unit, and the 649-chart aggregate justifies it: every button category and laser runs are **unchanged** (0 charts better, 0 worse - as they must be, since nothing about the grid or the note events depends on this), and laser points improve from a mean absolute error of 24.25 to 23.23 against the hand references, exact matches 10.3 % -> 10.8 %, **48 charts better against 27 worse**, net absolute error down 661 points. It is not a chart-by-chart win and shouldn't be sold as one: every one of the 27 regressions is a chart with measures *shorter* than 4/4 (`heavens_rain` and `military_r04d` are 3/4 throughout, `oz` runs down to 1/32), where the gap got **stricter** - 6 ticks to 8 in 3/4 - and points the hand charter kept are now dropped. Six ticks was the wrong number to be keeping them at, though: at the default resolution that is a 32nd note, which is ksh's slam-recognition cutoff itself, so those points were rendering as unintended slams rather than as the detail they were meant to be. The same stricter gap is also what produced the single largest improvement in the set (`windy_fairy/mxm`, 105 points of error down to 1).
-
-Across the whole 8255-chart corpus, scored against the polyline, **both** versions get more accurate: v1's rms goes 0.4231 -> 0.4189 laser steps and its worst stretch 50.00 -> 44.44, v2's rms 0.1853 -> 0.1533 and its worst 50.00 -> 33.33, with v2's stretches over one step of error dropping from 577 to 558. Point counts barely move (1,492,920 -> 1,490,571 for v1) because only measures that aren't 4/4 are affected at all. `0536` leaves the worst-stretch list entirely; what tops it now is `0798_uroboros_mizonokuchi_3e` at 33 steps with a `min_gap` of 8 and four raw points - a genuine sub-24th-note feature, which is the real format limit this file's point (3) is about, and identical in both versions.
-
-And one more on the boundary between two runs, the other half of item 3:
-
-11. **Two laser sections that hand off on one tick came out as a slam the chart never had.** Ending a ksh laser section costs a whole grid row holding `-`, so keeping two sections apart costs *two* ticks, not one. Item 3's fix moved the earlier run's endpoint back by exactly one - into the single gap width `LaserLane.anchors()` cannot put a line inside - so both runs got a row, no `-` went between them, and KSM spliced them into one continuous laser whose value change on adjacent rows reads as a slam, with its own judgement and its own knob flick. Reported against `2397_ultracharge_yutaimai_5m` measures 53-54, the same chart item 3 came from: the same boundary, still wrong, now shaped like a slam instead of a diagonal. Two neighbouring shapes had the same defect and no fix at all - a vox-native one-tick gap, and a slam landing `_slam_landing_tick` had to push *past* the next run's start (its `max(target, start_t + 1)` floor beats the ceiling clamp when the slam's own start tick is already at the ceiling), which left the runs overlapping and made `run_at` drop the earlier one outright - in `0223_syonenha_sorawo_tadoru_toromaru_3e` a whole two-point slam run disappeared this way. Replaced with `_separate_runs`, a backward sweep that pulls each run's trailing points back until it clears the next run by `MIN_RUN_GAP_TICKS`; going backwards is what stops a shift from just moving the collision one run upstream.
-
-    How much room a boundary needs depends on whether the jump is *visible*, tested on what the two sides round to rather than what they are - two positions inside half a ksh step draw the same character, so nothing can be misread as a slam. A visible jump gets the full two ticks; an unchanged position gets one, enough for both runs to have a row but not enough to break a laser the player never lets go of. That distinction is not a detail: 40 of the 130 same-tick handoffs in the corpus hand off at an unchanged position, 9 of the 11 in `spear_of_justice/mxm` among them, and separating those manufactures a release-and-regrab the chart never asked for.
-
-    Across the 8105-chart corpus: 66 phantom slams, 114 overlapped-or-shared boundaries and 25 merged vox-native one-tick gaps all go to **zero**, and laser points shadowed by a later run - the swallowed-run defect - drop 340 to 129. Total runs and total laser points are unchanged, so nothing is invented or lost. The remaining 129 are the chained same-tick stack (3+ points on one tick) that this file's point (3) already excludes; those runs come out with non-monotonic ticks, 322 of them, unchanged by this work and the obvious next thread to pull.
-
-    The 649-chart aggregate is a pass, not a clean sweep, and worth stating honestly. Every button category is **exactly unchanged** (0 better, 0 worse - as it must be, nothing here touches note events). Laser runs get *more* exact matches, 94.0 % -> 94.5 %, but mean absolute error rises 0.30 -> 0.31 on 4 charts better against 7 worse: the hand charters merge more aggressively than the vox data does, so every correct new split moves a chart whose run count was already above the reference further above it. Laser points move 23.23 -> 23.29 for the same reason. The direct check is better evidence than the aggregate here: at the boundaries this actually changes, where the reference aligns cleanly, **27 of 28 visible jumps have a `-` break in the hand chart** and one does not. The hand charters agree that these are two sections; they just end the first one earlier, on the phrase, rather than two ticks before the second - `MIN_RUN_GAP_TICKS` is the smallest value that makes the output correct, and widening it toward what a charter would write is a tuning knob that would need its own fit.
-
-And one in the parser under all of it, which is why it is last and largest:
-
-12. **The beat column of a `measure,beat,cell` timing was read as quarter notes.** `Timeline.abs_tick` computed `measure_tick + beat * res + cell`, but a beat is one *denominator* unit — `res * 4 / den` cells, 48 in 4/4 and 12 in 15/16 — so every event past the first beat of a non-`/4` measure landed several measures late. Measure *lengths* were already denominator-aware, so the two disagreed: `2152_nemsysarena_tonarinoniwa_3e` (user-reported, its 15/16 measure 54) put beat 12 of the following 12/16 measure at offset 528 in a 144-cell measure. The rule was in [`vox_format.md`](vox_format.md) the whole time ("Number of cells per beat = x / beat value"); only the code missed it.
-
-    The corpus settles both halves of the triple beyond argument. Across 8254 charts and **7,492,359 timing rows, not one has `beat` >= the numerator and not one has `cell` >= `res*4/den`** — the beat column is the denominator unit and the cell column stays absolute 1/`res`-of-a-quarter, at every resolution and denominator present. Under the old reading, 47,156 rows fell outside their own measure. **501 charts** carry a non-`/4` signature and 416 of them place events where this moves; on the other 7751 the fix is a proven no-op, re-deriving every tick both ways moves none of them.
-
-    The 649-chart aggregate is the cleanest in this list: **every button category improves and not one chart regresses in any of them** — BT chip 1.33 → 0.84 mean absolute error (92.6 % → 95.1 % exact, 18 charts better / 0 worse), BT hold 0.18 → 0.12 (11/0), FX chip 0.44 → 0.34 (10/0), FX hold 0.33 → 0.30 (9/0), laser runs 0.31 → 0.15 (16/0), laser points 23.29 → 21.19 (11/4). Six of the matched charts go from tens of notes out to matching the hand reference *exactly*: `spear_of_justice/mxm` 469 → 505 BT chips against a reference 505, `extridia/mxm` 579 → 620 against 620, `heartache/mxm` 340 → 374 against 374, and their laser-run counts land on the reference too (96 → 83, 74 → 69, 69 → 56). `bars` is the one category that does not move (44.5 % → 44.7 % exact, 2 better / 2 worse): a chart whose last real event moves earlier loses an outro measure to the `last_tick` trim, which is the documented end-of-chart convention, not a grid error.
-
-    The audio render shared the bug — `apply_chart.py` carries its own `Timeline` and had the identical line — and is fixed with it; see [`audio_engine.md`](audio_engine.md) §5.3b for that measurement (every effect up, 84 chart-rows better against 4 worse, several crossing from negative to positive).
+1. `shared/vox_parser.py` dropped `#END POSITION`'s data (an `#END` prefix check also matched that tag).
+2. A fast curve tail could land its last point exactly on ksh's slam cutoff, drawing an unintended slam.
+3. A same-tick slam on a run boundary lost its endpoint and drew a diagonal. The fix was half right; see 11.
+4. The min-gap pass could keep a near-extremum instead of the true peak, shifting turning points early. Took three attempts.
+5. A slam's end landed on the next free tick, a hairline next to hand charts. Now `SLAM_GAP_FRAC`. A first version could run a slam past the next run's start and swallow the gap `LaserLane.anchors()` needs (`gryphone/mxm` laser runs 204 to 155). Now checks the next run's true start.
+6. v2: a curve fitted over sparse linear points invented curvature (`2010_xroinrmx_xi_5m` tick 6708, 24 steps off). 261 curves were affected, and the metric couldn't see it because it also scored at the vox points. Fixed by `CURVE_LEG_FRAC` and by scoring against the polyline. 261 cases down to 13, worst 24 to 4.2 steps. Lesson: the metric shared the code's blind spot.
+7. v2: the inflection rule fired on stretches too sparse for a curve (`2242_hihouwaineat_shu_5m` tick 6504, 14 steps off). Now gated on the same density test.
+8. v2: a split too near an end was dropped, taking a legal split with it (`2226_gryphone_etia` tick 12408, 14 steps off). Now moved instead.
+9. v2: turning points were thinned left to right, so room went to the wrong reversal (`0653_konransyojo_kameria_4i` measure 56, 24.9 to 4.9 steps). Now picks the reversal furthest from the chord (`_most_deviant`).
+10. The minimum spacing was a fraction of the measure, not a note value. In 4/4 it's a 24th note, but a 3/4 measure got 6 ticks (the slam cutoff itself) and `0536_chase_in_the_shine_penoreri_3e`'s 41-beat measure got 82, which flattened features 12 ticks apart (50 steps off, now 0). Now `whole_note // min_gap_frac`. 4/4 charts don't move. Aggregate: laser points 24.25 to 23.23 mean error, 48 charts better and 27 worse. All 27 are shorter-than-4/4 charts where the stricter gap drops points the charter kept. Corpus rms: v1 0.4231 to 0.4189, v2 0.1853 to 0.1533.
+11. Two sections handing off on one tick came out as a phantom slam. Ending a section costs a `-` row, so two sections need two ticks apart, and bug 3's fix left one. Overlapping runs also made `run_at` drop a run outright (`0223_syonenha_sorawo_tadoru_toromaru_3e`). Fixed by `_separate_runs`, a backward sweep. A jump that rounds to the same ksh step only needs one tick, since separating those would invent a release and regrab (40 of 130 handoffs). Corpus: 66 phantom slams, 114 overlapped boundaries and 25 merged gaps go to zero. 27 of 28 visible jumps have a `-` in the hand chart. Aggregate: laser-run exact matches 94.0% to 94.5%, mean error 0.30 to 0.31, because hand charters merge more than vox does. Open: 322 runs with non-monotonic ticks from chained same-tick stacks of 3 or more points.
+12. The beat column of a `measure,beat,cell` timing was read as a quarter note. A beat is one denominator unit (`res * 4 / den` cells, 12 in 15/16), so events past the first beat of any non-`/4` measure landed late (`2152_nemsysarena_tonarinoniwa_3e`). `vox_format.md` had it right. Across 8254 charts and 7,492,359 rows, no `beat` is at or above the numerator and no `cell` at or above `res*4/den`. 501 charts have a non-`/4` signature, 416 of them moved; the other 7751 are unaffected. Every button category improved with no chart worse: BT chip error 1.33 to 0.84, laser runs 0.31 to 0.15, laser points 23.29 to 21.19. Six charts now match their references exactly (`spear_of_justice/mxm` BT chips 469 to 505). `render_chart.py` had the same bug; see `audio_engine.md` §5.3b.

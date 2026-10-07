@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-"""Diff two check_all_charts.py --csv runs, per effect.
-
-    python compare_runs.py before.csv after.csv [--worst 6] [--flat 0.02]
-
-check_all_charts writes `song,effect,excl_gain,frames`, one row per (chart, effect)
-pair it could score exclusively. Only charts present in BOTH runs are compared,
-so a run that matched a different number of pairs does not silently shift a
-mean - a paired comparison is the only honest one here.
-
-Read the effect you changed first, then check every other row is flat: a DSP
-change that moves an effect it does not touch is a bug in the change, not a
-rounding artefact.
-"""
 import argparse
 import collections
 import csv
@@ -19,7 +6,6 @@ import sys
 
 
 def load(path):
-    """-> {(song, effect): (gain, frames)}"""
     out = {}
     with open(path, newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
@@ -56,7 +42,7 @@ def main():
               "  excluded, but a large imbalance means the corpus or the match\n"
               "  changed too, and the comparison is weaker than it looks.\n")
 
-    per = collections.defaultdict(list)   # effect -> [(song, before, after, frames)]
+    per = collections.defaultdict(list)
     for key in shared:
         song, eff = key
         per[eff].append((song, a[key][0], b[key][0], b[key][1]))

@@ -1,22 +1,4 @@
-"""Drives notes/convert.py + apply_chart.py for a batch of (song, difficulty)
-jobs on a single background thread.
-
-Both scripts are called in-process (imported, not subprocess'd) - notes
-conversion is plain Python and fast; apply_chart.main() is what the CLI's
-`__main__` block calls, unchanged, so calling it directly here reproduces
-exactly what running the script would do, just without paying interpreter
-startup per chart and without needing a second Python bundled into a frozen
-build for subprocess use. Its module-level DSP state is reset per render
-inside main() itself (FXSTATE.clear(), and every flag/global is re-derived
-from args at the top of main()), so repeated in-process calls are safe -
-see audio_engine.md 4.9.
-
-Cancellation is cooperative and job-granular: a render already in progress
-runs to completion (apply_chart.main() has no internal yield points to hook
-into without a much more invasive change - see HANDOFF.md item 2), but the
-queue stops before starting the next job. Progress is therefore also
-job-granular; within one render, the debug console's streamed stdout is the
-only feedback there is.
+"""Job queue on one background thread. Per (song, difficulty) it runs convert_notes.convert() with real metadata, then render_chart.main(), both in-process, and streams stdout into the debug console. po= and plength= are measured by preview_offset and cached per song. Cancelling is job-granular: a render in progress finishes, the queue stops before the next one.
 """
 import io
 import os
@@ -28,12 +10,12 @@ from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import paths  # noqa: E402  (puts scripts/notes, scripts/audio, scripts/shared on sys.path)
-import argspec  # noqa: E402
+import advanced_options  # noqa: E402
 import music_db  # noqa: E402
 
-import convert as notes_convert  # noqa: E402  (scripts/notes/convert.py)
-import apply_chart  # noqa: E402
-import preview  # noqa: E402  (scripts/audio/preview.py)
+import convert_notes as notes_convert  # noqa: E402  (scripts/notes/convert_notes.py)
+import render_chart  # noqa: E402
+import preview_offset  # noqa: E402
 
 
 @dataclass
@@ -44,12 +26,10 @@ class Job:
     song_out_dir: str
     ksh_out: str
     audio_out: str
-    s3v_path: str          # may be None -> audio render is skipped for this job
-    jacket_src: str         # may be None
-    jacket_out_name: str    # "" when jacket_src is None; "jak.png" when every
-                             # difficulty being converted for this song shares
-                             # one source image, else "<short>.png" - see plan_jobs
-    pre_s3v_path: str = None   # may be None -> po=/plength= stay 0
+    s3v_path: str
+    jacket_src: str
+    jacket_out_name: str
+    pre_s3v_path: str = None
 
 
 @dataclass
@@ -66,18 +46,14 @@ class BatchOptions:
     se_bank_dir: str = None
     ffmpeg_path: str = None
     render_audio: bool = True
-    preview_meta: bool = True        # measure po=/plength= from the song's _pre.s3v - see _preview_window
-    standard_slam_gap: bool = True   # notes_convert.convert()'s slam_gap_frac - see its docstring
-    ksh_version: int = 1             # notes_convert.convert()'s ksh_version: 1 = interpolated laser points, 2 = laser_l_curve/laser_r_curve beziers
-    pretilt_fix: bool = False        # notes_convert.convert()'s pretilt_fix - see camera.py
-    advanced_values: dict = field(default_factory=dict)   # dest -> value, from the Advanced panel
+    preview_meta: bool = True
+    standard_slam_gap: bool = True
+    ksh_version: int = 1
+    pretilt_fix: bool = False
+    advanced_values: dict = field(default_factory=dict)
 
 
 class _LineForwarder(io.TextIOBase):
-    """Turns writes into complete-line callbacks, for streaming a script's
-    print() output into the debug console as it happens rather than only
-    once the whole render finishes."""
-
     def __init__(self, on_line):
         self.on_line = on_line
         self._buf = ""
@@ -96,16 +72,7 @@ class _LineForwarder(io.TextIOBase):
 
 
 def plan_jobs(songs, music_dir, output_dir, diff_keys, fallback_music_dir=None):
-    """songs (already filtered to the ones selected in the table) x diff_keys
-    (the globally-checked NOV/ADV/EXH/top-tier filter) -> list[Job], skipping
-    (song, diff) pairs the song doesn't actually have a chart for."""
     jobs = []
-    # Output folders drop the numeric song id (song.folder, e.g.
-    # "2393_alive_dadadaizu") in favour of the plain ascii name - but that's
-    # not always unique: two real entries share one ("gott_hommarju", ids 125
-    # and 1491). Falling back to the id-prefixed name only for a name that
-    # actually collides *within this batch* keeps the common case id-free
-    # without letting one song's output silently overwrite another's.
     name_owner = {}
     for song in songs:
         name_owner.setdefault(song.ascii, song.id)
@@ -113,9 +80,6 @@ def plan_jobs(songs, music_dir, output_dir, diff_keys, fallback_music_dir=None):
         return song.folder if name_owner[song.ascii] != song.id else song.ascii
 
     for song in songs:
-        # "top" tier: whichever of infinite/maximum this song actually has -
-        # requested once as a set member, resolved per song since not every
-        # song's top tier is the same tag.
         wanted = set(diff_keys)
         if "top" in wanted:
             wanted.discard("top")
@@ -125,10 +89,6 @@ def plan_jobs(songs, music_dir, output_dir, diff_keys, fallback_music_dir=None):
         base_name = out_name(song)
         song_out_dir = os.path.join(output_dir, base_name)
 
-        # Collect every (key, diff, vox_path, jacket_src) this song is
-        # actually getting converted for first, so the shared-jacket check
-        # below sees exactly the set of difficulties the jobs themselves
-        # will use - not the full DIFF_ORDER.
         entries = []
         for key in music_db.DIFF_ORDER:
             if key not in wanted or key not in song.difficulties:
@@ -140,16 +100,11 @@ def plan_jobs(songs, music_dir, output_dir, diff_keys, fallback_music_dir=None):
             jacket_src = song.jacket_path(music_dir, key, fallback_music_dir)
             entries.append((key, diff, vox_path, jacket_src))
 
-        # Most songs ship one jacket shared across every difficulty - when
-        # that's true here too, write it once as "jak.png" instead of one
-        # identical copy per difficulty. Only if the resolved source images
-        # actually differ (or are missing for some difficulties) does each
-        # difficulty get its own "<short>.png".
         jacket_srcs = {js for _k, _d, _v, js in entries if js}
         shared_jacket = len(jacket_srcs) == 1
 
         for key, diff, vox_path, jacket_src in entries:
-            short = music_db.DIFF_SHORT[key].lower()  # nov/adv/exh/inf/mxm
+            short = music_db.DIFF_SHORT[key].lower()
             jacket_out_name = ""
             if jacket_src:
                 jacket_out_name = "jak.png" if shared_jacket else "%s.png" % short
@@ -184,16 +139,12 @@ def _meta_for(job, preview_window=None):
 
 
 def _preview_window(job, options, log, cache):
-    """(po_ms, plength_ms) for this job's song, or None.
-
-    Cached on the track path because the window is a property of the song and not of the difficulty: without it a four-difficulty song would pay for the same correlation four times. A None result is cached too - a song whose preview can't be placed shouldn't be decoded again per difficulty just to fail again.
-    """
     if not options.preview_meta or not job.s3v_path or not job.pre_s3v_path:
         return None
     if job.s3v_path in cache:
         return cache[job.s3v_path]
     try:
-        window = preview.measure(job.s3v_path, job.pre_s3v_path)
+        window = preview_offset.measure(job.s3v_path, job.pre_s3v_path)
         if window is None:
             log("-- %s: preview didn't match the track - po/plength left at 0"
                 % job.song.folder)
@@ -205,9 +156,6 @@ def _preview_window(job, options, log, cache):
 
 
 def run_job(job, options, log, preview_cache=None):
-    """One (song, difficulty): notes conversion, jacket copy, audio render.
-    Never raises - failures are reported in the returned JobResult so one bad
-    chart doesn't stop the batch."""
     os.makedirs(job.song_out_dir, exist_ok=True)
     result = JobResult(job=job, ok=True)
 
@@ -240,26 +188,24 @@ def run_job(job, options, log, preview_cache=None):
             "install) - .ksh written, audio skipped" % (job.song.folder, job.diff_key))
         return result
 
-    # apply_chart.py's positional `folder` is the INPUT chart folder it globs
-    # *.vox in - not the output folder we're writing into.
     argv = [os.path.dirname(job.vox_path),
             "-d", job.song.difficulties[job.diff_key].suffix,
             "-a", job.s3v_path,
             "-o", job.audio_out]
     if options.se_bank_dir:
         argv += ["--se-bank-dir", options.se_bank_dir]
-    argv += argspec.build_cli_args(options.advanced_values or {})
+    argv += advanced_options.build_cli_args(options.advanced_values or {})
 
     if options.ffmpeg_path:
         os.environ["FFMPEG"] = options.ffmpeg_path
 
     old_argv, old_out, old_err = sys.argv, sys.stdout, sys.stderr
     forwarder = _LineForwarder(log)
-    sys.argv = ["apply_chart.py"] + argv
+    sys.argv = ["render_chart.py"] + argv
     sys.stdout = forwarder
     sys.stderr = forwarder
     try:
-        apply_chart.main()
+        render_chart.main()
         result.wrote_audio = True
     except SystemExit as e:
         if e.code not in (0, None):
@@ -277,20 +223,15 @@ def run_job(job, options, log, preview_cache=None):
 
 
 class ConvertWorker:
-    """Runs plan_jobs() output on one background thread. All callbacks fire
-    from that thread - the caller is responsible for marshaling onto the Tk
-    main thread (e.g. `root.after(0, lambda: ...)`), same convention as
-    release_check.check_async."""
-
     def __init__(self, jobs, options, on_log, on_progress, on_done):
         self.jobs = jobs
         self.options = options
         self.on_log = on_log
-        self.on_progress = on_progress      # (index, total, job) -> None, before each job starts
-        self.on_done = on_done              # (list[JobResult], cancelled: bool) -> None
+        self.on_progress = on_progress
+        self.on_done = on_done
         self._cancel = threading.Event()
         self._thread = None
-        self._preview_cache = {}     # .s3v path -> (po, plength) or None, shared across the batch
+        self._preview_cache = {}
 
     def start(self):
         self._thread = threading.Thread(target=self._run, name="convert-worker", daemon=True)
@@ -298,8 +239,6 @@ class ConvertWorker:
         return self._thread
 
     def cancel(self):
-        """Stops the queue before its next job. Does not interrupt a render
-        already running - see module docstring."""
         self._cancel.set()
 
     def _run(self):

@@ -1,67 +1,57 @@
 ---
 name: notes-refcheck
-description: Regression-test the .vox to .ksh notes conversion against the hand-made reference conversions. Use whenever anything under scripts/notes/ changes — convert.py, laser.py, decimation constants, grid/measure logic, slam handling — or when shared/vox.py parsing changes, and before calling any such change good. Also use when asked to "crosscheck the notes", "check the conversion" or "run the notes xcheck" or "check the notes".
+description: Regression-test the .vox to .ksh notes conversion against the hand-made reference conversions. Use whenever anything under scripts/notes/ changes — convert_notes.py, laser_curves.py, decimation constants, grid/measure logic, slam handling — or when shared/vox_parser.py parsing changes, and before calling any such change good. Also use when asked to "crosscheck the notes", "check the conversion" or "run the notes xcheck" or "check the notes".
 ---
 
 # Notes reference check
 
-`check_all_charts.py` (in this skill) converts every chart it can match to a hand-made reference `.ksh` under `scripts/shared/reference/ksh/`, and compares counts — bars, BT chips/holds, FX chips/holds, laser runs, laser points — on both sides. It is a structural comparison, not a diff: the references are hand conversions, so they are a strong signal about "is this the same chart" and a weak one about exact byte equality.
+`check_all_charts.py` converts every chart with a reference `.ksh` under `scripts/shared/reference/ksh/` and compares counts: bars, BT chips/holds, FX chips/holds, laser runs, laser points. The references are hand conversions, so this is a structural comparison, not a diff.
 
-Python is `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`. Run everything from the `vox2ksh` directory.
+Python is `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`. Run from the `vox2ksh` directory.
 
-## The one rule
-
-**Measure before and after, over the whole matched set.** Laser decimation trades one category against another, so a change that looks like a clear win on three charts routinely loses on the aggregate. Four bugs in this converter were found on charts *outside* the matched set and each was only accepted after the full aggregate held.
+**Rule: measure before and after, over the whole matched set.** Laser decimation trades one category against another, so a change that wins on three charts often loses overall.
 
 ## Procedure
 
-### 1. Baseline
-
-Baselines live in `output/refcheck/` (git-ignored). Reuse one only if it came from the pre-change tree.
+1. Baseline. Reuse one in `output/refcheck/` only if it came from the pre-change tree.
 
 ```bash
 git stash push -m notescheck-baseline -- scripts && python .claude/skills/notes-refcheck/check_all_charts.py --csv output/refcheck/notes_before.csv ; git stash pop
 ```
 
-Confirm the stash popped cleanly.
-
-### 2. Iterate
-
-For one song while developing, `check_one_chart.py` prints our counts against the reference side by side, with per-lane splits (BT A-D, FX L/R, laser L/R) so you can see where a chart differs, and writes the converted `.ksh` to `output/work` for opening next to the reference. It checks every difficulty the reference folder holds unless `-d` picks one.
+2. Iterate on one song. This prints our counts against the reference, split by lane, and writes the `.ksh` to `output/work`. It checks every difficulty in the reference folder unless `-d` picks one.
 
 ```bash
 python .claude/skills/notes-refcheck/check_one_chart.py <song-substring> [-d mxm]
 ```
 
-`convert.py <chart.vox> -o out.ksh` renders one chart if you need to read the output directly. A conversion that raises is counted as a failure, not a mismatch — check the "failed to convert" list, it is easy to miss under the aggregate.
+A conversion that raises counts as a failure, not a mismatch. Check the "failed to convert" list.
 
-### 3. Full run, after
+3. Full run after the change.
 
 ```bash
 python .claude/skills/notes-refcheck/check_all_charts.py --csv output/refcheck/notes_after.csv
 ```
 
-### 4. Compare
+4. Compare.
 
 ```bash
 python .claude/skills/notes-refcheck/compare_runs.py output/refcheck/notes_before.csv output/refcheck/notes_after.csv
 ```
 
-It prints, per category: mean and median absolute error before/after, exact-match percentage, how many charts improved versus regressed, and the charts that moved most.
+## Verdict
 
-### 5. Verdict
+* Buttons (bars, BT, FX) must stay exact. Any error there is a bug in the grid, line count or parser. A regression blocks the change.
+* Laser runs should match almost exactly. A moved count usually means slam handling or run splitting changed.
+* Laser points are approximate (about 4% mean error). Judge them on the aggregate, never at the cost of a button category.
+* A chart that newly fails to convert blocks the change.
 
-* **Buttons (bars, BT chip/hold, FX chip/hold) are exact by construction.** Vox ticks are always a whole multiple of the ksh line count, so any non-zero mean error here is a real bug — in the grid, the measure line count, or the parser — not an approximation. A regression in these categories blocks the change outright.
-* **Laser runs should match almost exactly.** A moved run count usually means slam handling or run splitting changed.
-* **Laser points are approximate** — decimation reproduces a curve's shape, not one charter's exact point choices, and ~4 % mean is the standing figure. Judge this category on the aggregate, and never at the cost of a button category.
-* Charts that newly **fail to convert** are a blocking regression regardless of what the aggregate did.
+Report each category as before and after, then say whether the change is adopted.
 
-Report each category as before → after with the chart split, then say plainly whether the change is adopted. If it improves laser points while moving any button category off exact, it is not a fix.
+## Outside the matched set
 
-### 6. Check outside the matched set
-
-The matched set is ~30 pairs; the corpus is 8107 charts. Before calling a fix done, convert a handful of charts that have no reference — including at least one with a non-48 `#BEAT RESOLUTION` and one with heavy laser curves — and confirm they still convert without raising. That is how the last four bugs were found.
+Only about 30 charts match. Before calling a fix done, convert a few charts with no reference, including one with a non-48 `#BEAT RESOLUTION` and one with heavy laser curves, and check they convert without errors.
 
 ## Recording the result
 
-Add the finding to `specs/notes.md` — its "Bugs found and fixed" list is the record, and the tuned constants (`RDP_TOL`, `min_gap_frac`) live in `laser.py` with comments explaining what they were fitted against. If a constant moves, say what aggregate justified the move.
+Add it to the "Bugs found and fixed" list in `specs/notes.md`. If a constant like `RDP_TOL` or `min_gap_frac` moves, say which aggregate justified it.

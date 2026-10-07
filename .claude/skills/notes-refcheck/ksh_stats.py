@@ -1,27 +1,17 @@
-"""Shared core of the notes reference check: pairing, feature counting, category list.
-
-check_all_charts.py (every matched chart, aggregate) and check_one_chart.py (one song, side by side) both build on this. The references are HAND conversions (scripts/shared/README.md), not a byte-for-byte oracle, so this counts bars, chips, holds and laser features on both sides and compares the counts - the right grain for "does this look like the same chart", not a diff.
-
-Matching is by folder-name substring (reference folders are named after the song, not the game's internal id) via scripts/shared/refmatch.py, but pairs *every* difficulty present in each reference folder rather than only the hardest - more charts is more signal for tuning laser.py's decimation constants, which is the point of the check.
-"""
-
 import os
 import re
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, os.pardir, os.pardir, os.pardir, "scripts", "shared"))
-from _paths import MUSIC, SCRIPTS, ensure_work
-from refmatch import REF, DIFF_SUFFIX, match_songs
+from game_paths import MUSIC, SCRIPTS, ensure_work
+from match_references import REF, DIFF_SUFFIX, match_songs
 
 sys.path.insert(0, os.path.join(SCRIPTS, "notes"))
-import convert
+import convert_notes as convert
 
 
 def find_pairs():
-    """-> [(vox_path, ksh_path, label), ...] for every difficulty present in
-    every matched reference folder that also has a matching .vox chart.
-    """
     pairs = []
     for ref_name, folder in sorted(match_songs().items()):
         rd = os.path.join(REF, ref_name)
@@ -39,16 +29,12 @@ def find_pairs():
 
 
 class KshStats:
-    """Feature counts from a .ksh file's body - independent of convert.py,
-    so this doesn't just check the writer against itself.
-    """
-
     def __init__(self, path):
         self.bt_chip = [0] * 4
         self.bt_hold = [0] * 4
         self.fx_chip = [0] * 2
         self.fx_hold = [0] * 2
-        self.laser_points = [0] * 2     # explicit chars, any value
+        self.laser_points = [0] * 2
         self.laser_runs = [0] * 2
         self.bars = 0
 
@@ -103,6 +89,5 @@ CATEGORIES = [
 
 
 def convert_and_count(vox_path, ksh_path, out_path):
-    """Convert `vox_path` to `out_path` with notes/convert.py and count features on both it and the reference. -> (ours, theirs) KshStats. Raises if the conversion does."""
     convert.convert(vox_path, out_path)
     return KshStats(out_path), KshStats(ksh_path)

@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""One-shot build: stage assets, then run PyInstaller.
-
-    python build/build.py [--game PATH] [--ffmpeg PATH] [--skip-assets]
-
-Requires `pyinstaller` (pip install pyinstaller) in the environment this
-runs under - not a runtime dependency of the app itself, only of building
-it, so it's kept out of requirements-gui.txt. See build/README.md.
-"""
 import argparse
 import os
 import subprocess

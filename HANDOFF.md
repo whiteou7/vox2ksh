@@ -1,5 +1,3 @@
-# Handoff — vox2ksh
+# Handoff
 
-# To-do
-
-* work on removing pretilt again??
+* Try removing pretilt again.

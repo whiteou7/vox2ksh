@@ -1,203 +1,126 @@
-# The camera element
+# Camera: tilt, spin and zoom
 
-**Status: converter exists (`scripts/camera/convert.py`); spin is solved (kind, direction and length), zoom is on reasonably solid ground.** Scope, tools, and findings below.
+Code: [`../scripts/camera/`](../scripts/camera/). Spin (kind, direction, length) is solved. Zoom is approximate. Pretilt removal exists but is conservative and off by default.
 
-The standing direction is to settle what the manual reference conversions and direct domain knowledge can tell us first and fall back to the DLL only once that is exhausted. **Two parts of this document have now taken that fallback**, both by request and both flagged where they appear: the laser row parser, read to settle which column holds the roll length (see [Which column holds the length](#which-column-holds-the-length)), and the whole spin renderer, read to settle `roll_type` 4 and 7 (see [What the DLL says the spin is](#what-the-dll-says-the-spin-is---kind-count-duration-all-exact)). Everything else here is still reference-derived.
+Scope: lane tilt, spin/swing and top/bottom zoom. Out of scope: `zoom_side`, `center_split`, `rotation_deg`, `scroll_speed` and the `*_curve` options (KSM v2 only). No reference chart uses `zoom_side`.
 
-**Pretilt removal is implemented, off by default** (`camera.py`'s `_pretilt_brackets`, reached by `convert(..., pretilt_fix=True)`, the CLI's `--pretilt-fix` and the GUI's "Remove pretilt" checkbox). "Pretilt" is KSM anticipating an upcoming laser and starting to tilt before the arcade would. This document previously called it out of scope on the grounds that it fires on *any* laser and so expresses no chart-side condition a converter could act on. **Correction: that rationale was wrong.** KSM's anticipation window, trigger and magnitude are all exactly specified and all computable from the chart alone, and the hand-made reference conversions cancel it with a consistent, measurable idiom - which is what the implementation reproduces. See [Pretilt: KSM's two-beat laser anticipation](#pretilt-ksms-two-beat-laser-anticipation).
+Approach: use the reference conversions and domain knowledge first, and the DLL only when they can't answer. The DLL was read for two things: the laser row parser (which column holds the roll length) and `Game::AngleUpdater` (the spin). Everything else here is reference-derived.
 
-Scope: lane tilt, spin/swing and top/bottom zoom - the `.vox` tracks that move the playfield rather than the notes on it. Explicitly out of scope for this pass (KSMv2-only, or not expressible pre-v2): `zoom_side`, `center_split`, `rotation_deg`, `scroll_speed`, and the `*_curve` interpolation options. `zoom_side` usage was checked directly: zero occurrences across every file in `scripts/shared/reference/ksh`.
-
-## What makes this element different
-
-Audio and notes were both *transcription* problems: the game does something exact, and the job was to read it out of the binary. Camera turned out to be a mapping problem in a stronger sense than expected - see [Reference charts are hand-made, not derived](#reference-charts-are-hand-made-not-derived). Document the lossy/uncertain parts explicitly; a converter that silently discards or fabricates camera data is worse than one that says what it doesn't know. Per direction, exact accuracy on the zoom scale factor and the spin length formula isn't the bar here - a reasonable, documented approximation is fine; the goal is a converter that does something sensible everywhere and is honest about where it's guessing. (Spin length turned out to be recoverable exactly anyway, once the per-charter scale was controlled for - see "Length" below. Zoom is still an approximation.)
+Camera is a mapping problem more than a transcription problem. The references are hand-made, so values like zoom scale are subjective and vary by charter. `camera_events.py` uses documented approximations and says where it guesses.
 
 ## Tools
 
 | file | what it does |
 |---|---|
-| [`../scripts/camera/survey.py`](../scripts/camera/survey.py) | Walks every `.vox` chart, tabulates `#SPCONTROLER` control-type inventory, `Tilt`/`CAM_RotX`/`CAM_Radi` value ranges/lengths, and laser roll/swing (C3) x length distributions, keyed on format version because the length column moves in v13. `--locate <types>` pinpoints exact chart/measure occurrences of specific `roll_type` values; `--lasercols` reports the length/cells-per-chain columns per version (see "Which column holds the length"). A base install has no format-13 charts at all, so pass `--root <update folder>/data/music` for any v13 coverage. |
-| [`../scripts/camera/correlate.py`](../scripts/camera/correlate.py) | Matches every `scripts/shared/reference/ksh` pair to its `.vox` source and correlates vox camera data against the hand-charted ksh camera lines by tick: regression for zoom, laser-position regression for tilt, and for spin a full tabulation of kind and direction plus a `spin_length_report` that derives the length law from scratch (per-song charter scale, exact-match rates, default lengths, and the scale-free type-ratio cross-check). Every matched pair is v10 or v12, so "the length column" is always `C8` here. |
-| [`../scripts/camera/camera.py`](../scripts/camera/camera.py) | The actual conversion logic: `compute_tilt_events`, `compute_zoom_events`, `compute_spin_tokens`, each taking a loaded `VoxChart` and returning tick-tagged events. Pure compute, no file I/O - documented inline, this file is the executable form of this writeup. |
-| [`../scripts/camera/convert.py`](../scripts/camera/convert.py) | CLI: `python convert.py <chart.vox> [-o out.ksh] [--pretilt-fix]`. Thin wrapper - calls `../notes/convert.py`'s `convert(vox_path, out_path, camera=True)`, which places `camera.py`'s events into the same grid it builds for notes. `camera=False` (the default, used by `notes-refcheck`'s `check_all_charts.py`) is unaffected - verified byte-for-byte via `notes-refcheck`'s `check_all_charts.py` before/after this change. |
+| `scripts/camera/survey_camera.py` | Tallies `#SPCONTROLER` types, `Tilt`/`CAM_RotX`/`CAM_Radi` ranges and roll/swing x length distributions per format version. `--locate <types>` finds occurrences, `--lasercols` prints the length columns. Format-13 charts need `--root <update folder>/data/music` |
+| `scripts/camera/correlate_camera.py` | Matches each reference pair to its `.vox` and correlates camera data by tick: zoom and tilt regressions, spin kind/direction tables, and `spin_length_report` |
+| `scripts/camera/camera_events.py` | `compute_tilt_events`, `compute_zoom_events`, `compute_spin_tokens`, each over a `VoxChart` |
+| `scripts/camera/convert_camera.py` | `python convert_camera.py <chart.vox> [-o out.ksh] [--pretilt-fix]`, a wrapper over `notes/convert_notes.py`'s `convert(..., camera=True)` |
 
-`shared/vox.py` parses `#SPCONTROLER` (`VoxChart.camera = {"tilt": [...], "cam_rotx": [...], "cam_radi": [...]}`, each a list of `CameraSeg`: `tick`, `length`, `start`, `end`, `node_type`). Only these three control types are parsed; `Realize`, `SpecialN`, `Morphing2`, `LaneY`, etc. are out of scope and left in the raw section dict.
+`shared/vox_parser.py` parses three control types into `VoxChart.camera`: `tilt`, `cam_rotx`, `cam_radi` (each a list of `CameraSeg`: `tick`, `length`, `start`, `end`, `node_type`). `Realize`, `SpecialN`, `Morphing2`, `LaneY` and the rest are left raw.
 
-## `#SPCONTROLER` row shape - confirmed
-
-Matches `vox_format.md`'s documented layout exactly, transcribed from raw rows rather than assumed:
+## `#SPCONTROLER` rows
 
 ```
-C0=timing  C1=control-type  C2=2 (const)  C3=length(cells)  C4=start  C5=end  C6=node-type(Tilt only, else 0)  C7=0 (const)
+C0=timing  C1=control-type  C2=2  C3=length(cells)  C4=start  C5=end  C6=node-type(Tilt only)  C7=0
 ```
 
-`Tilt`'s `C6` node-type: `0` mid-series (9267 corpus-wide), `1` a standalone single tilt (657), `2` begins a series (1050), `3` ends a series (1049).
+`Tilt` node types: 0 mid-series (9267), 1 single (657), 2 series start (1050), 3 series end (1049).
 
-## Corpus-wide facts (from `survey.py`, all 8103 charts)
+## Corpus facts (8103 charts)
 
-- **`#FORMAT VERSION`**: 5660 v10, 2443 v12.
-- **6667/8103 charts (82%) carry `CAM_RotX`/`CAM_Radi`** (automatic top/bottom zoom work).
-- **Only 758/8103 charts (9%) carry any manual `Tilt` row.** The rest of a chart's `tilt=` output is SDVX's own automatic laser-driven tilt - see below.
-- **6549/8103 charts (81%) have at least one laser roll/swing entry.**
-- Value ranges: `Tilt` stays exactly within [-1, 1]. `CAM_RotX` reaches up to 3.9, `CAM_Radi` down to -1.5 and up to 3.0 - both exceed a naive ±1 reading.
-- **A `roll_type` value 7 exists** on `#TRACK1`/`#TRACK8`, v12 and v13, 67 rows corpus-wide - not documented in `vox_format.md`, which lists only 0-6. **Correction to inherited notes**, in the spirit of `audio_engine.md` §3's effect-id fixes. Its length range (5-32 in v12, 10-45 in v13) overlaps type 6's.
-- `roll_type` counts over 8251 charts (the 8103-chart base install plus the 148 format-13 charts of one update folder): type 1 (6-beat) 8483, type 3 (3-beat) 4642, type 2 (2-beat) 3262, type 5 (swing) 2129, type 6 (8x-roll, v12+) 264, type 7 (undocumented, v12+) 67, type 4 (12-beat triple) 27. Format 13 is scarce here - 148 charts, 488 roll rows - and it is scarce *because* v13 only exists in update folders; a base install is entirely v10/v12.
+* Formats: 5660 v10, 2443 v12.
+* 82% carry `CAM_RotX`/`CAM_Radi`. Only 9% carry manual `Tilt` (36% of a 148-chart v13 sample). The rest of a chart's tilt is the engine's auto-tilt.
+* 81% have at least one roll/swing.
+* `Tilt` is in [-1, 1]. `CAM_RotX` reaches 3.9; `CAM_Radi` spans -1.5 to 3.0.
+* `roll_type` 7 exists (67 rows, v12+) and `vox_format.md` lists only 0 to 6. Counts over 8251 charts: type 1 8483, 3 4642, 2 3262, 5 2129, 6 264, 7 67, 4 27.
+* `roll_type=6` has 64 reference samples in 27 songs. Type 7 has none, so it comes from the DLL.
 
-### Locating `roll_type` 6 and 7
+## Reference charts are hand-made
 
-**`roll_type=6` is now covered by the reference set** - 64 matched samples across 27 songs, once the corpus grew past the 30 charts this document was originally written against (644 matched pairs now). It is, in fact, the *best*-fit type of all, see "Spin/swing: length" below. **`roll_type=7` still has zero reference coverage**, so its handling comes from the DLL instead: it shares type 6's length column and unit but runs the *swing* curve, not the roll curve (see "What the DLL says the spin is"). The inherited claim that the two types "behave identically" was half wrong, and the converter emitted a full spin for type 7 on the strength of it. Regenerate the full 331-row list with `python survey.py --locate 6,7 --root <update folder>/data/music`. A sample (chart, format version, side, position `measure,beat,cell` 1-indexed, length - from `C8` on v12 and `C9` on v13, see "Which column holds the length"):
+* `zoom_top` slopes cluster around 135 to 160 (140.00 recurs in 5 songs, R² >= 0.999). `zoom_bottom` clusters around -117 to -136.
+* `Realize` payloads are identical across the matched v10/v12 charts, but 5 of 148 v13 charts differ. Not tested as a zoom-scale cause.
+* Tilt style varies by song: 5 songs use no manual tilt, others up to 7.37 events per laser run (`furiko_doll/mxm`).
 
-```
-roll_type=7  0642_sayonara_planet_wars_kuroma_4i.vox   v12  side=R  pos=035,03,00  len(C8)=17
-roll_type=7  2101_jamawoshinaide_symholic_5m.vox      v12  side=L  pos=093,04,24  len(C8)=28
-roll_type=6  0044_sekaiha_neko_nem_4i.vox             v12  side=L  pos=025,03,00  len(C8)=6
-roll_type=6  0271_vallis_djyoshitaka_4i.vox           v12  side=R  pos=032,04,24  len(C8)=50
-roll_type=6  2244_kakugoseyo_makishiukyou_5m.vox      v12  side=L  pos=038,04,24  len(C8)=14
-roll_type=6  0152_earthquake_super_shock_soundholic_4i.vox  v13  side=L  pos=048,04,24  len(C9)=30
-roll_type=7  0220_ongaku_leaf_4i.vox                  v13  side=L  pos=088,01,00  len(C9)=18
-roll_type=6  2268_littleprana_amamihinami_5m.vox      v13  side=L  pos=020,01,00  len(C9)=13
-```
+## Zoom
 
-## Reference charts are hand-made, not derived
+* `CAM_RotX` correlates positively with `zoom_top`. `CAM_Radi` correlates negatively with `zoom_bottom`, so it is negated.
+* `ROTX_TO_ZOOM_TOP = 140.0`, `RADI_TO_ZOOM_BOTTOM = -125.0`, as central values.
+* Both endpoints of every segment are emitted, deduplicated where consecutive segments hand off the same value, and spaced apart where a same-tick snap needs two values.
 
-`scripts/shared/README.md` already states the `scripts/shared/reference/ksh` conversions are **manual** - done by a human watching the game, not generated from `.vox`. For notes and lasers this didn't matter much: the underlying event data is exact, so a competent transcription converges almost exactly (`notes.md`'s near-exact BT/FX/laser-run counts). For camera it matters a lot, because camera values are a continuous, subjective "does this look right" quantity:
+## Tilt
 
-- **Per-song zoom regression is not one constant.** `zoom_top` slopes cluster loosely around 90-200 (most 135-160, with `140.00` recurring exactly in 5 different songs' regressions - `foolish_again/exh.ksh`, `memory_flow/mxm.ksh`, `resonant_gear/mxm.ksh`, `rip_gossip_no_umi/exh.ksh`, `the_king_of_red/adv.ksh`, all R² ≥ 0.999, which is a real signal at that repetition rate). `zoom_bottom` slopes cluster around -90 to -152, mostly -117 to -136.
-- `#SPCONTROLER`'s `Realize` rows were checked as a candidate per-song calibration factor and ruled out for the reference set specifically - every one of the 30 matched (v10/v12) charts has byte-identical `Realize` payloads. **Correction**: it's not universally fixed - a broader v13 survey (see `vox_format.md`'s `#SPCONTROLER` `Realize` entry) found 5/148 charts with a different payload (varying `CAM_Radi`'s overshoot/end values). Rare, and not revisited as a zoom-scale explanation yet, but no longer "always identical" as originally stated.
-- **Tilt intervention style varies wildly by song.** Counting `tilt=` events per laser run across the 30 reference charts: 5 songs use **zero** manual tilt lines at all (pure `tilt=normal` throughout - `aim_higher`, `aqua_luna_rium`, `chakra`, `komorebi_ni_saku`, `shiawase_usagi_peko_miko_marin`), while others range from light touch-ups (~0.1-0.6 events/run) to dense hand-animation (up to 7.37 events/run in `furiko_doll/mxm.ksh` - a near-continuous manual reproduction of the tilt curve, not a simple bracket idiom). Per direction, this is a low-priority piece.
-- Per direction (zoom accuracy isn't the bar), `camera.py` uses ~140 / ~-125 as central-tendency constants, clearly flagged as approximate.
+`compute_tilt_events` emits `tilt=normal` as the baseline and passes manual `Tilt` segments through as floats at each segment's start and end. The auto-tilt formula (`#TILT MODE INFO`) is not modelled; ksh's own auto-tilt stands in.
 
-## Zoom: sign, direction, and the constants used
+Sign: the formats measure tilt in opposite directions. Vox `+1.0` is ksh `-1`. Of 4252 non-trivial matched samples, 98.9% have opposite signs, and pooled regression gives `ksh = -1.5681 * vox` (R² 0.911, n=6520).
 
-- `CAM_RotX` correlates **positively** with `zoom_top` (matches vox's "higher = lane top higher on screen" against ksh's rotation description directly, no sign flip).
-- `CAM_Radi` correlates **negatively** with `zoom_bottom` - vox's "higher `CAM_Radi`" means more zoomed out, ksh's "higher `zoom_bottom`" means more zoomed in, so a converter must negate.
-- `camera.py`'s `ROTX_TO_ZOOM_TOP = 140.0`, `RADI_TO_ZOOM_BOTTOM = -125.0`. Both endpoints of every segment are emitted (not just each segment's start plus a final end - see "Bugs found and fixed" below for why that was wrong), deduplicated where consecutive segments hand off the same value, and spaced apart where they don't - i.e. a same-tick vox snap.
+Magnitude: the unit reading is 1.0, but per-song modal `ksh/vox` ratios cluster at -1.5 (56 songs), -2.0 (16), -2.4 to -2.5 (9), beyond (3), -1.0 (1), about 0 (4). `TILT_VOX_TO_KSH = -1.5` in `camera_events.py` (the authority). `#TILT MODE INFO` is ruled out as the cause. Open: whether KSM's tilt unit is about two-thirds of SDVX's or charters exaggerate.
 
-## Tilt: automatic baseline and manual passthrough
+## Pretilt
 
-**Confirmed by direction**: only 9% of charts carry a manual `Tilt` track (v10/v12 corpus-wide), yet every reference chart is full of `tilt=` lines - so most tilt output is SDVX's own automatic laser-driven tilt (governed by `#TILT MODE INFO`'s 0/1/2 normal/bigger/stay-max mode), computed independently by the arcade engine, not read out of the vox file. **The auto-tilt formula itself is not modelled** - `camera.py` leaves this to ksh's own built-in auto-tilt (`tilt=normal` as the baseline), which is not necessarily identical to the arcade's, but is the closest available approximation without the DLL. Confirmed low priority per direction. Note: manual `Tilt` is far more common in chart-format-13 charts specifically - 36% of a 148-chart v13 sample vs 9% in the v10/v12 corpus, see `vox_format.md`'s "Format version 13" - which shifts how much of a v13 chart's tilt behaviour this passthrough actually covers, without changing the mechanism itself.
+KSM tilts a lane early toward the first point of a laser section that's still two beats away. From KSM v2's `HighwayTiltAuto.cpp`: per frame and per laser lane, take the laser value under the crit line; if the lane has no active section, take the first point of any section starting within `kResolution4 / 2` = 480 pulses = 2 quarter notes. Then add `v` (left lane) or `-(1 - v)` (right).
 
-`compute_tilt_events` therefore does two things only: emit `tilt=normal` as the baseline, and pass through any manual `Tilt` vox segment as floats at each segment's start/end tick (charter-authored camera work, not auto-tilt, so it overrides the baseline outright).
+* Magnitude depends on how far the first point is from the lane's home edge: left laser opening at the left edge gives 0.0, centre 0.5, right edge 1.0. Mirrored for the right lane.
+* The trigger is per lane. An idle lane pretilts even while the other lane has a laser.
+* The lead is in beats but the tilt moves in real time, so a slow song completes the pretilt and a fast one barely starts. Return to flat is 5x slower than the swing away.
+* `tilt=zero` fades the auto path out over about 250 ms. `tilt=0` is a manual graph that takes over in 40 ms with no smoothing.
 
-### The manual passthrough sign was inverted - corrected
+It's worst when a section opens with a slam after an idle lane, the opening is off the home edge, and the BPM is low.
 
-**The two formats measure lane tilt in opposite directions.** A vox `Tilt` of `+1.0` is a ksh `tilt=-1`, and the passthrough was emitting the vox value verbatim - tilting every hand-authored camera move in the chart the wrong way. User-reported, and confirmed against the reference conversions: of 4252 non-trivial matched samples (both values away from zero), **4205 - 98.9% - have the ksh value opposite in sign to the vox one**, and `correlate.py`'s pooled "tilt -> tilt (manual vox Tilt track only)" regression is `ksh = -1.5681 * vox`, R² = 0.911 over n = 6520. `camera.py` now applies `TILT_VOX_TO_KSH` to both endpoints of every segment.
+This corrects an earlier claim that pretilt fires on any laser and so can't be cancelled from chart data. The trigger is exactly computable.
 
-**The magnitude is the open half of that constant, and the corpus does not agree with the unit reading.** 1.0 is what the formats' own definitions imply: vox `Tilt` is bounded to [-1, 1], and ksh's manual tilt is in units of one full normal tilt (`HighwayTiltManual` sets `kTiltRadians * value`, the same `kTiltRadians` a fully-deflected auto tilt reaches). Controlling for per-song charter scale the way the spin-length law had to - pooling hides it, see "Length" below - the modal `ksh/vox` ratio across the 107 reference songs with usable manual-`Tilt` coverage is:
+### What the reference charters do
 
-| modal ratio | songs |
-|---|---|
-| -1.49 to -1.52 | 56 |
-| -2.00 to -2.08 | 16 |
-| -2.4 to -2.5 | 9 |
-| beyond -2.5 | 3 |
-| -1.0 | 1 |
-| ~0 (charter ignored the track) | 4 |
+Over 1238 reference conversions, throwaway analysis with no script in the repo:
 
-So the charters cluster hard on **-1.5**, with a second cluster at -2.0 and a tail upward - the same shape as the spin-length scales (24 true, charters at 32/36/48), except that here almost nothing sits at the unit value. Either KSM's manual tilt unit is genuinely about two-thirds of SDVX's, or every charter uniformly exaggerates. `#TILT MODE INFO` is ruled out as the explanation: every chart sampled carries mode 0, so the spread is not a tilt-mode scale. Within-song agreement on the modal ratio is only 0.60 (median), much looser than the spin case, which is expected for a hand-drawn continuous curve.
+* They flatten the run-up, then restore tilt exactly on the laser's first point. 87.9% of 8067 `zero`/`0` to auto restorations land on a laser section start, against 13.6% for the same events shifted one beat (6.5x enrichment).
+* The flat region has a median of 3 beats (modes 3.0, 2.0, 1.0, 4.0). The flattening end sits on a previous laser's edge: 15.2% on a laser start, 42.3% within a quarter beat of a laser end.
+* `tilt=zero` is used in 807 charts, `tilt=0` in 486, manual floats in 407, `keep_*` in 38. 5 charts drive tilt entirely from manual floats, which suppresses auto-tilt.
+* Of 64577 section starts after an idle lane, 25.6% are flattened. Centre-opening slams get it 49.5% of the time, home-edge openings with no slam 12.8%. Run-up note density raises it from 12.4% to 30.0%.
+* Example: `yukibare_parade/mxm.ksh` measures 15 to 16.
 
-**`TILT_VOX_TO_KSH` is at `-1.5`, the reference charters' amplitude.** This document previously said it was left at the unit reading `-1.0`, emitting roughly two-thirds of the charters' amplitude on the median song; the code has since moved to `-1.5` and the text had not followed. **Correction, to whichever of the two is stale** - the constant in `camera.py` is the authority and it reads `-1.5`. The sign is not in question either way.
+### What the converter emits (`pretilt_fix`, off by default)
 
-With `pretilt_fix=False` (the default) that is all `compute_tilt_events` does, and the baseline `tilt=normal` hands the anticipation question to KSM's auto-tilt engine entirely. With `pretilt_fix=True` it additionally emits the flat brackets described in the next section.
+`_pretilt_brackets` emits a `tilt=zero` ... `tilt=normal` pair for each laser section that:
 
-## Pretilt: KSM's two-beat laser anticipation
+* has its lane idle for `PRETILT_WINDOW_BEATS = 2.0`;
+* opens at least `PRETILT_MIN_FACTOR = 0.25` from the home edge;
+* has the window clear of lasers on both lanes. ksh's tilt is global and KSM's look-ahead is per lane, so cancelling while the other lane holds a laser would flatten tilt the arcade really had. This is why it fires far less than the charters do.
 
-**Correction to this document.** The earlier reading - that pretilt "is triggered by *any* laser, not some chart-detectable subset of them", making it a KSM-engine property no `.vox` -> `.ksh` mapping could selectively cancel - is wrong on both halves. The trigger is a precise two-condition predicate over the laser data, and the reference conversions cancel it with an idiom that shows up 7088 times. The earlier investigation (a silence-before-laser heuristic fit from one clean example, plus the `gen_pretilt_test.py` / `pretilt_test.ksh` / `PRETILT_TEST.md` test chart, `git stash`ed) was looking for the wrong condition, not chasing a nonexistent one.
+The bracket closes on the section's first point and opens `PRETILT_WINDOW_BEATS + PRETILT_LEAD_BEATS` earlier. The half-beat lead lets the 250 ms fade finish before the window opens. The opening tick is snapped to a 1/16 note (`PRETILT_SNAP_BEATS`), and clamped so it never opens inside the preceding laser. Brackets overlapping a manual `Tilt` segment are skipped. Lengths are in quarter notes times the chart's `tl.res`; the first version used 192nds and made fifth-of-a-beat brackets on a 480-tick chart.
 
-`camera.py` implements the fix behind `pretilt_fix` (default off) - see [What the converter emits](#what-the-converter-emits) at the end of this section for the shipped predicate, its deliberate conservatism, and the measured firing rate.
+On 400 random charts, 47.8% get at least one bracket (mean 2.7, max 24) with no invariant violations. With the flag off, output is byte-identical to before.
 
-### The mechanism, from KSM's source
+### Unproven
 
-KSM v2's [`HighwayTiltAuto.cpp`](https://github.com/kshootmania/ksm-v2/blob/master/kshootmania/src/MusicGame/Camera/HighwayTiltAuto.cpp) computes the auto-tilt factor per frame, per laser lane, as: take `GraphSectionValueAt(lane, currentPulse)` - the laser value under the crit line; **if that lane has no active section, take instead the first point value of `FirstInRange(lane, currentPulse, currentPulse + kson::kResolution4 / 2)`**; then accumulate `tiltFactor += isLeftLaser ? v : -(1.0 - v)`. `kResolution = 240` and `kResolution4 = kResolution * 4 = 960` ([libkson `Common.hpp`](https://github.com/m4saka/libkson/blob/master/include/kson/Common/Common.hpp)), so the look-ahead window is **480 pulses = 2 quarter notes = 96 ksh 192nds = half a 4/4 measure**. That branch is pretilt: an idle lane tilts to the *first point value of a section that is still two beats away* and holds there until the laser actually arrives.
+* Source is KSM v2; the charters used v1.6x. Tilt relaxation and keep semantics changed across 1.20/1.20b/1.21.
+* "Cancel KSM pretilt" and "reproduce an untilted SDVX passage" are the same edit.
+* USC computes roll reactively with no look-ahead, so brackets just read as untilted there.
+* ksh option lines don't take a grid slot. Assigning ticks by line index drops the onset-alignment result from 87.9% to 2.4%.
+* The brackets haven't been played in KSM.
 
-Three properties fall straight out of that expression, and all three are chart-side facts:
+## Spin
 
-- **Magnitude is set by how far the section's first point sits from that lane's home edge.** Left lane contributes `v`, right lane contributes `-(1 - v)`. A left laser opening at the left edge pretilts by **0.0** - nothing at all; opening at centre pretilts by **0.5**; opening at the right edge pretilts by a full **1.0**. Mirrored for the right lane. Home-edge openings are free, centre and crossed openings are not.
-- **The predicate is per lane, not per chart.** The look-ahead only runs for a lane with no section under the crit line, so the trigger is "*this* lane has been idle for the last two beats", and a long right laser parked at its home edge does not stop the left lane from pretilting into its next section.
-- **The lead is counted in beats but the lane moves in real time.** `Speed()` interpolates the smoothed factor at a base of 4.5/s, floored by `kMinSpeed = 0.5` and tapered within `kSlowDownDiffThreshold = 0.1` of the target, and multiplies by `kZeroTiltSlowDownFactor = 1.0 / 5` when the target is under `kZeroTiltFactorThreshold = 0.001` - i.e. the return to flat is five times slower than the swing away from it. Two beats is 1.2 s at 100 BPM and 0.6 s at 200, so a slow song completes the pretilt and parks there visibly, while a fast one barely gets moving before the laser lands.
+**Kind:** vox rolls (`roll_type` 1, 2, 3, 4, 6, 7) map to the full spin `@(`/`@)`, and swing (5) to the half spin `@<`/`@>`. Matches 1353/1354. `S<`/`S>` is never used by charters, so it isn't emitted.
 
-The tilt keywords act on the *scale*, not this factor: `radians()` returns `kTiltRadians * smoothedFactor * m_tiltScale`, with `m_tiltScale` chasing `kson::AutoTiltScaleAt(...)` at `kTiltScaleInterpolationSpeed = 4.0` - so `tilt=zero` fades the lane flat over roughly a quarter second rather than killing it outright. Manual float tilt is a different path: [`HighwayTilt.cpp`](https://github.com/kshootmania/ksm-v2/blob/master/kshootmania/src/MusicGame/Camera/HighwayTilt.cpp) returns `std::lerp(m_auto.radians(), m_manual.radians(), m_manual.lerpRate())`, and [`HighwayTiltManual.cpp`](https://github.com/kshootmania/ksm-v2/blob/master/kshootmania/src/MusicGame/Camera/HighwayTiltManual.cpp) drives `m_lerpRate` by `Scene::DeltaTime() / 0.04` in whichever direction - **manual takes over in 40 ms and applies its value directly, with no smoothing at all**. That is the practical difference between the two ways of flattening a lane: `tilt=zero` is a ~250 ms fade of the auto path, `tilt=0` is a hard cut to a manual graph.
+**Direction:** the tag sits on the laser point just before a same-tick slam. Direction is the sign of the next position change (`_outgoing_dirsign`). Right-to-left is clockwise (`@(` or `@<`), left-to-right is counterclockwise. 1347/1354 (99.5%).
 
-### When it is visible
+### From the DLL
 
-Combining the predicate with the timing constants, pretilt is worst when: the lane has been idle two full beats (dense continuous laser passages are immune outright); the upcoming section's first point is away from its home edge, so centre openings at factor 0.5 and crossed openings at 0.75-1.0; **the section opens with a slam**, which is both the commonest and the ugliest case - an isolated centre-to-edge slam makes the lane tilt halfway toward the slam's *origin* for two beats and then whip the other way when the slam hits, where the arcade lane is flat for the whole run-up; the BPM is low, so the swing completes and holds; there are BT/FX notes in the run-up, which is what turns a cosmetic difference into a readability problem; and lasers spaced under two beats apart, where the 5x slower return plus a fresh anticipation target means the lane never settles between them.
+The system is `Game::AngleUpdater` (vftables `0x1808c92b0`/`0x1808c92c8`), driven by gameplay event kind 8.
 
-### What the reference charters do about it
+**Type remap.** `FUN_1803b1180` rewrites `roll_type` at `0x1803b1a0c` into an internal kind. Types 2 and 3 swap:
 
-Measured over all 1238 conversions in `scripts/shared/reference/ksh` (1234 carry lasers, 1009 carry `tilt=` lines). **Unlike every other measurement in this document, these numbers have no in-repo script behind them yet** - they came from throwaway analysis outside the tree, so they are reproducible only by rebuilding it (parse `tilt=` events and laser sections to ticks, honouring the option-line rule in the caveats below; classify each section start by the idle-lane predicate; compare tilt-transition ticks against section-start ticks, against a shifted control). The idiom is **flatten the run-up, then hand the tilt back exactly on the laser's first point**:
-
-- Of the 8067 `zero`/`0` -> auto-keyword restorations in the corpus, **87.9% land on the exact tick of a laser section start**. Control distribution - the same tilt events shifted one beat later - lands exactly on a laser start 13.6% of the time, so this is a ~6.5x enrichment, not an artefact of lasers being common.
-- The flat region ahead of that restore has a **median length of 3 beats**, with modes at exactly 3.0 (1538), 2.0 (677), 1.0 (670) and 4.0 (576) - sized to cover the two-beat window with a musical margin.
-- The flattening end of the bracket is placed at the previous laser's edge: 15.2% land on a laser *start* tick exactly (that is, on a slam's origin point, killing the tilt from the slam onward) and 42.3% within a quarter beat of a laser *end*.
-- Both tokens are in live use, and the choice is meaningful given the 250 ms-versus-40 ms difference above: `tilt=zero` in 807 charts / 6964 events, `tilt=0` in 486 charts / 7197 events, non-zero manual floats in 407 charts / 10903 events, and `keep_*` in only 38 charts / 74 events - the keep family is essentially unused for this. 892 same-tick tilt pairs exercise the instant-change trick. 5 charts drive tilt entirely from manual floats, which suppresses auto-tilt (and therefore pretilt) outright via the `lerpRate` blend.
-
-How often they bother, over the 64577 section starts that meet the idle-lane predicate (25.6% flattened overall), cut by whether the section opens with a slam and by `|pretilt factor|`:
-
-| opens with slam | \|factor\| | n | run-up flattened |
-|---|---|---|---|
-| no | 0.00 | 12558 | 12.8% |
-| no | 0.25 | 2177 | 33.5% |
-| no | 0.50 | 4616 | 30.5% |
-| no | 0.75-1.00 | 805 | ~21% |
-| yes | 0.00 | 30142 | 20.7% |
-| yes | 0.25 | 4203 | 36.6% |
-| **yes** | **0.50** | **9224** | **49.5%** |
-| yes | 0.75-1.00 | 852 | ~31% |
-
-Half of all centre-opening slams after an idle lane get their run-up flattened by hand, against a 12.8% floor for home-edge openings with no slam. The two secondary cuts move the same way: run-up note density takes it from 12.4% (no BT/FX notes in the two beats before) to 30.0% (5-9 notes), and gap length from 23.7% (8+ beats idle) to 28.0% (2-4 beats idle). Note that the 0.75-1.00 buckets score *lower* than 0.50 despite being the larger visual error - they are rare (n=1657 combined) and tend to sit in passages dramatic enough that the tilt is wanted anyway.
-
-A clean worked example is `yukibare_parade/mxm.ksh`, measures 15-16: `tilt=zero` goes in as the preceding lasers end, three beats of flat follow, then `tilt=normal` sits on the line immediately before `0000|01|o-` - a left laser opening at `o` (= 1.0, the far right edge), the maximum-pretilt case.
-
-### What the converter emits
-
-`camera.py`'s `_pretilt_brackets` walks every laser section (segmented by the same `node_type` 1/2 rule as `notes/laser.py`'s `_split_into_runs`) and emits a `tilt=zero` ... `tilt=normal` pair for each one that qualifies:
-
-- **Its lane has been idle for the look-ahead window** - `PRETILT_WINDOW_BEATS = 2.0`, the engine's own `kResolution4 / 2`.
-- **Its first point is far enough from that lane's home edge to matter** - `PRETILT_MIN_FACTOR = 0.25` against `pos` (left lane) or `1 - pos` (right), the engine's own `isLeftLaser ? v : -(1.0 - v)`. Home-edge openings score 0 and are skipped outright, since they pretilt by nothing.
-- **The window is clear of laser sections on *both* lanes**, not just this one. This is the deliberate conservatism in the implementation: ksh's `tilt` is global while KSM's look-ahead is per lane, so a lane anticipating its next section *while the other lane holds a real laser* is genuine pretilt that cannot be cancelled without flattening the other lane's arcade-correct tilt at the same time. Those cases are left alone. It is the known gap, and the reason the converter fires on far fewer sections than the reference charters do.
-
-The bracket closes on the section's own first point tick (already a grid anchor, so it costs no extra resolution) and opens `PRETILT_WINDOW_BEATS + PRETILT_LEAD_BEATS` earlier - the half-beat lead exists so `tilt=zero`'s ~250 ms scale fade finishes *before* the anticipation window opens rather than racing it. The opening tick is snapped down to a 1/16-note grain (`PRETILT_SNAP_BEATS`) to keep `measure_resolution` from being forced fine for one option line, and clamped to never open inside the preceding laser. Brackets overlapping a manual `Tilt` vox segment are skipped, since the passthrough owns tilt there.
-
-**All lengths are in quarter notes and multiplied by the chart's own `tl.res` at use.** This module works in vox ticks - `notes/convert.py` never rescales, it derives each measure's line count straight from `tl.measure_length` - and `#BEAT RESOLUTION` is per chart (480 on the charts checked, 48 when the header is absent). The first version of this code was sized in ksh 192nds and silently produced fifth-of-a-beat brackets on a 480-tick chart.
-
-Measured over a random 400-chart sample of the corpus: 47.8% of charts get at least one bracket, mean 2.7 per chart, median 0, p90 9, max 24, with the total `tilt=` event count rising from 1038 to 3192. Every bracket satisfies the invariants by construction and by check - closes on a real section start, never overlaps a laser on either lane, never shorter than the window, never overlapping another bracket: 0 violations across those 400 charts. On `1972_guinevere_penoreri_5m` the output grows by 12 lines out of 57771. With the flag off, `camera=True` output is byte-identical to pre-change `camera.py` across a 40-chart sample.
-
-That firing rate is far below the reference charters' 25.6% of qualifying sections, entirely because of the both-lanes-clear requirement plus the 0.25 factor cut. Loosening either is a `min_factor` argument away, but the conservative default is the right one for a converter: a missed pretilt looks like KSM, a wrong bracket kills tilt the arcade really had.
-
-### What is still unproven
-
-Caveats, recorded rather than resolved:
-
-- **The source read is KSM v2, not the v1.6x binary the reference charters were working against.** m4saka targets v1 compatibility and the corpus behaviour is consistent with the v2 constants, but the two have not been diffed. `ksh_format.md`'s `ver` notes already document that tilt relaxation time and keep semantics changed across 1.20/1.20b/1.21, so version-sensitivity in this area is established.
-- **The corpus cannot separate "cancel KSM pretilt" from "reproduce a passage SDVX genuinely left untilted"** - they are the same edit, because the arcade starts tilting *at* the laser. The onset alignment is what makes the intent legible: restoring on the laser's exact first point is the SDVX-faithful timing and the pretilt fix simultaneously.
-- **USC is not KSM here.** [`Camera.cpp`](https://github.com/Drewol/unnamed-sdvx-clone/blob/master/Main/src/Camera.cpp) computes roll reactively from current laser positions with no look-ahead branch, so a chart bracketed for KSM pretilt simply reads as un-tilted in those spans under USC. Only USC's `Camera.cpp` was read, not its full scoring-to-roll path.
-- **Measurement gotcha, worth recording.** ksh option lines do not consume a grid slot: a measure's resolution is set by its note lines alone, and an option line applies at the position of the note line that follows it. Assigning ticks by raw line index instead smears the onset-alignment result from 87.9% down to 2.4% and moves the apparent restore point a few ticks earlier than the laser, which reads as a deliberate lead and is not one.
-- **The emitted brackets have not been played.** They are verified structurally (predicate, invariants, grid placement, no-op when disabled) and against the reference idiom, not by watching a converted chart in KSM. Same standard as the rest of this document's camera work - see "Converter status".
-
-## Spin/swing: kind, direction and length
-
-**Kind mapping - confirmed by direction, and 1353/1354 against the reference set.** Vox's "roll" variants (`roll_type` 1, 2, 3, 4, 6, 7) map to ksh's full spin (`@(`/`@)`); vox's "swing" (`roll_type` 5) maps to ksh's half spin (`@<`/`@>`). `S<`/`S>` (ksh's own dedicated swing token) is never emitted - confirmed unused in every reference chart, including for genuine vox `roll_type=5` swings (charters used half-spin instead), so per direction this converter omits it too.
-
-**Direction - confirmed by direction, 1347/1354 (99.5%) match.** The roll/swing tag sits on the laser point immediately *before* a same-tick slam in every raw example inspected (not after - the direction that matters is the outgoing movement, computed by `_outgoing_dirsign` as the sign of the first position change at or after the tagged point, looking a few points ahead for curve cases). Hypothesis tested: a slam moving right-to-left (`dirsign < 0`) is clockwise -> `@(` (full) or `@<` (half); left-to-right (`dirsign > 0`) is counterclockwise -> `@)` or `@>`. Reported by `correlate.py`'s dedicated hypothesis-match-rate section.
-
-### What the DLL says the spin is - kind, count, duration, all exact
-
-**Read directly out of `modules/soundvoltex.dll`, and it settles types 4 and 7.** This is the one place in this document where the binary, not the reference set, is the source. Everything in this section is transcribed, not fitted.
-
-The whole lane-spin system is `Game::AngleUpdater` (RTTI-named; its vftables are at `0x1808c92b0`/`0x1808c92c8`), driven by gameplay **event kind 8**. Three separate facts come out of it.
-
-**1. The roll type is remapped before the game ever uses it.** The chart-to-gameplay laser builder `FUN_1803b1180` - the function that walks the vox chart's two laser lists (`chart+0xe8` and `chart+0x1c8`) and turns each point into a render record - rewrites `roll_type` through a switch at `0x1803b1a0c`:
-
-| vox `roll_type` (C3) | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| vox | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
 |---|---|---|---|---|---|---|---|
-| internal "rotation kind" | 1 | **3** | **2** | 4 | 5 | 6 | 7 |
+| internal | 1 | 3 | 2 | 4 | 5 | 6 | 7 |
 
-Types 2 and 3 swap. Ghidra renders the case bodies as denormal floats (`1.4013e-45` = 1, `2.8026e-45` = 2, `4.2039e-45` = 3, ...) because it types the destination as `float`; they are int bit patterns, exactly as `audio_engine.md` §7 notes for `FUN_180407200`'s switch. **Every constant in the DLL is indexed by the internal number**, so mixing the two numberings silently swaps the 2-beat and 3-beat rolls. This document states everything in *vox* numbering and names the internal number when quoting the disassembly.
+Ghidra shows the case bodies as denormal floats because it types the destination as `float`. They are ints. All DLL constants use the internal number; this document uses vox numbering.
 
-**2. The total duration is one small function.** `FUN_18011f320(kind, bpm, length)` returns seconds:
+**Duration.** `FUN_18011f320(kind, bpm, length)` returns seconds. Purely musical, no wall-clock term:
 
 ```c
-if (length == 0) {                       // vox's "use this type's default"
+if (length == 0) {
   switch (kind) {                        // internal numbering
     case 1: case 6:          return 420.0f / bpm;          //  7 beats
     case 2: case 5: case 7:  return 180.0f / bpm;          //  3 beats
@@ -209,158 +132,133 @@ if (length == 0) {                       // vox's "use this type's default"
 return ((kind - 6u < 2 ? 6.0f : 60.0f) / bpm) * (float)length;
 ```
 
-`60/bpm` is one beat, so every branch is an exact beat count and the duration is **purely musical - no wall-clock term anywhere**, which independently confirms this section's older finding that BPM does not enter the spin length. `length` is the C8/C9 column, and the `length == 0` gate is exactly vox's "use the default", so both parameters are pinned without needing to trace the event producer.
-
-Translated back into vox numbering:
-
-| vox `roll_type` | default (C8=0) | explicit-length unit | vs. this document's previous reading |
+| vox type | default (length 0) | unit | previously |
 |---|---|---|---|
-| 1 | **7 beats** | 1 beat | was 6 |
-| 2 | 2 beats | 1 beat | agrees |
-| 3 | 3 beats | 1 beat | agrees |
-| 4 | 12 beats | 1 beat | agrees - the "12" is real, not just a name |
-| 5 | 3 beats | 1 beat | agrees |
-| 6 | 7 beats (unreachable) | **1/10 beat** | was 1/32 note = 1/8 beat |
-| 7 | 3 beats (unreachable) | **1/10 beat** | was 1/32 note |
+| 1 | 7 beats | 1 beat | 6 |
+| 2 | 2 beats | 1 beat | same |
+| 3 | 3 beats | 1 beat | same |
+| 4 | 12 beats | 1 beat | same |
+| 5 | 3 beats | 1 beat | same |
+| 6 | 7 (unreachable) | 1/10 beat | 1/8 beat |
+| 7 | 3 (unreachable) | 1/10 beat | 1/8 beat |
 
-**3. Three different motions, and which type gets which.** `Game::AngleUpdater::CurrentRotationEffect` is a `std::function<std::optional<...>(float)>` built at the event, capturing `(startTime, duration, direction)` at `+8`/`+0xc`/`+0x10`; the dispatch at `0x1803a4a1e` picks one of three lambdas. Each evaluates at progress `u = (t - start) / duration`, with `d = +/-1`:
+**Motion.** `CurrentRotationEffect` is built at the event, capturing start, duration and direction `d = +/-1`, and dispatches at `0x1803a4a1e` to one of three lambdas. With progress `u`:
 
-| lambda | vox types | highway angle, in degrees |
+| lambda | types | angle (degrees) |
 |---|---|---|
 | `FUN_1803a6190` | 1, 2, 3, 6 | `d*840*u` while `u < 3/7`, then `d*52.5*sin(7.6969*(u-3/7))*(4/7-(u-3/7))` |
-| `FUN_1803a64d0` | **4** | `d*1440*u` while `u < 3/4`, then `d*120*sin(17.5929*(u-3/4))*(1/4-(u-3/4))` |
-| `FUN_1803a6350` | **5, 7** | `d*80*sin(2.1*pi*u)*(1-u)` |
+| `FUN_1803a64d0` | 4 | `d*1440*u` while `u < 3/4`, then `d*120*sin(17.5929*(u-3/4))*(1/4-(u-3/4))` |
+| `FUN_1803a6350` | 5, 7 | `d*80*sin(2.1*pi*u)*(1-u)` |
 
-Reading those:
+* A normal roll turns once (360 degrees) in the first 3/7, then a damped sine settles over 0.7 of a period.
+* Type 4 turns three times, each a quarter of the duration, then settles. The peak coefficient is the same 30 degrees.
+* A swing never completes a turn. It peaks near 61 degrees at `u = 0.238`. Type 7 runs this curve, not the roll curve; "type 7 is like type 6" is only half right.
 
-- **A normal roll turns once, in the first 3/7 of the declared duration.** `840 * 3/7 = 360`. The remaining 4/7 is a damped sine running 0.7 of a period (`7.6969 * 4/7 = 1.4*pi`) and decaying linearly to zero - the "overshoot" the C3 note describes.
-- **Type 4 turns three times, in the first 3/4.** `1440*u` passes 360, 720 and 1080 degrees at `u = 1/4, 2/4, 3/4`, so the three turns are **contiguous and equal**, each exactly a quarter of the declared duration, and the settle happens **only after the third** - the same 0.7-of-a-period damped sine (`17.5929 * 1/4 = 1.4*pi`) with the same 30-degree peak coefficient (`52.5 * 4/7 == 120 * 1/4 == 30`). That is exactly what direct inspection of the type-4 charts reported: three consecutive spins, overshoot after the whole thing and not between the turns. Getting this *into* a `.ksh` is a separate problem - see the next section.
-- **A swing never completes a turn at all.** It peaks near 61 degrees (`80 * (1 - 0.238)` at `u = 0.238`) and crosses back through zero at `u = 10/21`, running 1.05 periods over the duration. **Type 7 runs this curve**, not the roll curve - the inherited claim that type 7 "behaves like type 6" is only half right: same length column and unit, different motion.
+The path was found by scanning for the laser record's field offsets (`+0x1c` tick, `+0x2c` node type, `+0x30` roll type, `+0x38` width, `+0x40` curve type, `+0x48` roll length) and following `roll_type` forward.
 
-The path was found by scanning every function in the binary for the laser record's own field offsets (`+0x1c` tick, `+0x2c` node type, `+0x30` roll type, `+0x38` width, `+0x40` curve type, `+0x48` roll length - the parse record of "How the version shift was settled" plus a `0x10` list-node header) and then following `roll_type`'s only consumer forward. Neither `survey.py` nor the reference set was involved.
+### Type 4 in ksh
 
-### What the converter does with that
+A spin token only fires when a laser slam is judged on its line (`CamPatternMain::onLaserSlamJudged`). A type-4 row has one slam, so three spin tokens would leave two inert. This looks right in the file and does nothing in game.
 
-**ksh cannot express the triple spin as three spin tokens.** The obvious encoding - three ordinary spins, one per turn, back to back - does not work, and the reason is on KSM's side: a spin is started from `CamPatternMain::onLaserSlamJudged` ([`CamPatternMain.cpp`](https://github.com/kshootmania/ksm-v2/blob/master/kshootmania/src/MusicGame/Camera/CamPattern/CamPatternMain.cpp)), so a spin token only fires when a laser **slam** is judged on that line. A type-4 row carries exactly one slam, so tokens 2 and 3 have nothing to hang off and are silently inert. This was tried first and is recorded here because the output *looks* right in the file - three well-formed `@)` tokens on correctly spaced lines - and does nothing in game.
-
-**What is emitted instead: one spin token, plus a manual `tilt=` ramp for the rest of the rotation.** `tilt=` is a graph in ksh, linearly interpolated between its points, and KSM's manual tilt path applies the value to the highway rotation directly - `m_radians = kTiltRadians * value`, with no clamping on the highway rotation itself ([`HighwayTiltManual.cpp`](https://github.com/kshootmania/ksm-v2/blob/master/kshootmania/src/MusicGame/Camera/HighwayTiltManual.cpp); only `radiansForBgLayer()` clamps). Ramping that value across the roll therefore turns the lane for as long as the roll lasts, on top of the one real spin the token triggers at the slam. Per type-4 row the converter emits:
+Instead the converter emits one spin token plus a manual `tilt=` ramp. KSM applies manual tilt to the highway rotation directly, unclamped (`HighwayTiltManual.cpp`):
 
 ```
-tick          tilt=0          and the spin token, on the slam
-tick + D      tilt=+/-72      linear ramp across the whole declared duration
-tick + D      tilt=0          stacked on the same tick: back to level
-tick + D + 1  tilt=normal     one cell later: hand back to auto tilt
+tick          tilt=0          plus the spin token, on the slam
+tick + D      tilt=+/-72      linear ramp across the declared duration
+tick + D      tilt=0          same tick: back to level
+tick + D + 1  tilt=normal     one cell later: back to auto tilt
 ```
 
-with `D` the vox-declared duration in quarter notes (C8, or 12 when C8 is 0), converted to cells at the chart's own `#BEAT RESOLUTION`. Sign follows the spin's direction: **`+72` for a clockwise spin (`@(`), `-72` for anticlockwise (`@)`)**, matching `ksh_format.md`'s "left, clockwise" reading of the two tokens. The peak and the return to level stack on the ramp's own last tick with no grid line between them - ksh's instant-transition idiom, the same one the reference charters use for `tilt=<value>` followed immediately by `tilt=normal`, and the same path `compute_tilt_events` already uses to end a manual tilt block. The hand-back to auto tilt then goes one cell later, so the level value is held for a cell instead of being handed off in the same breath as the peak.
+`D` is the declared duration in quarter notes (C8, or 12 if 0) at the chart's resolution. `+72` is clockwise (`@(`), `-72` anticlockwise (`@)`).
 
-Two things about this are chosen rather than derived, and are worth keeping separable from the DLL findings above:
+Chosen, not derived:
 
-- **The `72` magnitude comes from testing in the target KSM build, not from the numbers here.** KSM's `kTiltRadians` is defined outside the files consulted for this document, so what `72` works out to in degrees is not established here - only that it is the value that produces the intended motion in practice.
-- **The ramp spans the full declared duration `D`, not the `3D/4` the three turns actually occupy.** The DLL turns three times in the first three quarters and settles in the last one; spreading the ramp over all four spreads the same rotation over 4/3 of the time and keeps the lane turning through the settle. That is a deliberate choice for a simpler rule, not an oversight.
+* `72` comes from testing in the target KSM build; `kTiltRadians` isn't in the files consulted.
+* The ramp spans all of `D`, not the `3D/4` the turns occupy.
 
-**The spin token stays a single `@(`/`@)`, but type 4 is the one type whose length is not halved.** The ramp and the token are one composite effect, so the token has to end where the ramp ends: its length is the *full* declared duration, `48 * D` ksh 192nds rather than `BEAT_TO_KSH192`'s `24 * D`. Checked on every type-4 row in the corpus - all **27** spin tokens end on exactly the tick their ramp ends on, at every `#BEAT RESOLUTION` and for both explicit and defaulted lengths, and every ramp start coincides with a spin token that was actually placed.
+The type-4 token is the one length not halved: `48 * D` instead of `24 * D`, so it ends where the ramp ends. All 27 type-4 rows in the corpus (including the update folder) match.
 
-**The ramp owns its span, and clears it.** A ramp is a linear interpolation between two endpoints, so any *other* tilt point landing strictly inside it pins the value partway and the rotation simply stops happening. `compute_tilt_events` therefore drops every tilt point - manual `Tilt` passthrough, series-end revert, `pretilt_fix` bracket - that falls strictly between a ramp's start and end, and reports the count on stderr rather than discarding chart data silently. This is not hypothetical: **1 of the 27 rows hits it**. `2392_dementafterlegend_cosmograph_5m` (format 13) has a manual `Tilt` block running `0.0 -> 0.0` that ends 96 cells into a 144-cell ramp, and its endpoint plus `node_type=3` series-end revert held the lane flat for two thirds of the roll and handed back to auto-tilt before the ramp had done anything. Per direction the ramp wins, because it is carrying the spin. What is lost on that chart is a flat `0.0 -> 0.0` segment, i.e. nothing visible; on some future chart it could be real charter camera work, which is why it is counted and printed.
+The ramp owns its span. `compute_tilt_events` drops any other tilt point strictly inside it (manual passthrough, series-end revert, pretilt bracket) and reports the count on stderr. 1 of 27 hits it: `2392_dementafterlegend_cosmograph_5m` (v13), a `0.0 -> 0.0` manual block. `data/music` has no format-13 charts, so checks need both roots.
 
-**A correction to a count this document previously carried:** that verification was first run against `data/music` alone and reported 25 rows with no collisions. `data/music` holds **no format-13 charts at all** - they live only in update folders, as "Corpus-wide facts" already notes - so the scan could not see the two v13 type-4 rows, one of them the collision above. The corpus figure was always 27; the *checked* figure is now 27 too, over `data/music` plus the update folder's `data/music`. Any future per-row camera check needs both roots.
+| chart | C8 | D | token |
+|---|---|---|---|
+| `2216_tetoris_hiiragimagnetite_5m` | 3 | 3 beats | `@)144` |
+| `0271_vallis_djyoshitaka_4i` | 7 | 7 beats | `@)336` |
+| `1751_april2021_grace_5m` | 8 | 8 beats | `@)384` |
+| `0704_flower_djyoshitaka_4i` | 0 | 12 beats | `@)576` |
+| `2392_dementafterlegend_cosmograph_5m` | 3 | 3 beats | `@(144` |
 
-| chart | C8 | D | spin token | ramp |
-|---|---|---|---|---|
-| `2216_tetoris_hiiragimagnetite_5m` | 3 | 3 beats | `@)144` | `tilt=0` at 8640, `tilt=-72` + `tilt=0` at 8784, `tilt=normal` at 8785 |
-| `0271_vallis_djyoshitaka_4i` | 7 | 7 beats | `@)336` | 336 cells wide |
-| `1751_april2021_grace_5m` | 8 | 8 beats | `@)384` | 384 cells wide |
-| `0704_flower_djyoshitaka_4i` | 0 | 12 beats | `@)576` | 576 cells wide |
-| `2392_dementafterlegend_cosmograph_5m` | 3 | 3 beats | `@(144` | 144 cells wide, span cleared of 2 manual `Tilt` points (v13) |
+The lone reference type-4 sample, `tetoris/mxm` with C8=3, is a single `@)120` where the old law predicted 72. That's a charter writing one long spin for three turns.
 
-**The one type-4 reference sample now makes sense.** `tetoris/mxm`, `C8=3`, is transcribed by hand as a single `@)120`. The old law predicted `24 * 3 = 72` and missed by 67% - the largest single outlier in the whole spin-length fit, and the reason type 4 was listed as unresolved. A charter facing the same wall this section just hit (one slam, one usable spin token) writing one long spin to stand in for three turns explains that 120 far better than any single-spin length law does. One sample is not a validation, but it stops being evidence *against*.
+Type 7 emits a half spin. Its length stays on `3 * C8` rather than the DLL's 1/10-beat unit, for the reason below. Over 8107 charts: 8045 unchanged, 25 change spin and tilt (type 4), 35 change spin token only (type 7).
 
-**Type 7 emits a half spin** (`@<`/`@>`) rather than a full one, per the lambda dispatch. It has zero reference coverage, so nothing measurable regressed; its *length* stays on the reference scale (`3 * C8`) rather than the DLL's 1/10-beat unit, for the reason in the next section.
+### The scale question
 
-Corpus-wide the change is exactly as narrow as it should be. Recomputing tilt, zoom and spin over all 8107 charts of `data/music` before and after: **8045 identical; 25 charts change spin and tilt (the type-4 token length and its ramp); 35 change their spin token only (type 7, full spin to half spin); nothing else moves** (2 charts fail to parse, unrelated and pre-existing). The update folder adds the two v13 type-4 rows on top of that.
+KSM's spin differs in shape from SDVX's:
 
-### The scale question the DLL does not settle
+* SDVX completes its turn at 3/7 = 0.4286 of the declared duration.
+* KSM v2 (`CamPatternSpin.cpp`) completes it at 360/675 = 0.5333 of the ksh length, overshoots to 440/675 and recovers by 1.0. So KSM's length also includes recovery, contradicting the `vox_format.md` C3 note that overshoot comes after.
 
-The DLL gives SDVX's own timings exactly. It does **not** give the right *ksh* number, because that also depends on KSM's curve, and the two are shaped differently:
+Three scales disagree: 24 (1354 hand samples), 20.6 (SDVX rotation time) and 38.6 (rotation-rate match against ksm-v2; the charters used v1.6x). Nothing changes: `BEAT_TO_KSH192 = 24` and `TYPE67_UNIT_TO_KSH192 = 3` stay, and `DEFAULT_BEATS` keeps type 1 at 6 rather than 7. The reference scale is a half and the DLL's share is 3/7, so 6 halved and 7 times 3/7 both give 3 beats; changing one would make type 1 wrong. Choosing needs a test chart played in KSM.
 
-- SDVX completes its turn at **3/7 = 0.4286** of the declared duration (above).
-- KSM v2's [`CamPatternSpin.cpp`](https://github.com/kshootmania/ksm-v2/blob/master/kshootmania/src/MusicGame/Camera/CamPattern/CamPatternSpin.cpp) completes its turn at **360/675 = 0.5333** of the ksh-declared length, then overshoots out to `440/675` and recovers by `1.0`.
+### Length law
 
-So KSM's length is *also* rotation-plus-recovery, not rotation-only - which contradicts the inherited claim, recorded in `vox_format.md`'s C3 note and repeated in the "half" derivation below, that in KSM "the overshoot occurs after the specified length". Matching the two rotation rates exactly would want `ksh_len = (3/7)/(360/675) * declared = 0.804 * declared`, a scale of **38.6** rather than the reference set's 24 - and that is against ksm-**v2** constants, while the charters worked against v1.6x (already open item 7).
+A ksh spin lasts half the vox-declared duration, in 192nds, except type 4. One quarter note is 48 192nds, so `24 * quarter notes`. `python correlate_camera.py` prints the derivation.
 
-Three mutually inconsistent numbers, then: 24 (1354 hand samples), 20.6 (SDVX rotation time at face value), 38.6 (rotation-rate match against ksm-v2). **This pass changes none of them.** `BEAT_TO_KSH192 = 24` and `TYPE67_UNIT_TO_KSH192 = 3` stay, and `DEFAULT_BEATS` keeps type 1 at 6 rather than the DLL's 7 - deliberately: the reference scale is a half and the DLL's share is 3/7, so 6 halved and 7 times 3/7 both land on exactly 3 beats of ksh spin, and changing only one of that pair would make type 1 wrong. Type 4 is untouched by the argument, because its turns are contiguous: `D/4` per turn is the turn's duration under any reading, and there is no charter convention to inherit for it.
-
-Choosing between 24 and 38.6 needs a test chart played in the actual target KSM build. Until then the converter stays on the scale its reference set measures, and this section records what the renderer actually does.
-
-### Length: solved - a ksh spin lasts exactly half the duration vox declares
-
-**One law covers every roll type** *except* type 4: a ksh spin token's length is **half the vox-declared duration**, expressed in ksh 192nds. Since one quarter note is 48 ksh-192nds, that is `24 * (vox length in quarter notes)`. (Type 4 is not halved - its token has to end where its tilt ramp ends, so it gets the full `48 * beats`; see "What the converter does with that".) Reproduce the whole derivation with `python correlate.py`, whose "spin length" section prints every step below.
-
-| roll_type | where the vox length comes from | ksh length |
+| roll_type | vox length | ksh length |
 |---|---|---|
-| 1, 2, 3, 4, 5 | the length column in quarter notes, or the type's default (`DEFAULT_BEATS` = 6, 2, 3, 12, 3) when it is 0 | `24 * beats` |
-| 6, 7 ("8x speed") | the length column counting 1/32 notes (= 1/8 quarter note) | `3 * units` |
+| 1 to 5 | length column in quarter notes, or the default (`DEFAULT_BEATS` = 6, 2, 3, 12, 3) when 0 | `24 * beats` |
+| 6, 7 | length column in 1/32 notes | `3 * units` |
 
-The length column is `C8` up to format 12 and `C9` from format 13, for every roll type - see "Which column holds the length" below. `shared/vox.py` resolves that per chart, so `p.roll_length` in `camera.py` is always the right column and nothing downstream carries a version test.
+Why half: `vox_format.md` says vox lengths include the overshoot, unlike KSM's. The overshoot takes as long as the rotation.
 
-**Why half.** `vox_format.md`'s C3 note already says it: vox's lengths "refer to the time the roll takes to *completely* finish, including overshoots — unlike KSM roll lengths, where the overshoot occurs after the specified length". The measurement adds the missing number - the overshoot takes exactly as long as the rotation it follows, so ksh gets half of what vox declares.
+Each charter picks one scale per song, so pooling hides the law. The modal `ksh_len / C8` is exactly 24 in 282 of 390 songs, then 32 (24 songs), 36 (21), 48 (19). Across 1354 samples, 24 matches 64.1% exactly and 32 only 16.5%. An earlier version said 32, fit to a minority-charter subset.
 
-**The thing that makes this measurable is controlling for the charter.** The reference conversions are hand-made, and each song's charter picks one scale and holds it across that song - but *different* charters picked different ones. Per song, the modal `ksh_len / C8` is exactly 24 in 282 of 390 songs; the rest sit at 32 (24 songs), 36 (21), 48 (19) and a thin tail. Pooling raw lengths mixes those together and hides the law - which is how an earlier version of this section, working from three `roll_type=1` samples that happened to come from 32-scale songs, concluded `ksh_length = 32 * C8`. **Correction: that constant was fit to a minority-charter subset.** Across all 1354 samples, `24` matches exactly 64.1% of the time and `32` only 16.5%, and the residual is one-sided charter rounding (`x1.333` 16.5%, `x1.5` 5.7%, `x2.0` 4.5%) rather than scatter.
+Checks:
 
-Three independent things confirm 24 rather than a fitted average:
+* Large lengths land exactly: C8 of 10, 11, 22, 30, 32, 46 give 240, 264, 528, 720, 768, 1104.
+* Type 6 matches 61/64, and C8 of 13, 17, 23, 33, 37 give 39, 51, 69, 99, 111, which no charter picks by feel.
+* BPM has R² of about 0 against ksh length. In 3/4, 33/54 match 24 exactly and a per-measure 192 matches none. Laser-run length doesn't explain the residual.
 
-- **Large `C8` values land dead on it.** `C8` of 10, 11, 22, 30, 32, 46 produce ksh lengths of exactly 240, 264, 528, 720, 768, 1104. Nothing is being rounded to a comfortable musical value at that size.
-- **`roll_type=6` is transcribed machine-exactly, 61/64.** Its 1/32-note unit puts the factor at `24/8 = 3`, and `C8` of 13, 17, 23, 33, 37 produce ksh `39`, `51`, `69`, `99`, `111` - numbers no charter picks by feel. Type 6 is the cleanest evidence in the whole section, and it is the same law.
-- **BPM and time signature are both ruled out.** Regressing ksh length on BPM within a fixed `(roll_type, C8)` gives R² ≈ 0 in every group (the spin is musical time, not wall-clock). Non-4/4 measures fit the same 24 (33/54 exact in 3/4) while a "192 is per *current* measure" alternative fits none of them - so ksh's 192 is a fixed 4/4-measure unit, as `ksh_format.md` implies. Laser-run length doesn't explain the residual either (exact-match rate is flat at 60-74% across every run-length bucket).
-
-**The length-column-is-0 defaults match `vox_format.md`'s names after all** - `{1:6, 2:2, 3:3, 4:12, 5:3}` quarter notes. **Correction to `vox_format.md`**, which recorded types 2 and 5 as contradicting their names: they don't, and neither do 1 and 3. Restricting to songs whose explicit-length rows measure exactly 24, the implied default is 6.00 (rt1, median of 19), 2.00 (rt2, of 6), 3.00 (rt3, of 17) and 3.00 (rt5, of 93) - each the median *and* the mode. Pooling without that restriction is what made rt1 look like 8 beats and rt3 like 4: songs that only ever use default-length rolls have no explicit rows to measure their scale from, and skew 32-ward.
-
-A **scale-free cross-check** settles it without needing any scale at all, since the charter's factor cancels in a ratio between two types in the same song: rt3/rt5 = 1.000 (median over 14 songs, 9 exact), rt1/rt5 = 2.000 (23 songs, 13 exact), rt1/rt3 = 2.000 (19 songs, 12 exact) - exactly the 6:3:3 the names predict. You can read it straight off the per-song table: `air/exh` defaults to `{rt1:144, rt3:72, rt5:72}` and `air/mxm` to `{rt1:192, rt3:96}` - same song, two difficulties, two different charter scales, identical ratios.
-
-~~**Type 4 is the one gap.**~~ **Closed against the DLL** - see "What the DLL says the spin is" above, which supersedes this paragraph. It is left here because its reasoning was right about why the hand charts could not close it: the reference set holds a single type-4 sample (`tetoris/mxm`, `C8=3` -> `@)120`, where this law predicts 72), the corpus holds only 27 type-4 rows with 22 of them carrying no explicit length, and **KSM has no triple-spin token to transcribe faithfully in the first place** - which is exactly why that lone sample is a single long spin standing in for three turns, and why no amount of extra hand-chart coverage would ever have revealed the triple.
+Defaults match the names after all: `{1:6, 2:2, 3:3, 4:12, 5:3}` quarter notes. `vox_format.md` was wrong about types 2 and 5. Medians over songs with exact 24-scale rows: 6.00 (rt1, 19 songs), 2.00 (rt2, 6), 3.00 (rt3, 17), 3.00 (rt5, 93). Scale-free ratios within a song: rt3/rt5 = 1.000, rt1/rt5 = 2.000, rt1/rt3 = 2.000.
 
 ### Which column holds the length
 
-**Correction, and a bigger one than it looks.** This section previously said the length column moves from `C8` to `C9` in format 13 *for roll types 6 and 7 only*, and that v13's `C9` on types 1-5 stays the unrelated "cells per chain" and must not be read as a length. That is wrong: the shift applies to every roll type. Charts converted before this fix silently dropped every explicit v13 length and fell back to the type default - e.g. `2393_alive_dadadaizu_5m.vox` measure 115, a type-1 roll with `C9=15`, emitted `@)144` (the 6-beat default) where it should emit `@)360`.
+The length is `C8` up to format 12 and `C9` from 13, for every roll type. An earlier version said this was true only for types 6 and 7, so converted v13 charts dropped every explicit length and used the default (`2393_alive_dadadaizu_5m` measure 115: `C9=15` should be `@)360`, was `@)144`).
 
-The reason it is not a per-type rule is structural: the shift lives in the game's row *parser*, which reads all ten columns into one record before anything has looked at the roll type. Full derivation, with the record-slot tables and the corpus discriminator, is in [`vox_format.md`](vox_format.md)'s "How the version shift was settled" - in outline:
+The shift is in the row parser, which reads all ten columns before looking at the roll type. Details are in `vox_format.md`.
 
-- The current chart reader (`FUN_18023baa0`, laser-row loop at `0x18023d470`) has three version branches, `< 12` / `== 12` / `>= 13`. They differ in exactly two ways: whether the position column is an int 0-127 or a float 0-1, and whether the 8th data column lands in a v13-only record field (`+0x34`) with the length and cells-per-chain pushed one slot along.
-- The record field that holds the length (`+0x38`) is fed from `C8` by the v10/v12 branches and from `C9` by the v13 branch. `C8` as the v10/v12 length is what the 1354 reference samples above validate, so the same field being fed from `C9` in v13 settles v13 without needing any v13 reference chart.
-- The corpus says the same thing on its own: a length can only matter on a row that carries a roll, and the column that is *never* nonzero on a `roll_type=0` row is `C8` in v10/v12 (0 of 2,861,916 non-roll rows) and `C9` in v13 (0 of 93,086). The other column of the pair is the roll-independent one in both cases. `python scripts/camera/survey.py --lasercols` prints the table.
-- Per type, v13's `C9` reproduces v12's `C8` distribution, type 1 included: `[1,1,2,4,46]` mean 3.6 against `[1,2,3,5,21]` mean 4.1 (quartiles `[min, q25, median, q75, max]`). The earlier reading had that same v13 column pegged as cells-per-chain on the strength of it being "an order smaller" than the type-6 lengths - but it was only ever being compared against 6/7's 1/32-note counts, never against v12's type-1 quarter-note lengths, which sit in exactly the same range.
+* The chart reader (`FUN_18023baa0`, laser loop at `0x18023d470`) has three branches (`< 12`, `== 12`, `>= 13`). They differ in whether position is an int or float, and in whether the 8th column goes to a v13-only field (`+0x34`) and pushes length and cells-per-chain one slot along.
+* The length field (`+0x38`) is fed from `C8` in v10/v12 and `C9` in v13.
+* The never-nonzero-on-non-roll column is `C8` in v10/v12 (0 of 2,861,916 rows) and `C9` in v13 (0 of 93,086). `survey_camera.py --lasercols` prints it.
+* v13's `C9` per type matches v12's `C8`, e.g. type 1 `[1,1,2,4,46]` mean 3.6 against `[1,2,3,5,21]` mean 4.1.
 
-So `TYPE67_UNIT_TO_KSH192 = 3` and `BEAT_TO_KSH192 = 24` both apply to whichever column the version selects, and `_spin_length` no longer needs a version test or a `C8`-vs-`C9` tie-break at all. The 23 v13 rows carrying both columns are no longer ambiguous either: their `C8` is 1 or 2, which is the v13-only flag's entire value range (`0`, `1`, `2` across all 93,574 v13 laser rows, on rows with and without rolls alike), not a vestigial length.
+The 23 v13 rows with both columns are unambiguous: `C8` is the v13-only flag (0, 1 or 2 across 93,574 rows). `shared/vox_parser.py` resolves this per chart, so `camera_events.py` has no version test.
 
-**What is still inherited rather than measured** is the v13 length's *unit*. No format-13 chart has hand-chart coverage - `correlate.py` matches zero of the 148 against `scripts/shared/reference/ksh`, they are all songs from a 2026 update - so "quarter notes for 1-5, 1/32 notes for 6/7" carries over from v10/v12 on the strength of the shared record field and the matching distributions. The type-6 sanity check still lands where it did: `C9=32` on `2393_alive_dadadaizu_5m.vox` track8 measure 79 is 4 declared quarter notes, halved to `@(96`, the "around 2 beats" the original source described.
+Inherited rather than measured: the v13 length unit. None of the 148 v13 charts (a 2026 update) has hand-chart coverage. `C9=32` on `2393_alive_dadadaizu_5m` track8 measure 79 gives `@(96`, matching the "around 2 beats" the original source described.
 
 ## Bugs found and fixed
 
-1. **Same-tick snap overwrite (both zoom and tilt), analogous to `notes.md` bug #3** ("a same-tick slam landing on a run boundary lost its true endpoint entirely, drawing a diagonal instead of a vertical drop"). A vox camera/tilt segment can be zero-length (`tick == end_tick`) with `start != end` - a genuine instant jump, the same idea as a laser slam. `compute_zoom_events` and `compute_tilt_events` originally wrote `events[tick] = value` per segment into a plain dict; when a zero-length segment shared its tick with the next (or the previous) segment, the later write silently clobbered the earlier one, and the arrival/departure value pair collapsed into whichever value got written last - erasing the peak or trough the snap was there to represent, and drawing a shallow ramp straight through it instead. Confirmed on `2226_gryphone_etia_5m.vox` (flagged by direction as a heavy camera/tilt chart worth checking): `cam_rotx`/`cam_radi` each have 7 zero-length segments sharing a tick with their neighbour, `tilt` has 2. Fixed by routing every track through `_place_track` (`camera.py`), which spaces genuinely distinct same-tick values one grid cell apart instead of overwriting - the same fix shape as the laser one, and for the same reason (ksh has no way to hold two different values on one grid line, so an instant vox transition needs two adjacent ksh ones). Example, `zoom_top`/`zoom_bottom` at the very start of `2226_gryphone_etia_5m.vox` (an initial-framing snap before anything else happens): before the fix, only `zoom_top=-105 zoom_bottom=94` would have survived (jumping straight to the second segment's target, no line for the resting `0, 0` before it, or the diagonal-instead-of-vertical version of it depending on which segment ordered last); after the fix, `zoom_bottom=0`/`zoom_top=0` and `zoom_bottom=94`/`zoom_top=-105` are both emitted, one cell apart.
+1. A zero-length vox segment (`tick == end_tick`, `start != end`) is a real instant jump, like a slam. `compute_zoom_events` and `compute_tilt_events` wrote `events[tick] = value`, so a neighbour sharing the tick overwrote it and the peak became a shallow ramp (`2226_gryphone_etia_5m`: 7 such segments each in `cam_rotx`/`cam_radi`, 2 in `tilt`). Now `_place_track` puts distinct same-tick values one cell apart.
+2. Dedup kept only the first point of a same-value run, so the hold before a ramp collapsed into a long diagonal (`2226_gryphone_etia_5m` measures 90 to 93: hold at 1.0 for about 335 cells, then ramp to -1.0). Now both the first and last point of each run survive. Output there: `(17088,'0') (17089,'1') (17424,'1') (17472,'-1') (17760,'-1') (17856,'0') (17857,'normal')`.
 
-2. **Dedup dropped the hold-anchor point right before a ramp, collapsing holds into long diagonals.** `_dedupe_consecutive`'s original form kept only the *first* point of a run of consecutive-equal-value ticks and dropped the rest - including the *last* one, which is what stops ksh's linear interpolation from blending a flat hold straight into whatever ramp comes after it. Found by direction on `2226_gryphone_etia_5m.vox` measures 90-93: vox snaps tilt to 1.0, **holds it there for ~335 cells (~7 beats)**, then ramps down to -1.0 over the next 48 cells, holds again for ~288 cells, then ramps to 0 over 96. With only the run's first point kept, the output jumped straight from the snap to a single line at the *ramp's end* value, turning "hold at 100%, then a quick flip to -100%" into one long diagonal spanning the entire hold-plus-ramp duration - exactly what was reported. Fixed by keeping a point whenever it differs from *either* neighbour (i.e. both the first and last point of every same-value run survive; only strictly-interior repeats get dropped) - verified against the raw vox segments directly post-fix: `camera.py` now emits `(17088,'0') (17089,'1') (17424,'1') (17472,'-1') (17760,'-1') (17856,'0') (17857,'normal')` for that span, correctly holding through 17424 and 17760 before each ramp.
+`scripts/camera/2226_gryphone_etia_5m.ksh` is not a reference. An earlier version of this document called it hand-charted and cited a 100% match, but its header is placeholder output from a similar converter, so it shared the same bug. The only valid check was against the vox segments directly.
 
-**On `scripts/camera/2226_gryphone_etia_5m.ksh`, corrected**: an earlier version of this document called this file "an actual hand-charted reference" and reported a suspicious 100%-exact match against it (tilt 59/59, zoom 54/54, spin 4/4) as validation. That was wrong on inspection - its header is machine-placeholder output (`artist=`, `effect=`, `jacket=`, `illustrator=` all blank; `difficulty=infinite`/`level=1`/`bg=desert`/`layer=arrow` all matching `notes/convert.py`'s own hardcoded defaults exactly; `title=2226_gryphone_etia_5m` matching its `"title=%s" % base_filename` placeholder convention verbatim), i.e. it's prior machine-generated output from some earlier version of a similar converter, not independent ground truth - which is exactly why it agreed with this session's *also-buggy* output on the hold-collapse bug above: both pieces of code made the same mistake. The file is left in place (not this project's to delete) but is no longer treated as a reference anywhere in this document. The only trustworthy validation done was against the vox segment data directly, by hand, per bug 2's writeup.
+## Status
 
-## Converter status
+`convert_camera.py` produces notes plus camera. Smoke-tested on `1734_777_roughsketch_3e` (+2.2% lines), a manual-`Tilt` chart (`0418_werewolf_howls_camellia_4i`, vox `-0.500` gives `tilt=0.5`), type 7 (`0642_sayonara_planet_wars_kuroma_4i`), type 4 (`2216_tetoris_hiiragimagnetite_5m`, `2392_dementafterlegend_cosmograph_5m`) and `2226_gryphone_etia_5m`. With `camera=False` (the default) the output is unchanged, as `notes-refcheck` confirms byte for byte. With `pretilt_fix` off, behaviour is unchanged by that flag.
 
-`scripts/camera/convert.py` produces a complete chart (notes + camera together, via `notes/convert.py`'s `camera=True` path). Smoke-tested on: a plain chart (`1734_777_roughsketch_3e`, output grows from 24585 to 25135 lines, +2.2%, from the extra grid resolution camera anchors require - not a blowup), a manual-`Tilt` chart (`0418_werewolf_howls_camellia_4i`, floats pass through with the sign flip applied - vox `-0.500` at tick 768 emits `tilt=0.5`, vox `+0.500` at 1152 emits `tilt=-0.5`), a `roll_type=7` chart (`0642_sayonara_planet_wars_kuroma_4i`, produces a syntactically valid but unvalidated-length *half*-spin token - it was a full spin until the DLL read in "Spin/swing"), a `roll_type=4` chart (`2216_tetoris_hiiragimagnetite_5m`, emitting `tilt=0` at the slam alongside an unhalved `@)144` spin token, then `tilt=-72` + `tilt=0` 144 cells later where the token ends, and `tilt=normal` on the cell after) and a format-13 `roll_type=4` chart (`2392_dementafterlegend_cosmograph_5m`, the one row whose ramp span had to be cleared of the chart's own manual `Tilt` data - all 27 type-4 rows across `data/music` *and* the update folders were checked), and a heavy camera/tilt chart (`2226_gryphone_etia_5m`, where both bugs above were found and their fixes verified directly against the raw vox segments - see "Bugs found and fixed"). `notes-refcheck`'s `check_all_charts.py` confirmed byte-for-byte unaffected when `camera=False` (the default), so this is additive, not a risk to the existing notes/laser work. The same held for `pretilt_fix` when it landed: with the flag off, `camera=True` output was byte-identical to the pre-`_pretilt_brackets` module across a 40-chart sample, checked by rebuilding the old `compute_tilt_events` and diffing whole conversions. That no longer describes the module as a whole - the manual-tilt sign fix above deliberately changes `camera=True` output on every chart carrying a `Tilt` track - but it still describes `pretilt_fix` itself, which touches nothing when off.
+No authoritative hand-charted reference with heavy camera work exists, so the output is validated against the vox data's own structure only.
 
-No independent hand-charted reference with heavy camera work has been found yet (the one candidate turned out to be prior machine output - see above), so beyond the raw-vox-segment checks in "Bugs found and fixed," this converter's camera output hasn't been validated against an authoritative outside source. Treat it as "matches the vox data's own structure, by direct inspection," not "verified correct" until one exists.
-
-Known integration gap: spin tokens are placed at the vox roll point's exact tick, but if `laser.py`'s curve decimation (see `specs/notes.md`) drops that exact point when building the ksh laser run, the spin suffix can end up hanging off a `:` continuation character rather than a real laser position character. Not yet checked how often this happens or whether it renders acceptably in KSM.
+Known gap: spin tokens sit on the roll point's exact tick, but `laser_curves.py` decimation may drop that point, leaving the token on a `:` continuation instead of a position character. How often, and whether KSM renders it, is unchecked.
 
 ## Open items
 
-1. **Tilt auto-mode formula** - not modelled; `camera.py` relies on ksh's own built-in auto-tilt as an approximation. Low priority per direction.
-2. ~~**Spin length for `roll_type` 4 and 7**~~ - **closed**, from the renderer rather than from hand charts, which as suspected were never going to supply the evidence. See "What the DLL says the spin is". What replaced it is a narrower and more interesting question: **the ksh scale for every type**, where three defensible numbers (24, 20.6, 38.6) disagree and only a test chart played in the target KSM build can choose - see "The scale question the DLL does not settle". Separately, **no format-13 chart has reference coverage at all**, so the v13 length column's unit is inherited rather than measured - see "Which column holds the length"; the DLL read settles the unit for v10/v12 types 6/7 (tenths of a beat) but the v13 *column* question is unaffected.
-3. **Spin/laser-decimation interaction** - whether a roll point can lose its exact grid line to curve decimation, and what that looks like in the output.
-4. Per direction, DLL work stays the fallback once the above are worth revisiting, not the starting point. **Two exceptions have now been taken**, both because no hand chart could settle the question: the chart reader's laser-row parser, for which column holds the roll length (see "Which column holds the length"; the current reader is `FUN_18023baa0`, not the `FUN_180239810` this item used to name - that one parses an older format generation), and `Game::AngleUpdater` for the spin itself (see "What the DLL says the spin is").
-
-   Still unexamined, and now with a lead each: the gameplay-event kinds in `FUN_180407200`; **the producer of gameplay event kind 8**, which would confirm the field order this document reads off the consumer side (`[4]` BPM, `[5]` direction, `[6]` kind, `[7]` length) rather than inferring it from `FUN_18011f320`'s arithmetic; and **whatever consumes the v13-only `+0x34` field** - which the laser geometry builder `FUN_1802409f0` in fact reads heavily, grouping laser points into runs by it, with a track-dependent meaning for its values 1 and 2 (`0x180240c15`). `FUN_1803b1180` also turns it into a scale factor of 0.0/1.0/2.0 per laser point. That is the strongest lead this document has on that column's meaning.
-
-5. **The type-4 tilt ramp's magnitude and its side effects.** `72` is a tested value from the target KSM build, not a derived one - `kTiltRadians`, which decides what it means in degrees, is defined outside the ksm-v2 files consulted here, so this document cannot say how many turns it produces or check it against the DLL's two-extra-turns. Two consequences of the mechanism are also unmeasured: a manual `tilt=` value **suppresses KSM's auto laser-tilt for as long as it is engaged**, so a type-4 roll loses its ordinary laser-driven tilt for the whole declared duration (the `tilt=normal` a cell past the end hands it back); and the ramp is linear where the DLL's rotation is linear only over the first 3/4, so the tail of the ramp turns the lane through what the arcade spends settling. Both follow from the chosen encoding rather than from a mistake, and both would be settled the same way - by playing one.
-
-6. **Pretilt bracketing when the *other* lane is busy** - the shipped fix requires the anticipation window to be clear of lasers on both lanes, because ksh's `tilt` is global and KSM's look-ahead is per lane (see [What the converter emits](#what-the-converter-emits)). Cancelling pretilt during another lane's active laser would need the auto-tilt formula modelled and reproduced as manual floats - i.e. open item 1 - rather than a `zero`/`normal` bracket.
-7. **The manual-tilt magnitude** - `TILT_VOX_TO_KSH` now follows the reference charters at `-1.5` rather than the unit reading `-1.0` (see "The manual passthrough sign was inverted"), so this item is decided in the charters' favour but still not *measured*. Deciding between "KSM's tilt unit really is ~2/3 of SDVX's" and "the charters exaggerate uniformly" needs either the DLL's own tilt render path or a side-by-side playback comparison; the sign half is settled and shipped.
-8. **Whether the v2 constants match v1.6x.** The two-beat window, the 4.0 tilt-scale fade and the 40 ms manual takeover all come from ksm-v2 source; the binary the reference charters worked against is v1.6x, and `ksh_format.md`'s `ver` notes already document that tilt relaxation and keep semantics changed across 1.20/1.20b/1.21. A test chart played in the actual target build would settle it.
+1. Auto-tilt formula isn't modelled.
+2. The ksh scale for every spin type (24, 20.6 or 38.6) needs a test chart in KSM. v13 length units have no reference coverage.
+3. Whether decimation can drop a roll point's grid line.
+4. DLL leads: the gameplay-event kinds in `FUN_180407200`; the producer of event kind 8 (to confirm the field order `[4]` BPM, `[5]` direction, `[6]` kind, `[7]` length); and the consumer of the v13-only `+0x34` field, which `FUN_1802409f0` uses to group laser points into runs, with track-dependent values 1 and 2 (`0x180240c15`). `FUN_1803b1180` also turns it into a 0.0/1.0/2.0 scale per laser point.
+5. Type-4 ramp: `72` is tested, not derived. A manual `tilt=` suppresses auto laser-tilt for the whole duration, and the linear ramp turns the lane during the settle, where the DLL's rotation is linear only for the first 3/4. Playing it would settle these.
+6. Pretilt while the other lane is busy needs the auto-tilt formula reproduced as manual floats.
+7. Tilt magnitude: -1.5 follows the charters. Deciding whether KSM's unit is 2/3 of SDVX's needs the DLL's tilt render path or playback.
+8. Whether the v2 constants (two-beat window, 4.0 scale fade, 40 ms takeover) match v1.6x.

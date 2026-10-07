@@ -1,8 +1,5 @@
-"""Small persisted-settings store for the GUI - game/output folders and the
-optional overrides (fallback install, ffmpeg, SE bank dir), remembered
-between runs so the user isn't re-picking the same folders every launch
-(HANDOFF.md item 2: "an app needs an explicit install path, remembered
-between runs")."""
+"""Saves folder choices and panel state to the vox2ksh-gui folder under %APPDATA% (settings.json).
+"""
 import json
 import os
 
@@ -37,7 +34,7 @@ def load():
             with open(path, "r", encoding="utf-8") as f:
                 data.update(json.load(f))
         except (OSError, ValueError):
-            pass  # corrupt/unreadable settings file -> fall back to defaults
+            pass
     return data
 
 
@@ -46,4 +43,4 @@ def save(data):
         with open(_store_path(), "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
     except OSError:
-        pass  # best-effort; not being able to persist settings isn't fatal
+        pass

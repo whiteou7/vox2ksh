@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""Check the notes conversion of one song against its reference conversion, side by side.
-
-    python check_one_chart.py <song> [-d mxm] [--keep]
-
-`song` is a substring of the reference folder name (e.g. `kamui`, `akasha`). Every difficulty the reference folder holds is checked unless -d picks one by its ksh basename (nov/adv/exh/inf/mxm...). If the substring names more than one song the candidates are listed and nothing runs - narrow it.
-
-Unlike check_all_charts.py this prints per-lane counts (BT A-D, FX L/R, laser L/R) as well as category totals, because with one chart in front of you the question is *where* it differs. The converted .ksh is written to output/work and its path printed, so you can open it next to the reference. Use this while developing and check_all_charts.py for the verdict.
-"""
 
 import argparse
 import os

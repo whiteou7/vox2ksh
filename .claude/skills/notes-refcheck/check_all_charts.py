@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Check the notes conversion against every matched reference conversion and aggregate by category.
-
-    python check_all_charts.py [-n 10] [--only substring] [--worst 10] [--csv out.csv]
-
-This is the verdict tool: run it before and after a change with --csv and diff the two with compare_runs.py. For one song, side by side, use check_one_chart.py. Pairing and counting live in ksh_stats.py.
-"""
 
 import argparse
 import os
@@ -29,7 +23,7 @@ def main():
     print("matched %d chart(s)\n" % len(pairs))
 
     work = ensure_work()
-    agg = {name: [] for name, _ in CATEGORIES}     # name -> [(ref_label, abs_err, ours_total, theirs_total), ...]
+    agg = {name: [] for name, _ in CATEGORIES}
     csv_rows = []
     failures = []
 

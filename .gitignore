@@ -2,7 +2,6 @@
 # Everything in here is regenerable — see scripts/shared/_paths.py for how.
 output/*
 !output/.gitkeep
-!output/README.md
 
 # Python
 __pycache__/

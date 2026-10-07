@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""Diff two check_all_charts.py --csv runs, per category.
-
-    python compare_runs.py before.csv after.csv [--worst 6]
-
-check_all_charts writes `chart,category,ours,theirs`, one row per (chart, category).
-`theirs` is the hand-made reference conversion and does not change between
-runs; what moves is `ours`. The error compared here is |ours - theirs|, so a
-category improves when that absolute error shrinks.
-
-Only charts present in BOTH runs are compared. A chart that appears in one run
-and not the other converted in one tree and raised in the other - that is
-listed separately, because a new conversion failure is a blocking regression
-however good the aggregate looks.
-"""
 import argparse
 import collections
 import csv
@@ -20,7 +6,6 @@ import sys
 
 
 def load(path):
-    """-> {(chart, category): (ours, theirs)}"""
     out = {}
     with open(path, newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
@@ -63,7 +48,7 @@ def main():
             print("    %s" % c)
         print()
 
-    per = collections.defaultdict(list)   # category -> [(chart, err_before, err_after)]
+    per = collections.defaultdict(list)
     for key in shared:
         chart, cat = key
         per[cat].append((chart, abs(a[key][0] - a[key][1]), abs(b[key][0] - b[key][1])))
