@@ -208,12 +208,12 @@ def convert(vox_path, out_path, camera=False, meta=None, slam_gap_frac=laser.SLA
                 lines.append("beat=%d/%d" % (num, den))
             cur_num, cur_den = num, den
 
-        bpm_here = dict(bpm_by_measure.get(m, []))
+        bpm_here = {m_start + off: bpm for (off, bpm) in bpm_by_measure.get(m, [])}
 
         for k in range(res):
             tick = m_start + k * step
-            if k in bpm_here:
-                lines.append("t=%s" % _fmt_bpm(bpm_here[k]))
+            if tick in bpm_here:
+                lines.append("t=%s" % _fmt_bpm(bpm_here[tick]))
             if camera:
                 for opt_line in cam_opts.get(tick, ()):
                     lines.append(opt_line)
@@ -251,7 +251,7 @@ def convert(vox_path, out_path, camera=False, meta=None, slam_gap_frac=laser.SLA
 
 
 def _fmt_bpm(bpm):
-    s = "%.3f" % bpm
+    s = "%.4f" % bpm
     s = s.rstrip("0").rstrip(".")
     return s if s else "0"
 
