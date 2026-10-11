@@ -58,7 +58,17 @@ class Song:
     def top_difficulty(self):
         return self.difficulties.get("maximum") or self.difficulties.get("infinite")
 
-    def tiles(self):
+    def resolve_diff_keys(self, diff_keys):
+        """`diff_keys` with the pseudo-key "top" replaced by this song's top difficulty, if it has one."""
+        keys = set(diff_keys)
+        if "top" in keys:
+            keys.discard("top")
+            top = self.top_difficulty()
+            if top:
+                keys.add(top.key)
+        return keys
+
+    def difficulty_tiles(self):
         out = {}
         for key in ("novice", "advanced", "exhaust"):
             d = self.difficulties.get(key)
@@ -70,12 +80,12 @@ class Song:
         return sorted(out.items())
 
     def jacket_path(self, music_dir, diff_key, fallback_music_dir=None):
-        n0 = DIFF_JACKET_NUM.get(diff_key, 1)
-        for mdir in (music_dir, fallback_music_dir):
-            if not mdir:
+        preferred_number = DIFF_JACKET_NUM.get(diff_key, 1)
+        for music_root in (music_dir, fallback_music_dir):
+            if not music_root:
                 continue
-            base = os.path.join(mdir, self.folder)
-            for n in (n0, 1):
+            base = os.path.join(music_root, self.folder)
+            for n in (preferred_number, 1):
                 p = os.path.join(base, "jk_%04d_%d_b.png" % (self.id, n))
                 if os.path.exists(p):
                     return p
@@ -86,85 +96,85 @@ class Song:
         return None
 
     def thumb_path(self, music_dir, diff_key, fallback_music_dir=None):
-        n0 = DIFF_JACKET_NUM.get(diff_key, 1)
-        for mdir in (music_dir, fallback_music_dir):
-            if not mdir:
+        preferred_number = DIFF_JACKET_NUM.get(diff_key, 1)
+        for music_root in (music_dir, fallback_music_dir):
+            if not music_root:
                 continue
-            for n in (n0, 1):
-                p = os.path.join(mdir, self.folder, "jk_%04d_%d_s.png" % (self.id, n))
+            for n in (preferred_number, 1):
+                p = os.path.join(music_root, self.folder, "jk_%04d_%d_s.png" % (self.id, n))
                 if os.path.exists(p):
                     return p
         return self.jacket_path(music_dir, diff_key, fallback_music_dir)
 
     def vox_path(self, music_dir, key):
-        d = self.difficulties.get(key)
-        if not d:
+        difficulty = self.difficulties.get(key)
+        if not difficulty:
             return None
-        p = os.path.join(music_dir, self.folder, "%s_%s.vox" % (self.folder, d.suffix))
-        return p if os.path.exists(p) else None
+        path = os.path.join(music_dir, self.folder, "%s_%s.vox" % (self.folder, difficulty.suffix))
+        return path if os.path.exists(path) else None
 
     def s3v_path(self, music_dir, fallback_music_dir=None):
-        return self._audio_path(self.folder + ".s3v", music_dir, fallback_music_dir)
+        return self._find_audio_file(self.folder + ".s3v", music_dir, fallback_music_dir)
 
     def pre_s3v_path(self, music_dir, fallback_music_dir=None):
-        return self._audio_path(self.folder + "_pre.s3v", music_dir, fallback_music_dir)
+        return self._find_audio_file(self.folder + "_pre.s3v", music_dir, fallback_music_dir)
 
-    def _audio_path(self, name, music_dir, fallback_music_dir=None):
-        p = os.path.join(music_dir, self.folder, name)
-        if os.path.exists(p):
-            return p
+    def _find_audio_file(self, name, music_dir, fallback_music_dir=None):
+        path = os.path.join(music_dir, self.folder, name)
+        if os.path.exists(path):
+            return path
         if fallback_music_dir:
-            p2 = os.path.join(fallback_music_dir, self.folder, name)
-            if os.path.exists(p2):
-                return p2
+            fallback_path = os.path.join(fallback_music_dir, self.folder, name)
+            if os.path.exists(fallback_path):
+                return fallback_path
         return None
 
 
-def _text(node, tag, default=""):
+def _child_text(node, tag, default=""):
     child = node.find(tag) if node is not None else None
     return child.text if child is not None and child.text is not None else default
 
 
-def _int(node, tag, default=0):
+def _child_int(node, tag, default=0):
     try:
-        return int(_text(node, tag, str(default)))
+        return int(_child_text(node, tag, str(default)))
     except (TypeError, ValueError):
         return default
 
 
-def _fmt_date(yyyymmdd):
+def _format_date(yyyymmdd):
     s = str(yyyymmdd)
     if len(s) == 8 and s.isdigit() and s != "00000000":
         return "%s-%s-%s" % (s[0:4], s[4:6], s[6:8])
     return ""
 
 
-def parse(music_db_xml_path):
+def parse_music_db(music_db_xml_path):
     raw = open(music_db_xml_path, "rb").read()
     text = raw.decode("cp932", errors="replace")
     root = ET.fromstring(text)
 
     songs = []
-    for m in root.findall("music"):
+    for music_node in root.findall("music"):
         try:
-            song_id = int(m.get("id"))
+            song_id = int(music_node.get("id"))
         except (TypeError, ValueError):
             continue
-        info = m.find("info")
+        info = music_node.find("info")
         if info is None:
             continue
-        ascii_name = _text(info, "ascii")
+        ascii_name = _child_text(info, "ascii")
         song = Song(
             id=song_id,
             folder="%04d_%s" % (song_id, ascii_name),
-            title=_text(info, "title_name"),
-            artist=_text(info, "artist_name"),
+            title=_child_text(info, "title_name"),
+            artist=_child_text(info, "artist_name"),
             ascii=ascii_name,
-            version=_int(info, "version", 0),
-            distribution_date=_fmt_date(_text(info, "distribution_date", "0")),
-            genre=_int(info, "genre", 0),
+            version=_child_int(info, "version", 0),
+            distribution_date=_format_date(_child_text(info, "distribution_date", "0")),
+            genre=_child_int(info, "genre", 0),
         )
-        diffs = m.find("difficulty")
+        diffs = music_node.find("difficulty")
         if diffs is not None:
             for key in DIFF_ORDER:
                 node = diffs.find(key)
@@ -173,15 +183,15 @@ def parse(music_db_xml_path):
                 song.difficulties[key] = Difficulty(
                     key=key,
                     suffix=DIFF_SUFFIX[key],
-                    difnum=_int(node, "difnum", 1),
-                    illustrator=_text(node, "illustrator"),
-                    effected_by=_text(node, "effected_by"),
+                    difnum=_child_int(node, "difnum", 1),
+                    illustrator=_child_text(node, "illustrator"),
+                    effected_by=_child_text(node, "effected_by"),
                 )
         songs.append(song)
     return songs
 
 
-def fallback_music_dir(base_game_folder):
+def install_music_dir(base_game_folder):
     if not base_game_folder:
         return None
     d = os.path.join(base_game_folder, "data", "music")
@@ -195,6 +205,6 @@ def load_library(game_folder):
         raise FileNotFoundError(db_path)
     if not os.path.isdir(music_dir):
         raise FileNotFoundError(music_dir)
-    songs = parse(db_path)
+    songs = parse_music_db(db_path)
     have = set(os.listdir(music_dir))
     return [s for s in songs if s.folder in have], music_dir

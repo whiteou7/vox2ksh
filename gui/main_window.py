@@ -35,7 +35,7 @@ class App:
         self.settings = settings_store.load()
         self.songs = []
         self.music_dir = None
-        self.fallback_music_dir = music_db.fallback_music_dir(self.settings.get("fallback_game_folder"))
+        self.fallback_music_dir = music_db.install_music_dir(self.settings.get("fallback_game_folder"))
         self.row_to_song = {}
         self.jacket_cache = {}
         self.worker = None
@@ -114,7 +114,7 @@ class App:
         combo = ttk.Combobox(ver_cell, textvariable=self.ksh_version_var, values=labels,
                               state="readonly", width=32)
         combo.pack(side="left")
-        combo.bind("<<ComboboxSelected>>", lambda _e: self._save_ksh_version())
+        combo.bind("<<ComboboxSelected>>", lambda _e: self._remember("ksh_version", self._ksh_version()))
 
         bar.columnconfigure(1, weight=1)
 
@@ -143,29 +143,16 @@ class App:
         self.search_var.trace_add("write", lambda *_: self._populate_table())
         ttk.Entry(filt, textvariable=self.search_var, width=22).pack(side="left", padx=(4, 0))
 
-    def _save_diff_filters(self):
-        self.settings["difficulties"] = [k for k, v in self.diff_vars.items() if v.get()]
+    def _remember(self, key, value):
+        self.settings[key] = value
         settings_store.save(self.settings)
+
+    def _save_diff_filters(self):
+        self._remember("difficulties", [k for k, v in self.diff_vars.items() if v.get()])
 
     def _ksh_version(self):
         label = self.ksh_version_var.get()
         return next((v for v, text in KSH_VERSIONS if text == label), 1)
-
-    def _save_ksh_version(self):
-        self.settings["ksh_version"] = self._ksh_version()
-        settings_store.save(self.settings)
-
-    def _save_slam_gap(self):
-        self.settings["standard_slam_gap"] = self.slam_gap_var.get()
-        settings_store.save(self.settings)
-
-    def _save_preview_meta(self):
-        self.settings["preview_meta"] = self.preview_meta_var.get()
-        settings_store.save(self.settings)
-
-    def _save_pretilt_fix(self):
-        self.settings["pretilt_fix"] = self.pretilt_var.get()
-        settings_store.save(self.settings)
 
     def _build_table(self):
         frame = ttk.Frame(self.root, padding=(6, 4))
@@ -247,7 +234,7 @@ class App:
         self.source_var.set(song.version_name)
         self.date_var.set(song.distribution_date or "-")
 
-        by_tile = dict(song.tiles())
+        by_tile = dict(song.difficulty_tiles())
         for i in range(4):
             tile = i + 1
             w = self.tile_widgets[i]
@@ -291,15 +278,18 @@ class App:
         notes_row.pack(fill="x", anchor="w")
         self.slam_gap_var = tk.BooleanVar(value=bool(self.settings.get("standard_slam_gap", True)))
         ttk.Checkbutton(notes_row, text="Standard slam gap", variable=self.slam_gap_var,
-                         command=self._save_slam_gap).pack(anchor="w")
+                         command=lambda: self._remember("standard_slam_gap", self.slam_gap_var.get())
+                         ).pack(anchor="w")
         self.pretilt_var = tk.BooleanVar(value=bool(self.settings.get("pretilt_fix", False)))
         ttk.Checkbutton(notes_row, text="Remove pretilt",
                          variable=self.pretilt_var,
-                         command=self._save_pretilt_fix).pack(anchor="w")
+                         command=lambda: self._remember("pretilt_fix", self.pretilt_var.get())
+                         ).pack(anchor="w")
         self.preview_meta_var = tk.BooleanVar(value=bool(self.settings.get("preview_meta", True)))
         ttk.Checkbutton(notes_row, text="Preview offset (po/plength)",
                          variable=self.preview_meta_var,
-                         command=self._save_preview_meta).pack(anchor="w")
+                         command=lambda: self._remember("preview_meta", self.preview_meta_var.get())
+                         ).pack(anchor="w")
 
         ttk.Label(self.advanced_frame, text="render_chart.py options",
                   font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(4, 0))
@@ -354,9 +344,8 @@ class App:
                 self._log("!! ignoring invalid value %r for %s (keeping default %r)"
                            % (raw, spec.flag, spec.default))
                 out[dest] = spec.default
-        self.settings["advanced_values"] = {k: v for k, v in out.items()
-                                             if v != self.advanced_vars[k][0].default}
-        settings_store.save(self.settings)
+        self._remember("advanced_values", {k: v for k, v in out.items()
+                                           if v != self.advanced_vars[k][0].default})
         return out
 
     def _build_debug(self):
@@ -380,14 +369,12 @@ class App:
         self.advanced_frame.pack_forget()
         self.debug_frame.pack_forget()
         if self.advanced_var.get():
-            self.advanced_frame.pack(side="top", fill="x", padx=6, pady=(0, 4), before=self.status_bar
-                                      if hasattr(self, "status_bar") else None)
+            self.advanced_frame.pack(side="top", fill="x", padx=6, pady=(0, 4), before=self.status_bar)
         if self.debug_var.get():
             self.debug_frame.pack(side="top", fill="both", expand=True, padx=6, pady=(0, 4),
-                                   before=self.status_bar if hasattr(self, "status_bar") else None)
+                                  before=self.status_bar)
         self.settings["debug"] = self.debug_var.get()
-        self.settings["advanced"] = self.advanced_var.get()
-        settings_store.save(self.settings)
+        self._remember("advanced", self.advanced_var.get())
 
     def _build_status(self):
         self.status_bar = ttk.Frame(self.root, padding=6)
@@ -430,8 +417,7 @@ class App:
         self.songs = songs
         self.music_dir = music_dir
         self.game_folder_var.set(folder)
-        self.settings["game_folder"] = folder
-        settings_store.save(self.settings)
+        self._remember("game_folder", folder)
         self._populate_table()
 
     def _populate_table(self):
@@ -450,8 +436,7 @@ class App:
         d = filedialog.askdirectory(title="Select the output folder")
         if d:
             self.output_folder_var.set(d)
-            self.settings["output_folder"] = d
-            settings_store.save(self.settings)
+            self._remember("output_folder", d)
 
     def on_reveal_output_folder(self):
         d = self.output_folder_var.get()
@@ -475,7 +460,7 @@ class App:
         if not diff_keys:
             messagebox.showwarning("No difficulties", "Check at least one difficulty first.")
             return
-        text = patch_notes.generate(selected, diff_keys)
+        text = patch_notes.generate_new_songs_note(selected, diff_keys)
         ConvertNoteDialog(self.root, text)
 
     def on_open_settings(self):
@@ -682,6 +667,6 @@ class SettingsDialog(tk.Toplevel):
         for key, var in self.vars.items():
             self.app.settings[key] = var.get()
         settings_store.save(self.app.settings)
-        self.app.fallback_music_dir = music_db.fallback_music_dir(
+        self.app.fallback_music_dir = music_db.install_music_dir(
             self.app.settings.get("fallback_game_folder"))
         self.destroy()

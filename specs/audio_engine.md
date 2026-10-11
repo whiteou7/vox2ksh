@@ -476,15 +476,19 @@ return offset
 
 The wrapper then does `snappedStart = notePos - offset` (`0x1806310ea`). Example: a 2-beat Retrigger at 210 BPM has `samplesPerBeat` 12600 and `period` 25200. A note one beat in gets offset 12600, so with `count` 16 (1575-sample slices) it opens at slice 8.
 
-`render_chart.py` computes this in `grid_snap_offset`, renders from `offset` samples before the note and discards the pre-roll.
+`render_chart.py` computes this in `grid_lock_lead_samples`, renders from `offset` samples before the note and discards the pre-roll.
 
 ### 5.3 `#BEAT RESOLUTION`
 
-Cells per beat is set per chart by the optional `#BEAT RESOLUTION` tag: 48 when absent, which is nearly every chart, otherwise 144, 240 or 480. `Timeline` reads it from the chart, with `res=` as an override.
+Cells per beat is set per chart by the optional `#BEAT RESOLUTION` tag: 48 when absent, which is nearly every chart, otherwise 144, 240 or 480. `VoxChart` reads it and hands it to `Timeline`, which `render_chart.py` shares with the note converter.
 
 ### 5.3b The beat column is in denominator units
 
-The beat in `measure,beat,cell` is one denominator unit, `res * 4 / den` cells: 48 in 4/4 and 12 in 15/16. `Timeline.abs_tick` computes it that way.
+The beat in `measure,beat,cell` is one denominator unit, `res * 4 / den` cells: 48 in 4/4 and 12 in 15/16. `Timeline.tick_at` computes it that way.
+
+### 5.3c Laser positions
+
+Laser positions are integers 0 to 127 in format 10 and floats 0 to 1 in later formats (a value above 1 is divided by 127 whatever the version). `render_chart.py` takes laser points from `VoxChart`, so it reads them the same way the note converter does; a format 10 position of exactly `1` is 1/127, not full scale.
 
 ## 6. Reference implementation
 
@@ -793,7 +797,7 @@ With the one-voice rule (6.1.3), the best SE trim against the capture is 1.25 (+
 * Kind 14 (id 13): the PhaseGear internals. Transcribing `PhaseGearSignalProc` (`0x180787e20` init, `0x1807894b0` synthesis, `PhaseGearLib::FFTHandlerF`) would close this. Its fourth function remaps the note's 0..1 progress; in this build it's the identity lambda at `0x1802be750`.
 * Tape Stop Ex's floor (`this+0x46`) and phase field (`this+0x224`) are untraced (4.6b).
 * The order of the FX-note list at `gen+0x20` is untraced (8.1).
-* `Timeline` uses float seconds and the engine uses integer samples, so for BPMs that don't divide 2646000 evenly `grid_snap_offset` (5.2) returns tens of samples where it should return zero.
+* `Timeline` uses float seconds and the engine uses integer samples, so for BPMs that don't divide 2646000 evenly `grid_lock_lead_samples` (5.2) returns tens of samples where it should return zero.
 
 ### 8.1 Effect combination
 

@@ -5,6 +5,7 @@
     python preview_offset.py --patch <converted-folder> --music <game folder>/data/music --dry-run
 """
 
+import argparse
 import os
 import subprocess
 import sys
@@ -23,7 +24,7 @@ BOM = b"\xef\xbb\xbf"
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
-def pre_path(s3v_path):
+def preview_clip_path(s3v_path):
     if not s3v_path:
         return None
     p = os.path.splitext(s3v_path)[0] + PRE_SUFFIX
@@ -31,20 +32,20 @@ def pre_path(s3v_path):
 
 
 def _decode_mono(path, rate=RATE):
-    ff = find_ffmpeg()
-    if not ff:
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
         raise RuntimeError("ffmpeg not found - needed to decode the preview (ASF/WMA)")
-    r = subprocess.run(
-        [ff, "-hide_banner", "-loglevel", "error", "-i", path,
+    result = subprocess.run(
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", path,
          "-f", "s16le", "-ar", str(rate), "-ac", "1", "pipe:1"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=_NO_WINDOW)
-    if r.returncode != 0:
+    if result.returncode != 0:
         raise RuntimeError("ffmpeg failed to decode %s:\n%s"
-                           % (os.path.basename(path), r.stderr.decode("utf8", "replace").strip()))
-    return np.frombuffer(r.stdout, dtype="<i2").astype(np.float64)
+                           % (os.path.basename(path), result.stderr.decode("utf8", "replace").strip()))
+    return np.frombuffer(result.stdout, dtype="<i2").astype(np.float64)
 
 
-def _ncc(song, clip):
+def _normalized_cross_correlation(song, clip):
     ns, nc = len(song), len(clip)
     n = 1
     while n < ns + nc:
@@ -55,13 +56,13 @@ def _ncc(song, clip):
     return num / (np.sqrt(np.maximum(energy, 1e-9)) * max(np.linalg.norm(clip), 1e-9))
 
 
-def measure(s3v_path, pre_s3v_path=None, min_ncc=MIN_NCC):
-    r = locate(s3v_path, pre_s3v_path, min_ncc)
+def measure_preview_window(s3v_path, pre_s3v_path=None, min_ncc=MIN_NCC):
+    r = locate_preview_in_track(s3v_path, pre_s3v_path, min_ncc)
     return None if r is None else (r[0], r[1])
 
 
-def locate(s3v_path, pre_s3v_path=None, min_ncc=MIN_NCC):
-    pre = pre_s3v_path or pre_path(s3v_path)
+def locate_preview_in_track(s3v_path, pre_s3v_path=None, min_ncc=MIN_NCC):
+    pre = pre_s3v_path or preview_clip_path(s3v_path)
     if not pre or not s3v_path or not os.path.exists(s3v_path):
         return None
     try:
@@ -72,24 +73,24 @@ def locate(s3v_path, pre_s3v_path=None, min_ncc=MIN_NCC):
     if len(clip) == 0 or len(clip) >= len(song):
         return None
 
-    c = _ncc(song, clip)
-    k = int(np.argmax(c))
-    best = float(c[k])
+    correlation = _normalized_cross_correlation(song, clip)
+    best_index = int(np.argmax(correlation))
+    best = float(correlation[best_index])
     guard = 2 * RATE
-    rival = c.copy()
-    rival[max(0, k - guard):k + guard] = -1.0
+    rival = correlation.copy()
+    rival[max(0, best_index - guard):best_index + guard] = -1.0
     runner_up = float(rival.max()) if rival.size else -1.0
     if best < min_ncc:
         return None
 
-    po = int(round(k * 1000.0 / RATE))
+    po = int(round(best_index * 1000.0 / RATE))
     plength = int(round(len(clip) * 1000.0 / RATE / LENGTH_QUANTUM) * LENGTH_QUANTUM)
     song_ms = int(len(song) * 1000.0 / RATE)
     plength = max(0, min(plength, song_ms - po))
     return po, plength, best, runner_up
 
 
-def _split_header(raw):
+def _split_ksh_header(raw):
     lines = raw.splitlines(keepends=True)
     for i, line in enumerate(lines):
         if line.strip().lstrip(BOM) == b"--":
@@ -98,7 +99,7 @@ def _split_header(raw):
 
 
 def read_header(ksh_path):
-    lines, end = _split_header(open(ksh_path, "rb").read())
+    lines, end = _split_ksh_header(open(ksh_path, "rb").read())
     out = {}
     for line in lines[:end]:
         text = line.decode("utf-8", "replace").lstrip("\ufeff").strip()
@@ -110,7 +111,7 @@ def read_header(ksh_path):
 
 def patch_header(ksh_path, po, plength):
     raw = open(ksh_path, "rb").read()
-    lines, end = _split_header(raw)
+    lines, end = _split_ksh_header(raw)
     want = [(b"po", str(po).encode()), (b"plength", str(plength).encode())]
     crlf = raw.count(b"\r\n")
     eol = b"\r\n" if crlf and crlf >= raw.count(b"\n") - crlf else b"\n"
@@ -138,7 +139,7 @@ def patch_header(ksh_path, po, plength):
     return True
 
 
-def find_track(folder_name, music_dirs):
+def find_full_track(folder_name, music_dirs):
     for d in music_dirs:
         if not d or not os.path.isdir(d):
             continue
@@ -161,8 +162,8 @@ def patch_folder(root, music_dirs, dry_run=False, log=print):
         if not kshs:
             continue
         name = os.path.basename(os.path.normpath(dirpath))
-        s3v = find_track(name, music_dirs)
-        source, pre = s3v, pre_path(s3v)
+        s3v = find_full_track(name, music_dirs)
+        source, pre = s3v, preview_clip_path(s3v)
         if source is None:
             m = read_header(os.path.join(dirpath, kshs[0])).get("m", "")
             local = os.path.join(dirpath, m) if m else ""
@@ -174,7 +175,7 @@ def patch_folder(root, music_dirs, dry_run=False, log=print):
             source, pre = local, None
             log("-- %s: no game folder found, measuring against %s" % (name, m))
 
-        r = locate(source, pre)
+        r = locate_preview_in_track(source, pre)
         if r is None:
             log("!! %s: preview not placed (no _pre.s3v, or under MIN_NCC) - %d file(s) left alone"
                 % (name, len(kshs)))
@@ -197,51 +198,37 @@ def patch_folder(root, music_dirs, dry_run=False, log=print):
     return changed, unchanged, failed
 
 
-def _resolve(arg):
+def _resolve_target_to_s3v(arg):
     if arg.lower().endswith(".s3v"):
         return arg
     d = arg if os.path.isdir(arg) else os.path.join(MUSIC, arg)
     return os.path.join(d, os.path.basename(os.path.normpath(d)) + ".s3v")
 
 
-USAGE = ("usage: python preview_offset.py <song-folder | song.s3v> [...]\n"
-         "       python preview_offset.py --patch <converted-folder> [--music DIR] [--dry-run]")
-
-
 def main():
-    args = sys.argv[1:]
-    if not args:
-        raise SystemExit(USAGE)
+    ap = argparse.ArgumentParser(
+        description="Locate each song's preview inside its full track, "
+                    "or with --patch rewrite po=/plength= in converted charts.")
+    ap.add_argument("targets", nargs="+",
+                    help="song folders or .s3v files to measure; converted-chart folders with --patch")
+    ap.add_argument("--patch", action="store_true", help="rewrite po= and plength= in the .ksh files under each target")
+    ap.add_argument("--music", action="append", default=[], metavar="DIR",
+                    help="extra data/music folder to search for the track (repeatable); this install's is searched last")
+    ap.add_argument("--dry-run", action="store_true", help="with --patch, report without writing")
+    args = ap.parse_args()
 
-    if args[0] == "--patch":
-        rest = args[1:]
-        dry_run = "--dry-run" in rest
-        rest = [a for a in rest if a != "--dry-run"]
-        music_dirs, roots = [], []
-        i = 0
-        while i < len(rest):
-            if rest[i] == "--music":
-                if i + 1 >= len(rest):
-                    raise SystemExit("--music needs a directory")
-                music_dirs.append(rest[i + 1])
-                i += 2
-            else:
-                roots.append(rest[i])
-                i += 1
-        if not roots:
-            raise SystemExit(USAGE)
-        music_dirs.append(MUSIC)
-        for root in roots:
-            changed, unchanged, failed = patch_folder(root, music_dirs, dry_run=dry_run)
+    if args.patch:
+        for root in args.targets:
+            changed, unchanged, failed = patch_folder(root, args.music + [MUSIC], dry_run=args.dry_run)
             print("\n%s: %d changed, %d unchanged, %d left alone%s"
-                  % (root, changed, unchanged, failed, "  (dry run)" if dry_run else ""))
+                  % (root, changed, unchanged, failed, "  (dry run)" if args.dry_run else ""))
         return
 
     print("%-36s %8s %9s %7s %7s" % ("track", "po_ms", "plength", "ncc", "next"))
-    for a in args:
-        s3v = _resolve(a)
+    for target in args.targets:
+        s3v = _resolve_target_to_s3v(target)
         name = os.path.splitext(os.path.basename(s3v))[0]
-        r = locate(s3v)
+        r = locate_preview_in_track(s3v)
         if r is None:
             print("%-36s %8s" % (name, "not found"))
         else:

@@ -40,108 +40,108 @@ class Run:
         return self.points[-1][0]
 
 
-def _rdp(pts, tol):
-    if len(pts) <= 2:
-        return pts
-    t0, v0 = pts[0]
-    t1, v1 = pts[-1]
+def _douglas_peucker(polyline, tol):
+    if len(polyline) <= 2:
+        return polyline
+    t0, v0 = polyline[0]
+    t1, v1 = polyline[-1]
     span = t1 - t0
     worst_d, worst_i = -1.0, -1
-    for i in range(1, len(pts) - 1):
-        t, v = pts[i]
+    for i in range(1, len(polyline) - 1):
+        t, v = polyline[i]
         f = (t - t0) / span if span else 0.0
         vi = v0 + (v1 - v0) * f
         d = abs(v - vi)
         if d > worst_d:
             worst_d, worst_i = d, i
     if worst_d <= tol:
-        return [pts[0], pts[-1]]
-    left = _rdp(pts[:worst_i + 1], tol)
-    right = _rdp(pts[worst_i:], tol)
+        return [polyline[0], polyline[-1]]
+    left = _douglas_peucker(polyline[:worst_i + 1], tol)
+    right = _douglas_peucker(polyline[worst_i:], tol)
     return left[:-1] + right
 
 
-def _enforce_min_gap(pts, min_gap, lead=0):
-    if len(pts) <= 2:
-        return pts, (len(pts) == 2 and pts[1][0] - (pts[0][0] + lead) < min_gap)
-    turns = [pts[i][0] for i in _direction_breaks(pts, CURVE_DEAD_ZONE)]
+def _enforce_min_gap(polyline, min_gap, lead_ticks=0):
+    if len(polyline) <= 2:
+        return polyline, (len(polyline) == 2 and polyline[1][0] - (polyline[0][0] + lead_ticks) < min_gap)
+    turns = [polyline[i][0] for i in _direction_reversal_indices(polyline, CURVE_DEAD_ZONE)]
     turn_at = set(turns)
-    out = [pts[0]]
-    eff = [pts[0][0] + lead]
+    kept = [polyline[0]]
+    effective_ticks = [polyline[0][0] + lead_ticks]
     dropped_after = {}
-    for t, v in pts[1:-1]:
+    for t, v in polyline[1:-1]:
         if t in turn_at:
-            while len(out) > 1 and out[-1][0] not in turn_at and t - eff[-1] < min_gap:
-                dropped = dropped_after.pop(len(out) - 1, [])
-                dropped_after.setdefault(len(out) - 2, []).extend([out.pop()] + dropped)
-                eff.pop()
+            while len(kept) > 1 and kept[-1][0] not in turn_at and t - effective_ticks[-1] < min_gap:
+                dropped = dropped_after.pop(len(kept) - 1, [])
+                dropped_after.setdefault(len(kept) - 2, []).extend([kept.pop()] + dropped)
+                effective_ticks.pop()
         elif any(0 < ta - t < min_gap for ta in turns):
-            dropped_after.setdefault(len(out) - 1, []).append((t, v))
+            dropped_after.setdefault(len(kept) - 1, []).append((t, v))
             continue
-        if t - eff[-1] >= min_gap:
-            out.append((t, v))
-            eff.append(t)
+        if t - effective_ticks[-1] >= min_gap:
+            kept.append((t, v))
+            effective_ticks.append(t)
         else:
-            dropped_after.setdefault(len(out) - 1, []).append((t, v))
-    last = pts[-1]
-    while len(out) > 1 and last[0] - eff[-1] < min_gap:
-        out.pop()
-        eff.pop()
-    tight = (last[0] - eff[-1]) < min_gap
-    out.append(last)
-    eff.append(last[0])
+            dropped_after.setdefault(len(kept) - 1, []).append((t, v))
+    last = polyline[-1]
+    while len(kept) > 1 and last[0] - effective_ticks[-1] < min_gap:
+        kept.pop()
+        effective_ticks.pop()
+    tight = (last[0] - effective_ticks[-1]) < min_gap
+    kept.append(last)
+    effective_ticks.append(last[0])
 
-    for i in range(1, len(out) - 1):
+    for i in range(1, len(kept) - 1):
         cands = dropped_after.get(i, ())
         if not cands:
             continue
-        prev_v = out[i - 1][1]
-        best_t, best_v = out[i]
+        prev_v = kept[i - 1][1]
+        best_t, best_v = kept[i]
         if best_v == prev_v:
             continue
         rising = best_v > prev_v
         for t, v in cands:
             more_extreme = (rising and v >= best_v) or (not rising and v <= best_v)
-            if (more_extreme and t - eff[i - 1] >= min_gap
-                    and eff[i + 1] - t >= min_gap):
+            if (more_extreme and t - effective_ticks[i - 1] >= min_gap
+                    and effective_ticks[i + 1] - t >= min_gap):
                 best_t, best_v = t, v
-        out[i] = (best_t, best_v)
-        eff[i] = best_t
+        kept[i] = (best_t, best_v)
+        effective_ticks[i] = best_t
 
     if turn_at:
-        out = _fill_between_turns(pts, out, eff, turn_at, min_gap)
-    return out, tight
+        kept = _fill_between_turns(polyline, kept, effective_ticks, turn_at, min_gap)
+    return kept, tight
 
 
-def _interp(pts, t):
-    for (t0, v0), (t1, v1) in zip(pts, pts[1:]):
+def _interpolate_at(polyline, t):
+    for (t0, v0), (t1, v1) in zip(polyline, polyline[1:]):
         if t0 <= t <= t1:
             return v0 if t1 == t0 else v0 + (v1 - v0) * (t - t0) / (t1 - t0)
-    return pts[-1][1]
+    return polyline[-1][1]
 
 
-def _fill_between_turns(pts, out, eff, turn_at, min_gap):
+def _fill_between_turns(polyline, out, effective_ticks, turn_at, min_gap):
     fixed = [0] + [i for i in range(1, len(out) - 1) if out[i][0] in turn_at] + [len(out) - 1]
-    ticks = [t for t, _v in pts]
+    ticks = [t for t, _v in polyline]
     res = [out[0]]
     for a, b in zip(fixed, fixed[1:]):
         ta, tb = out[a][0], out[b][0]
-        start, span = eff[a], tb - eff[a]
+        start, span = effective_ticks[a], tb - effective_ticks[a]
         k = span // min_gap - 1
         lo, hi = ticks.index(ta), ticks.index(tb)
         dense = all(y - x <= min_gap for x, y in zip(ticks[lo:hi], ticks[lo + 1:hi + 1]))
         if dense and k > b - a - 1:
             for j in range(1, k + 1):
                 t = start + j * span // (k + 1)
-                res.append((t, _interp(pts[lo:hi + 1], t)))
+                res.append((t, _interpolate_at(polyline[lo:hi + 1], t)))
         else:
             res.extend(out[a + 1:b])
         res.append(out[b])
     return res
 
 
-def decimate_segment(pts, min_gap, tol=RDP_TOL, lead=0):
-    return _enforce_min_gap(_rdp(pts, tol), min_gap, lead)
+def decimate_segment(polyline, min_gap, tol=RDP_TOL, lead_ticks=0):
+    return _enforce_min_gap(_douglas_peucker(polyline, tol), min_gap, lead_ticks)
 
 
 def _split_into_runs(laser_points):
@@ -173,7 +173,7 @@ def _split_at_slams(run_pts):
     return segments
 
 
-def _bump_to_free_tick(t, used):
+def _next_free_tick(t, used):
     bump = 1
     while (t + bump) in used:
         bump += 1
@@ -208,7 +208,7 @@ CURVE_DEAD_ZONE = 0.5 / N_STEPS
 CURVE_LEG_FRAC = 32
 
 
-def _bezier_s(x, a):
+def _bezier_param_for_x(x, a):
     d = 1.0 - 2.0 * a
     if -1e-12 < d < 1e-12:
         return x
@@ -216,8 +216,8 @@ def _bezier_s(x, a):
     return (math.sqrt(disc if disc > 0.0 else 0.0) - a) / d
 
 
-def _score_a(a, xs, ys, scale):
-    ss = [_bezier_s(x, a) for x in xs]
+def _score_control_x(a, xs, ys, scale):
+    ss = [_bezier_param_for_x(x, a) for x in xs]
     num = den = 0.0
     for s, y in zip(ss, ys):
         w = 2.0 * s * (1.0 - s)
@@ -234,86 +234,86 @@ def _score_a(a, xs, ys, scale):
     return (round(a, 2), b, (total / len(ys)) ** 0.5, worst)
 
 
-def _fit_quadratic(pts):
-    t0, v0 = pts[0]
-    t1, v1 = pts[-1]
+def _fit_quadratic_bezier(polyline):
+    t0, v0 = polyline[0]
+    t1, v1 = polyline[-1]
     dt, dv = t1 - t0, v1 - v0
-    if dt <= 0 or dv == 0.0 or len(pts) < 3:
+    if dt <= 0 or dv == 0.0 or len(polyline) < 3:
         return None
-    xs = [(t - t0) / dt for (t, _v) in pts[1:-1]]
-    ys = [(v - v0) / dv for (_t, v) in pts[1:-1]]
+    xs = [(t - t0) / dt for (t, _v) in polyline[1:-1]]
+    ys = [(v - v0) / dv for (_t, v) in polyline[1:-1]]
     scale = abs(dv)
     best = None
     for i in range(21):
-        cand = _score_a(i / 20.0, xs, ys, scale)
+        cand = _score_control_x(i / 20.0, xs, ys, scale)
         if best is None or cand[2] < best[2]:
             best = cand
     centre = int(round(best[0] * 100))
     for i in range(max(0, centre - 5), min(100, centre + 5) + 1):
-        cand = _score_a(i / 100.0, xs, ys, scale)
+        cand = _score_control_x(i / 100.0, xs, ys, scale)
         if cand[2] < best[2]:
             best = cand
     return best
 
 
-def _line_error(pts):
-    t0, v0 = pts[0]
-    t1, v1 = pts[-1]
+def _chord_deviation(polyline):
+    t0, v0 = polyline[0]
+    t1, v1 = polyline[-1]
     dt = t1 - t0
-    if dt <= 0 or len(pts) < 3:
+    if dt <= 0 or len(polyline) < 3:
         return 0.0, 0.0
     total = worst = 0.0
-    for (t, v) in pts[1:-1]:
+    for (t, v) in polyline[1:-1]:
         e = abs(v - (v0 + (v1 - v0) * (t - t0) / dt))
         total += e * e
         if e > worst:
             worst = e
-    return (total / (len(pts) - 2)) ** 0.5, worst
+    return (total / (len(polyline) - 2)) ** 0.5, worst
 
 
-def _inflection_index(pts, dev):
-    t0, v0 = pts[0]
-    t1, v1 = pts[-1]
+def _inflection_index(polyline, dev):
+    t0, v0 = polyline[0]
+    t1, v1 = polyline[-1]
     dt = t1 - t0
-    if dt <= 0 or len(pts) < 4:
+    if dt <= 0 or len(polyline) < 4:
         return None
-    res = [v - (v0 + (v1 - v0) * (t - t0) / dt) for (t, v) in pts]
+    res = [v - (v0 + (v1 - v0) * (t - t0) / dt) for (t, v) in polyline]
     hi, lo = max(res), min(res)
     if hi < dev or -lo < dev:
         return None
     i, j = sorted((res.index(hi), res.index(lo)))
     cross = min(range(i, j + 1), key=lambda k: abs(res[k]))
-    return cross if 0 < cross < len(pts) - 1 else None
+    return cross if 0 < cross < len(polyline) - 1 else None
 
 
-def _most_deviant(pts, idxs):
-    t0, v0 = pts[0]
-    t1, v1 = pts[-1]
+def _most_deviant_index(polyline, idxs):
+    t0, v0 = polyline[0]
+    t1, v1 = polyline[-1]
     dt = t1 - t0
     best_i, best_d = None, -1.0
     for i in idxs:
-        t, v = pts[i]
+        t, v = polyline[i]
         d = abs(v - (v0 + (v1 - v0) * ((t - t0) / dt if dt else 0.0)))
         if d > best_d:
             best_i, best_d = i, d
     return best_i
 
 
-def _worst_index(pts, fit):
-    t0, v0 = pts[0]
-    t1, v1 = pts[-1]
+def _worst_fit_index(polyline, fit):
+    t0, v0 = polyline[0]
+    t1, v1 = polyline[-1]
     dt, dv = t1 - t0, v1 - v0
-    if dt <= 0 or len(pts) < 3:
+    if dt <= 0 or len(polyline) < 3:
         return None
     a, b = (fit[0], fit[1]) if fit else (None, None)
     worst_e, worst_i = -1.0, None
-    for k in range(1, len(pts) - 1):
-        t, v = pts[k]
+    for k in range(1, len(polyline) - 1):
+        t, v = polyline[k]
         x = (t - t0) / dt
         if a is None:
             pred = v0 + dv * x
         else:
-            s = _bezier_s(x, a)
+            s = _bezier_param_for_x(x, a)
             pred = v0 + dv * (s * s + 2.0 * b * s * (1.0 - s))
         e = abs(v - pred)
         if e > worst_e:
@@ -321,79 +321,79 @@ def _worst_index(pts, fit):
     return worst_i
 
 
-def _curve_or_none(fit, lin_max):
+def _curve_if_worthwhile(fit, line_max_error):
     if fit is None:
         return None
-    a, b, _rms, fit_max = fit
-    if a == b or lin_max <= CURVE_FIT_TOL or lin_max - fit_max < CURVE_MIN_GAIN:
+    a, b, _rms, fit_max_error = fit
+    if a == b or line_max_error <= CURVE_FIT_TOL or line_max_error - fit_max_error < CURVE_MIN_GAIN:
         return None
     return (a, b)
 
 
-def _direction_breaks(pts, dead):
+def _direction_reversal_indices(polyline, dead_zone):
     breaks = []
-    ext, direction = 0, 0
-    for i in range(1, len(pts)):
-        v, ev = pts[i][1], pts[ext][1]
+    extreme_index, direction = 0, 0
+    for index in range(1, len(polyline)):
+        value, extreme_value = polyline[index][1], polyline[extreme_index][1]
         if direction == 0:
-            if abs(v - ev) > dead:
-                direction = 1 if v > ev else -1
-                ext = i
-        elif (v - ev) * direction > 0:
-            ext = i
-        elif (ev - v) * direction > dead:
-            breaks.append(ext)
+            if abs(value - extreme_value) > dead_zone:
+                direction = 1 if value > extreme_value else -1
+                extreme_index = index
+        elif (value - extreme_value) * direction > 0:
+            extreme_index = index
+        elif (extreme_value - value) * direction > dead_zone:
+            breaks.append(extreme_index)
             direction = -direction
-            ext = i
+            extreme_index = index
     return breaks
 
 
-def _split_window(pts, lo, hi, min_gap, lead):
+def _splittable_range(polyline, lo, hi, min_gap, lead_ticks):
     first, last = lo + 1, hi - 1
-    while first <= last and pts[first][0] - (pts[lo][0] + lead) < min_gap:
+    while first <= last and polyline[first][0] - (polyline[lo][0] + lead_ticks) < min_gap:
         first += 1
-    while last >= first and pts[hi][0] - pts[last][0] < min_gap:
+    while last >= first and polyline[hi][0] - polyline[last][0] < min_gap:
         last -= 1
     return first, last
 
 
-def _fit_stretch(pts, lo, hi, min_gap, tol, lead=0, max_leg=None):
-    sub = pts[lo:hi + 1]
-    _lin_rms, lin_max = _line_error(sub)
-    if lin_max <= tol:
+def _fit_curves_recursively(polyline, lo, hi, min_gap, tol, lead_ticks=0, max_leg=None):
+    sub = polyline[lo:hi + 1]
+    _lin_rms, line_max_error = _chord_deviation(sub)
+    if line_max_error <= tol:
         return [hi], [None]
     dense = max_leg is None or all(b[0] - a[0] <= max_leg for a, b in zip(sub, sub[1:]))
-    fit = _fit_quadratic(sub) if dense else None
+    fit = _fit_quadratic_bezier(sub) if dense else None
     if fit is not None and fit[3] <= tol:
-        return [hi], [_curve_or_none(fit, lin_max)]
+        return [hi], [_curve_if_worthwhile(fit, line_max_error)]
 
-    first, last = _split_window(pts, lo, hi, min_gap, lead)
+    first, last = _splittable_range(polyline, lo, hi, min_gap, lead_ticks)
     split = None
     if first <= last:
-        breaks = _direction_breaks(sub, CURVE_DEAD_ZONE)
-        want = _most_deviant(sub, [i for i in breaks if first - lo <= i <= last - lo])
+        breaks = _direction_reversal_indices(sub, CURVE_DEAD_ZONE)
+        want = _most_deviant_index(sub, [i for i in breaks if first - lo <= i <= last - lo])
         if want is None and not breaks and dense:
             want = _inflection_index(sub, tol)
         if want is None:
-            want = _worst_index(sub, fit)
+            want = _worst_fit_index(sub, fit)
         if want is not None:
             split = min(max(lo + want, first), last)
     if split is not None:
-        li, lc = _fit_stretch(pts, lo, split, min_gap, tol, lead, max_leg)
-        ri, rc = _fit_stretch(pts, split, hi, min_gap, tol, 0, max_leg)
-        return li + ri, lc + rc
-    return [hi], [_curve_or_none(fit, lin_max)]
+        left_ticks, left_curves = _fit_curves_recursively(polyline, lo, split, min_gap, tol, lead_ticks, max_leg)
+        right_ticks, right_curves = _fit_curves_recursively(polyline, split, hi, min_gap, tol, 0, max_leg)
+        return left_ticks + right_ticks, left_curves + right_curves
+    return [hi], [_curve_if_worthwhile(fit, line_max_error)]
 
 
-def decimate_segment_curved(pts, min_gap, tol=CURVE_FIT_TOL, lead=0, max_leg=None):
+def decimate_segment_curved(polyline, min_gap, tol=CURVE_FIT_TOL, lead_ticks=0, max_leg=None):
     if max_leg is None:
         max_leg = max(1, min_gap * 24 // 32)
-    if len(pts) <= 2:
-        tight = len(pts) == 2 and pts[1][0] - (pts[0][0] + lead) < min_gap
-        return list(pts), [None] * max(0, len(pts) - 1), tight
-    idx, curves = _fit_stretch(pts, 0, len(pts) - 1, min_gap, tol, lead, max_leg)
-    tight = pts[-1][0] - (pts[0][0] + lead) < min_gap
-    return [pts[0]] + [pts[i] for i in idx], curves, tight
+    if len(polyline) <= 2:
+        tight = len(polyline) == 2 and polyline[1][0] - (polyline[0][0] + lead_ticks) < min_gap
+        return list(polyline), [None] * max(0, len(polyline) - 1), tight
+    idx, curves = _fit_curves_recursively(polyline, 0, len(polyline) - 1, min_gap, tol, lead_ticks, max_leg)
+    tight = polyline[-1][0] - (polyline[0][0] + lead_ticks) < min_gap
+    return [polyline[0]] + [polyline[i] for i in idx], curves, tight
 
 
 def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC, curves=False):
@@ -410,12 +410,12 @@ def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC, c
 
         flat, flat_curves, tight = [], [], False
         for si, seg in enumerate(segments):
-            lead = 0 if si == 0 else (max(1, whole_note // slam_gap_frac) if slam_gap_frac else 1)
+            lead_ticks = 0 if si == 0 else (max(1, whole_note // slam_gap_frac) if slam_gap_frac else 1)
             if curves:
                 kept, seg_curves, seg_tight = decimate_segment_curved(
-                    seg, min_gap, lead=lead, max_leg=max(1, whole_note // CURVE_LEG_FRAC))
+                    seg, min_gap, lead_ticks=lead_ticks, max_leg=max(1, whole_note // CURVE_LEG_FRAC))
             else:
-                kept, seg_tight = decimate_segment(seg, min_gap, lead=lead)
+                kept, seg_tight = decimate_segment(seg, min_gap, lead_ticks=lead_ticks)
                 seg_curves = [None] * max(0, len(kept) - 1)
             tight = tight or seg_tight
             if flat:
@@ -438,7 +438,7 @@ def build_runs(laser_points, tl, min_gap_frac=24, slam_gap_frac=SLAM_GAP_FRAC, c
                     safe_gap = max(1, whole_note // KSH_SLAM_CUTOFF_FRAC) + 1
                     t = _slam_landing_tick(points[-1][0], used_ticks, gap, ceiling, safe_gap)
                 else:
-                    t = _bump_to_free_tick(t, used_ticks)
+                    t = _next_free_tick(t, used_ticks)
             else:
                 used_ticks.add(t)
             if points:

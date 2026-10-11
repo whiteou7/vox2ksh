@@ -1,5 +1,6 @@
 """Job queue on one background thread. Per (song, difficulty) it runs convert_notes.convert() with real metadata, then render_chart.main(), both in-process, and streams stdout into the debug console. po= and plength= are measured by preview_offset and cached per song. Cancelling is job-granular: a render in progress finishes, the queue stops before the next one.
 """
+import contextlib
 import io
 import os
 import shutil
@@ -76,17 +77,12 @@ def plan_jobs(songs, music_dir, output_dir, diff_keys, fallback_music_dir=None):
     name_owner = {}
     for song in songs:
         name_owner.setdefault(song.ascii, song.id)
-    def out_name(song):
+    def output_folder_name(song):
         return song.folder if name_owner[song.ascii] != song.id else song.ascii
 
     for song in songs:
-        wanted = set(diff_keys)
-        if "top" in wanted:
-            wanted.discard("top")
-            top = song.top_difficulty()
-            if top:
-                wanted.add(top.key)
-        base_name = out_name(song)
+        wanted = song.resolve_diff_keys(diff_keys)
+        base_name = output_folder_name(song)
         song_out_dir = os.path.join(output_dir, base_name)
 
         entries = []
@@ -121,7 +117,7 @@ def plan_jobs(songs, music_dir, output_dir, diff_keys, fallback_music_dir=None):
     return jobs
 
 
-def _meta_for(job, preview_window=None):
+def _chart_metadata(job, preview_window=None):
     diff = job.song.difficulties[job.diff_key]
     po, plength = preview_window or (0, 0)
     return {
@@ -138,13 +134,13 @@ def _meta_for(job, preview_window=None):
     }
 
 
-def _preview_window(job, options, log, cache):
+def _measured_preview_window(job, options, log, cache):
     if not options.preview_meta or not job.s3v_path or not job.pre_s3v_path:
         return None
     if job.s3v_path in cache:
         return cache[job.s3v_path]
     try:
-        window = preview_offset.measure(job.s3v_path, job.pre_s3v_path)
+        window = preview_offset.measure_preview_window(job.s3v_path, job.pre_s3v_path)
         if window is None:
             log("-- %s: preview didn't match the track - po/plength left at 0"
                 % job.song.folder)
@@ -159,7 +155,7 @@ def run_job(job, options, log, preview_cache=None):
     os.makedirs(job.song_out_dir, exist_ok=True)
     result = JobResult(job=job, ok=True)
 
-    meta = _meta_for(job, _preview_window(job, options, log,
+    meta = _chart_metadata(job, _measured_preview_window(job, options, log,
                                            preview_cache if preview_cache is not None else {}))
     slam_gap_frac = notes_convert.laser.SLAM_GAP_FRAC if options.standard_slam_gap else 0
     try:
@@ -188,6 +184,14 @@ def run_job(job, options, log, preview_cache=None):
             "install) - .ksh written, audio skipped" % (job.song.folder, job.diff_key))
         return result
 
+    result.error = _render_audio(job, options, log)
+    result.ok = not result.error
+    result.wrote_audio = result.ok
+    return result
+
+
+def _render_audio(job, options, log):
+    """Runs render_chart in-process, streaming its output to `log`. Returns an error message, or "" on success."""
     argv = [os.path.dirname(job.vox_path),
             "-d", job.song.difficulties[job.diff_key].suffix,
             "-a", job.s3v_path,
@@ -199,27 +203,19 @@ def run_job(job, options, log, preview_cache=None):
     if options.ffmpeg_path:
         os.environ["FFMPEG"] = options.ffmpeg_path
 
-    old_argv, old_out, old_err = sys.argv, sys.stdout, sys.stderr
     forwarder = _LineForwarder(log)
-    sys.argv = ["render_chart.py"] + argv
-    sys.stdout = forwarder
-    sys.stderr = forwarder
     try:
-        render_chart.main()
-        result.wrote_audio = True
+        with contextlib.redirect_stdout(forwarder), contextlib.redirect_stderr(forwarder):
+            render_chart.main(argv)
     except SystemExit as e:
-        if e.code not in (0, None):
-            result.ok = False
-            result.error = "audio render failed: %s" % e.code
-    except Exception as e:  # noqa: BLE001
-        result.ok = False
-        result.error = "audio render failed: %s" % e
+        # render_chart reports its own failures as SystemExit("message").
+        return "audio render failed: %s" % e.code if e.code not in (0, None) else ""
+    except Exception as e:  # noqa: BLE001 - one bad render must not abort the batch
         log("!! %s" % traceback.format_exc())
+        return "audio render failed: %s" % e
     finally:
         forwarder.flush()
-        sys.argv, sys.stdout, sys.stderr = old_argv, old_out, old_err
-
-    return result
+    return ""
 
 
 class ConvertWorker:
@@ -234,14 +230,14 @@ class ConvertWorker:
         self._preview_cache = {}
 
     def start(self):
-        self._thread = threading.Thread(target=self._run, name="convert-worker", daemon=True)
+        self._thread = threading.Thread(target=self._run_queue, name="convert-worker", daemon=True)
         self._thread.start()
         return self._thread
 
     def cancel(self):
         self._cancel.set()
 
-    def _run(self):
+    def _run_queue(self):
         results = []
         total = len(self.jobs)
         for i, job in enumerate(self.jobs):

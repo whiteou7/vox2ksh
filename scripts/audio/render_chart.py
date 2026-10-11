@@ -8,157 +8,49 @@ import argparse
 import collections
 import math
 import os
-import shutil
 import struct
 import subprocess
 import sys
-import wave
+from typing import NamedTuple
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import fx_dsp as FX
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, os.pardir, "shared"))
+import fx_dsp as FX  # noqa: E402
+import vox_parser as vox  # noqa: E402
+from game_paths import find_ffmpeg  # noqa: E402
 
-DEFAULT_TICKS_PER_BEAT = 48
-TICKS_PER_BEAT = DEFAULT_TICKS_PER_BEAT
 SR = FX.SR
 
+FX_NAMES = {
+    1: "Retrigger", 2: "Gate", 3: "Flanger", 4: "TapeStop", 5: "SideChain",
+    6: "Wobble", 7: "BitCrusher", 8: "Echo(RetriggerEx)", 9: "PitchShift",
+    10: "TapeStopEx", 11: "LowPassFilter", 12: "HighPassFilter",
+    13: "PitchSpeed",
+}
+TAB_NAMES = {1: "LowPassFilter", 2: "HighPassFilter", 3: "BitCrusher"}
 
-def read_sections(path):
-    txt = open(path, "r", encoding="cp932", errors="replace").read()
-    out, cur = {}, None
-    for line in txt.splitlines():
-        ls = line.strip()
-        if ls.startswith("//"):
-            continue
-        if ls.startswith("#END"):
-            cur = None
-            continue
-        if ls.startswith("#"):
-            cur = ls
-            out.setdefault(cur, [])
-            continue
-        if cur is not None and ls:
-            out[cur].append(ls)
-    return out
+CHIP_SAMPLE_NAMES = {
+    1: "big snare (quiet)", 2: "big clap", 3: "short clap", 4: "big snare",
+    5: "short snare", 6: "crash", 7: "kick+crash+downlifter", 8: "open hi-hat",
+    9: "kick+crash alt", 10: "snare+click", 11: 'female "oh"', 12: 'male "hey"',
+    13: 'male "yeah"', 14: "fireworks",
+}
+
+PEAK_DELAY = 0.08
+PARAM_ASSIGN_BLOCK = 512
+# Effect ids whose phase restarts on the beat grid rather than at the note.
+GRID_LOCKED = {1}
+# Laser point effect column value that selects #TAB PARAM ASSIGN INFO's sweep.
+PARAM_SWEEP_EFFECT = 6
+# Laser positions run 0..1; the engine's knob runs 0..127.
+KNOB_MAX = 127.0
 
 
-def parse_pos(s):
-    m, b, t = (int(x) for x in s.split(","))
-    return (m - 1, b - 1, t)
-
-
-class Timeline:
-    def __init__(self, sec, res=None):
-        if res is None:
-            rl = sec.get("#BEAT RESOLUTION")
-            res = int(rl[0].strip()) if rl else DEFAULT_TICKS_PER_BEAT
-        self.res = int(res)
-
-        self.beats = []
-        for line in sec.get("#BEAT INFO", []):
-            f = line.split()
-            mm = parse_pos(f[0])[0]
-            self.beats.append((mm, int(f[1]), int(f[2])))
-        if not self.beats:
-            self.beats = [(0, 4, 4)]
-        self.beats.sort()
-
-        self.bpms = []
-        for line in sec.get("#BPM INFO", []):
-            f = line.split()
-            mm, bb, tt = parse_pos(f[0])
-            self.bpms.append((mm, bb, tt, float(f[1])))
-        if not self.bpms:
-            raise SystemExit("chart has no #BPM INFO")
-        self.bpms.sort()
-
-        self._measure_tick = {}
-        self._measure_cpb = {}
-        acc, mi = 0, 0
-        for meas in range(0, 2000):
-            while mi + 1 < len(self.beats) and self.beats[mi + 1][0] <= meas:
-                mi += 1
-            self._measure_tick[meas] = acc
-            num, den = self.beats[mi][1], self.beats[mi][2]
-            cpb = int(round((4.0 / den) * self.res))
-            self._measure_cpb[meas] = cpb
-            acc += num * cpb
-
-        self._bpm_pts = []
-        for (mm, bb, tt, bpm) in self.bpms:
-            self._bpm_pts.append((self.abs_tick(mm, bb, tt), bpm))
-        self._bpm_pts.sort()
-        self._bpm_sec = [0.0]
-        for i in range(1, len(self._bpm_pts)):
-            dt = self._bpm_pts[i][0] - self._bpm_pts[i - 1][0]
-            spb = 60.0 / self._bpm_pts[i - 1][1]
-            self._bpm_sec.append(self._bpm_sec[-1] + dt / self.res * spb)
-
-    def abs_tick(self, m0, b0, t):
-        return self._measure_tick[m0] + b0 * self._measure_cpb[m0] + t
-
-    def tick_of(self, poss):
-        return self.abs_tick(*parse_pos(poss))
-
-    def bpm_at(self, tick):
-        bpm = self._bpm_pts[0][1]
-        for (tk, v) in self._bpm_pts:
-            if tk <= tick:
-                bpm = v
-            else:
-                break
-        return bpm
-
-    def beats_per_measure(self, tick):
-        meas = 0
-        for m, tk in sorted(self._measure_tick.items()):
-            if tk <= tick:
-                meas = m
-            else:
-                break
-        num, den = 4, 4
-        for (mm, n, d) in self.beats:
-            if mm <= meas:
-                num, den = n, d
-        return num * (4.0 / den)
-
-    def seconds(self, tick):
-        i = 0
-        for k, (tk, _) in enumerate(self._bpm_pts):
-            if tk <= tick:
-                i = k
-            else:
-                break
-        tk, bpm = self._bpm_pts[i]
-        return self._bpm_sec[i] + (tick - tk) / self.res * (60.0 / bpm)
-
-    def samples(self, tick):
-        return int(round(self.seconds(tick) * SR))
-
-    def timesig_num(self, tick):
-        num = self.beats[0][1]
-        for (mm, n, _d) in self.beats:
-            if self._measure_tick.get(mm, 0) <= tick:
-                num = n
-            else:
-                break
-        return num
-
-    def grid_anchor(self, tick):
-        a = 0
-        for (tk, _bpm) in self._bpm_pts:
-            if tk <= tick:
-                a = max(a, self.samples(tk))
-            else:
-                break
-        for (mm, _n, _d) in self.beats:
-            tk = self._measure_tick.get(mm, 0)
-            if tk <= tick:
-                a = max(a, self.samples(tk))
-            else:
-                break
-        return a
+def sample_index(tl, tick):
+    return int(round(tl.seconds_at(tick) * SR))
 
 
 def parse_fx_pairs(sec):
@@ -169,15 +61,12 @@ def parse_fx_pairs(sec):
             rows.append([float(p) for p in parts])
         except ValueError:
             pass
-    pairs = []
-    for i in range(0, len(rows) - 1, 2):
-        a, b = rows[i], rows[i + 1]
-        pairs.append([a if a and a[0] != 0 else None,
-                      b if b and b[0] != 0 else None])
-    return pairs
+    return [[first if first and first[0] != 0 else None, second if second and second[0] != 0 else None]
+            for first, second in zip(rows[0::2], rows[1::2])]
 
 
 def parse_param_assign(sec):
+    """{effect pair index: [(parameter index, low, high) per chain slot]}"""
     out = collections.defaultdict(list)
     for line in sec.get("#TAB PARAM ASSIGN INFO", []):
         parts = [p.strip() for p in line.replace("\t", ",").split(",") if p.strip() != ""]
@@ -185,43 +74,9 @@ def parse_param_assign(sec):
             vals = [float(p) for p in parts]
         except ValueError:
             continue
-        if len(vals) < 4:
-            continue
-        pair = int(vals[0])
-        out[pair].append((int(vals[1]), vals[2], vals[3]))
+        if len(vals) >= 4:
+            out[int(vals[0])].append((int(vals[1]), vals[2], vals[3]))
     return out
-
-
-def param_assign_curve(sec, tl, n):
-    values = np.zeros(n, np.float32)
-    active = np.zeros(n, bool)
-    for trk, mir in (("#TRACK1", False), ("#TRACK8", True)):
-        pts = []
-        for line in sec.get(trk, []):
-            f = line.split()
-            if len(f) < 7:
-                continue
-            tick = tl.tick_of(f[0])
-            pos = float(f[1])
-            if pos > 1.0:
-                pos /= 127.0
-            pts.append((tick, pos, int(f[2]), int(f[4])))
-        pts.sort(key=lambda x: x[0])
-        for i in range(len(pts) - 1):
-            a, b = pts[i], pts[i + 1]
-            if a[2] == 2 or a[3] != 6:
-                continue
-            i0, i1 = max(0, tl.samples(a[0])), min(n, tl.samples(b[0]))
-            if i1 <= i0:
-                continue
-            va = (1.0 - a[1]) if mir else a[1]
-            vb = (1.0 - b[1]) if mir else b[1]
-            seg = np.linspace(va, vb, i1 - i0, endpoint=False, dtype=np.float32)
-            cur = values[i0:i1]
-            upd = (~active[i0:i1]) | (seg > cur)
-            cur[upd] = seg[upd]
-            active[i0:i1][upd] = True
-    return values, active
 
 
 def parse_effects(sec, key):
@@ -232,243 +87,155 @@ def parse_effects(sec, key):
             vals = [float(p) for p in parts]
         except ValueError:
             continue
-        if not vals or all(v == 0 for v in vals):
-            continue
-        out.append(vals)
+        if vals and any(v != 0 for v in vals):
+            out.append(vals)
     return out
 
 
-FX_NAMES = {
-    1: "Retrigger", 2: "Gate", 3: "Flanger", 4: "TapeStop", 5: "SideChain",
-    6: "Wobble", 7: "BitCrusher", 8: "Echo(RetriggerEx)", 9: "PitchShift",
-    10: "TapeStopEx", 11: "LowPassFilter", 12: "HighPassFilter",
-    13: "PitchSpeed",
-}
-TAB_NAMES = {1: "LowPassFilter", 2: "HighPassFilter", 3: "BitCrusher"}
-
-PEAK_DELAY = 0.08
-
-MODE = ["chain"]
-
-STAGE_CLIP = [True]
+def parse_auto_tab(sec, tl):
+    """(tick, length, effect pair id) per #TRACK AUTO TAB span."""
+    for line in sec.get("#TRACK AUTO TAB", []):
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        try:
+            length, pair_id = int(fields[1]), int(fields[2])
+        except ValueError:
+            continue
+        yield tl.tick_of_position(fields[0]), length, pair_id
 
 
-def stage(a):
-    if not STAGE_CLIP[0]:
-        return a
-    return np.trunc(np.clip(a, -32768.0, 32767.0)).astype(np.float32)
+class LaserSegment(NamedTuple):
+    """One laser section between two points. Knob values are 0..127 with the right lane already mirrored."""
+    start_tick: int
+    end_tick: int
+    start_knob: float
+    end_knob: float
+    tab_index: int
+    curve: int
 
 
-CHIP_SAMPLE_NAMES = {
-    1: "big snare (quiet)", 2: "big clap", 3: "short clap", 4: "big snare",
-    5: "short snare", 6: "crash", 7: "kick+crash+downlifter", 8: "open hi-hat",
-    9: "kick+crash alt", 10: "snare+click", 11: 'female "oh"', 12: 'male "hey"',
-    13: 'male "yeah"', 14: "fireworks",
-}
+def laser_segments(points, mirror):
+    """A point starts a section unless it is a section's end (node type 2)."""
+    def knob(position):
+        return (1.0 - position if mirror else position) * KNOB_MAX
+    return [LaserSegment(current.tick, following.tick, knob(current.pos), knob(following.pos),
+                current.effect, current.curve_type)
+            for current, following in zip(points, points[1:]) if current.node_type != 2]
 
 
-GRID_LOCKED = {1}
+def param_sweep_curve(chart, n):
+    """Per-sample 0..1 sweep value and mask for lasers whose effect column selects the param sweep. Overlaps keep the larger value."""
+    tl = chart.tl
+    values = np.zeros(n, np.float32)
+    active = np.zeros(n, bool)
+    for points, mirror in zip(chart.laser, (False, True)):
+        for current, following in zip(points, points[1:]):
+            if current.node_type == 2 or current.effect != PARAM_SWEEP_EFFECT:
+                continue
+            start, stop = max(0, sample_index(tl, current.tick)), min(n, sample_index(tl, following.tick))
+            if stop <= start:
+                continue
+            start_pos = (1.0 - current.pos) if mirror else current.pos
+            end_pos = (1.0 - following.pos) if mirror else following.pos
+            ramp = np.linspace(start_pos, end_pos, stop - start, endpoint=False, dtype=np.float32)
+            existing = values[start:stop]
+            replace = (~active[start:stop]) | (ramp > existing)
+            existing[replace] = ramp[replace]
+            active[start:stop][replace] = True
+    return values, active
 
 
-def grid_snap_offset(tl, tick, length_beats):
-    pos = tl.samples(tick)
-    bpm = tl.bpm_at(tick)
-    spb = int(2646000.0 / bpm)
-    spm = spb * tl.timesig_num(tick)
-    period = int(spb * float(length_beats))
-    if spm <= 0 or period <= 0:
-        return 0
-    off = ((pos - tl.grid_anchor(tick)) % spm) % period
-    return 0 if off > period - 512 else off
-
-
-FXSTATE = {}
-PERSIST = set()
-
-
-MIXSCALE = [1.0]
-
-PITCHSHIFT = [True]
-
-PITCHSHIFT_LEGACY_CURSOR = [False]
-
-TAPESTOP_EX = [True]
-
-PITCH_SPEED = [True]
-
-WOBBLE_LEGACY = [False]
-
-GATE_HARD_BINARY = [False]
-BITCRUSH_CONTINUOUS = [False]
-LASER_EASING = [False]
-TAPESTOP_EX_3PHASE = [False]
-PARAM_ASSIGN_SWEEP = [True]
-PARAM_ASSIGN_BLOCK = 512
-
-RES_SCALE = [1.0]
-RES_MAX_DB = [6.0]
-
-
-def _laser_ease(phase, curve):
+def _apply_easing(phase, curve, sin=math.sin):
     if curve == 4:
-        return math.sin(phase * math.pi / 2.0)
+        return sin(phase * math.pi / 2.0)
     if curve == 5:
-        return math.sin((phase - 1.0) * math.pi / 2.0) + 1.0
+        return sin((phase - 1.0) * math.pi / 2.0) + 1.0
     return phase
 
 
-TSE_FLOOR = [FX.TAPESTOP_EX_FLOOR]
+def _grid_origin_sample(tl, tick):
+    """The latest tempo or time-signature change at or before `tick`, in samples."""
+    changes = [change_tick for change_tick, _bpm in tl.bpm_pts]
+    changes += [tl.measure_start_tick(measure) for measure, _num, _den in tl.beats]
+    return max((sample_index(tl, change_tick) for change_tick in changes if change_tick <= tick), default=0)
 
 
-def _mx(v):
-    return v * MIXSCALE[0]
+def grid_lock_lead_samples(tl, tick, length_beats):
+    position = sample_index(tl, tick)
+    seconds_per_beat = int(2646000.0 / tl.bpm_at(tick))
+    samples_per_measure = seconds_per_beat * tl.timesig_at_measure(tl.measure_and_offset(tick)[0])[0]
+    period = int(seconds_per_beat * float(length_beats))
+    if samples_per_measure <= 0 or period <= 0:
+        return 0
+    offset = ((position - _grid_origin_sample(tl, tick)) % samples_per_measure) % period
+    return 0 if offset > period - 512 else offset
 
 
-def run_fx(L, R, eff, tl, tick, block, knob=None, lookahead=None):
-    t = int(eff[0])
-    p = list(eff[1:])
-    mixidx = {1: 1, 8: 1, 6: 2}.get(t, 0)
-    if mixidx < len(p):
-        p[mixidx] = _mx(p[mixidx])
-    bpm = tl.bpm_at(tick)
-    spb = 60.0 / bpm
-    spm = spb * tl.beats_per_measure(tick)
-
-    if t in (1, 8):
-        cnt, mix, ln, fb, gt, rel = int(p[0]), p[1], p[2], p[3], p[4], p[5]
-        return FX.fx_retrigger(L, R, mix, ln * spb, fb, cnt, gt, rel, block=block)
-    if t == 2:
-        mix, steps, per = p[0], int(p[1]), p[2]
-        return FX.fx_gate(L, R, mix, steps, per * spb, block=block,
-                          hard_binary=GATE_HARD_BINARY[0])
-    if t == 3:
-        mix, delay_ms, per_meas, depth, stages = p[0], p[1], p[2], int(p[3]), p[4]
-        return FX.fx_flanger(L, R, mix, delay_ms, per_meas / spm, depth, stages,
-                             block=block)
-    if t == 4:
-        return FX.fx_tapestop(L, R, p[0], p[1], p[2], block=block)
-    if t == 5:
-        mix, per, a, h, rl = p[0], p[1], int(p[2]), int(p[3]), int(p[4])
-        return FX.fx_sidechain(L, R, mix, per * spb, a, h, rl, block=block)
-    if t == 6:
-        ftype, wtype, mix, fa, fb_, rate, q = (int(p[0]), int(p[1]), p[2],
-                                               p[3], p[4], p[5], p[6])
-        period = (float(rate) * spb if WOBBLE_LEGACY[0]
-                  else spb / max(float(rate), 1e-6))
-        return FX.fx_wobble(L, R, mix, ftype, wtype, fa, fb_, period, q,
-                            block=block,
-                            state=FXSTATE.setdefault(t, {}) if t in PERSIST else None)
-    if t == 7:
-        return FX.fx_bitcrush(L, R, p[0], int(p[1]), block=block,
-                              continuous=BITCRUSH_CONTINUOUS[0])
-    if t == 9 and PITCHSHIFT[0]:
-        return FX.fx_pitchshift(L, R, p[0], p[1], block=block,
-                                legacy_cursor=PITCHSHIFT_LEGACY_CURSOR[0])
-    if t == 10 and TAPESTOP_EX[0]:
-        if TAPESTOP_EX_3PHASE[0]:
-            return FX.fx_tapestop_ex_3phase(L, R, p[0], p[1], p[2] * spb, p[3] * spb,
-                                            p[4] * spb, block=block, lookahead=lookahead)
-        return FX.fx_tapestop_ex(L, R, p[0], p[1], p[2] * spb, p[3] * spb,
-                                 p[4] * spb, block=block, lookahead=lookahead,
-                                 floor=TSE_FLOOR[0])
-    if t == 11:
-        return FX.fx_laser_lpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block,
-                               res_scale=RES_SCALE[0], res_max_db=RES_MAX_DB[0])
-    if t == 12:
-        return FX.fx_laser_hpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block,
-                               res_scale=RES_SCALE[0], res_max_db=RES_MAX_DB[0])
-    if t == 13 and PITCH_SPEED[0]:
-        return FX.fx_pitch_speed(L, R, p[0], p[1], p[2], block=block,
-                                 lookahead=lookahead)
-    return None
-
-
-def run_tab(L, R, eff, knob, block):
-    t = int(eff[0])
-    p = list(eff[1:])
-    p[0] = _mx(p[0])
-    if t == 1:
-        return FX.fx_laser_lpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block,
-                               res_scale=RES_SCALE[0], res_max_db=RES_MAX_DB[0])
-    if t == 2:
-        return FX.fx_laser_hpf(L, R, p[0], p[1], p[2], p[3], knob=knob, block=block,
-                               res_scale=RES_SCALE[0], res_max_db=RES_MAX_DB[0])
-    if t == 3:
-        return FX.fx_laser_bitcrush(L, R, p[0], p[1], knob=knob, block=block)
-    return None
-
-
-def s3v_gain(hdr):
-    if hdr[:4] != b"S3V0":
+def s3v_header_gain(header):
+    if header[:4] != b"S3V0":
         return 1.0
-    g0, g1 = struct.unpack_from("<hh", hdr, 0x14)
+    g0, g1 = struct.unpack_from("<hh", header, 0x14)
     return 10.0 ** (((g0 + g1) / 256.0) / 20.0)
 
 
-def s3p_gains(path):
+def s3p_header_gains(path):
     if not os.path.exists(path):
         return []
-    data = open(path, "rb").read()
+    with open(path, "rb") as f:
+        data = f.read()
     magic, count = struct.unpack_from("<4sI", data, 0)
     if magic != b"S3P0":
         return []
-    out = []
-    for i in range(count):
-        off, _ = struct.unpack_from("<II", data, 8 + i * 8)
-        out.append(s3v_gain(data[off:off + 32]))
-    return out
+    offsets = [struct.unpack_from("<II", data, 8 + i * 8)[0] for i in range(count)]
+    return [s3v_header_gain(data[offset:offset + 32]) for offset in offsets]
 
 
-def load_s3p(path):
+class Sample(NamedTuple):
+    name: str
+    left: np.ndarray
+    right: np.ndarray
+    gain: float
+
+
+def load_sample_bank(path):
+    """One Sample per entry, named from the .def file beside it when there is one."""
     names = []
-    defp = os.path.splitext(path)[0] + ".def"
-    if os.path.exists(defp):
-        for line in open(defp):
-            p = line.split()
-            if len(p) >= 3 and p[0] == "#define":
-                names.append(p[1])
-    data = open(path, "rb").read()
+    def_path = os.path.splitext(path)[0] + ".def"
+    if os.path.exists(def_path):
+        with open(def_path) as f:
+            names = [w[1] for w in map(str.split, f) if len(w) >= 3 and w[0] == "#define"]
+    with open(path, "rb") as f:
+        data = f.read()
     magic, count = struct.unpack_from("<4sI", data, 0)
     if magic != b"S3P0":
         raise SystemExit("%s is not an S3P0 container" % path)
     out = []
     for i in range(count):
-        off, size = struct.unpack_from("<II", data, 8 + i * 8)
-        blob = data[off:off + size]
+        offset, size = struct.unpack_from("<II", data, 8 + i * 8)
+        blob = data[offset:offset + size]
         hmagic, hsize = struct.unpack_from("<4sI", blob, 0)
         payload = blob[hsize:] if hmagic == b"S3V0" else blob
-        l, r = decode_audio(blob=payload, what="SE sample %d of %s"
-                            % (i, os.path.basename(path)))
-        out.append((names[i] if i < len(names) else "idx%02d" % i, l, r,
-                    s3v_gain(blob[:32])))
+        left, right = decode_audio(blob=payload, what="SE sample %d of %s" % (i, os.path.basename(path)))
+        name = names[i] if i < len(names) else "idx%02d" % i
+        out.append(Sample(name, left, right, s3v_header_gain(blob[:32])))
     return out
 
 
-def mix_in(L, R, pos, sample, gain, cut=None):
-    name, sl, sr, _ = sample
-    n = min(sl.size, L.size - pos)
-    if cut is not None:
-        n = min(n, max(0, cut - pos))
+def _copies(left, right, start, stop):
+    """Independent copies of both channels over [start, stop), for an effect to work on."""
+    return left[start:stop].copy(), right[start:stop].copy()
+
+
+def mix_sample_into(left, right, position, sample, gain, cut_at=None):
+    """Mixes `sample` into L/R from `position`, stopping at `cut_at` when given."""
+    n = min(sample.left.size, left.size - position)
+    if cut_at is not None:
+        n = min(n, max(0, cut_at - position))
     if n <= 0:
         return
-    L[pos:pos + n] += sl[:n] * gain
-    R[pos:pos + n] += sr[:n] * gain
-
-
-def find_ffmpeg():
-    env = os.environ.get("FFMPEG")
-    if env and os.path.exists(env):
-        return env
-    for c in ("ffmpeg", "ffmpeg.exe"):
-        p = shutil.which(c)
-        if p:
-            return p
-    root = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Packages")
-    if os.path.isdir(root):
-        for dp, _, fns in os.walk(root):
-            if "ffmpeg.exe" in fns:
-                return os.path.join(dp, "ffmpeg.exe")
-    return None
+    left[position:position + n] += sample.left[:n] * gain
+    right[position:position + n] += sample.right[:n] * gain
 
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -509,11 +276,480 @@ def encode_pcm(frames, out, sr, quality=6):
     return out
 
 
-def write_audio(path, L, R, sr, quality=6):
+def write_audio(path, left, right, sr, quality=6):
     if os.path.splitext(path)[1].lower() == ".wav":
-        FX.write_wav(path, L, R, sr)
+        FX.write_wav(path, left, right, sr)
         return path
-    return encode_pcm(FX.writeback(L, R), path, sr, quality)
+    return encode_pcm(FX.writeback(left, right), path, sr, quality)
+
+
+class Render:
+    """One render: the working L/R track, the untouched dry copy, and the tallies reported at the end. Stages run in engine order in `run`."""
+
+    def __init__(self, args, chart, left, right):
+        self.args = args
+        self.chart = chart
+        self.sec = chart.sec
+        self.tl = chart.tl
+        self.left, self.right = left, right
+        self.n = left.size
+        self.dry_left, self.dry_right = left.copy(), right.copy()
+        self.fxdefs = parse_fx_pairs(self.sec)
+        self.tabdefs = parse_effects(self.sec, "#TAB EFFECT INFO")
+        self.applied = collections.Counter()
+        self.skipped = collections.Counter()
+        self.snapped = collections.Counter()
+        self.wobble_state = {} if args.wobble_persist else None
+
+    # -- effect dispatch --------------------------------------------------
+
+    def quantize_stage(self, values):
+        """Rounds a stage's output the way the engine's int16 buffers do, unless --no-stage-clip."""
+        if self.args.no_stage_clip:
+            return values
+        return np.trunc(np.clip(values, -32768.0, 32767.0)).astype(np.float32)
+
+    def quantize_stereo(self, rendered, skip=0):
+        """(left, right) of a stage result, quantized, without its first `skip` samples."""
+        return self.quantize_stage(rendered[0][skip:]), self.quantize_stage(rendered[1][skip:])
+
+    def apply_button_effect(self, left, right, effect, tick, lookahead=None):
+        """One FX-button effect over a span. None when the effect is unimplemented or switched off."""
+        args, tl, block = self.args, self.tl, self.args.block
+        effect_id = int(effect[0])
+        params = list(effect[1:])
+        mix_param = {1: 1, 8: 1, 6: 2}.get(effect_id, 0)
+        if mix_param < len(params):
+            params[mix_param] *= args.mix_scale
+        beat = 60.0 / tl.bpm_at(tick)
+        resonance = dict(res_scale=args.filter_resonance_scale, res_max_db=args.filter_max_resonance)
+
+        if effect_id in (1, 8):
+            count, mix, beats, feedback, gate, release = params[:6]
+            return FX.fx_retrigger(left, right, mix, beats * beat, feedback, int(count), gate, release,
+                                   block=block)
+        if effect_id == 2:
+            mix, steps, beats = params[:3]
+            return FX.fx_gate(left, right, mix, int(steps), beats * beat, block=block,
+                              hard_binary=args.gate_hard_binary)
+        if effect_id == 3:
+            mix, delay_ms, measures, depth, stages = params[:5]
+            measure = beat * tl.beats_per_measure_at(tick)
+            return FX.fx_flanger(left, right, mix, delay_ms, measures / measure, int(depth), stages,
+                                 block=block)
+        if effect_id == 4:
+            return FX.fx_tapestop(left, right, *params[:3], block=block)
+        if effect_id == 5:
+            mix, beats, attack, hold, release = params[:5]
+            return FX.fx_sidechain(left, right, mix, beats * beat, int(attack), int(hold), int(release),
+                                   block=block)
+        if effect_id == 6:
+            filter_type, wave_type, mix, freq_a, freq_b, rate, q = params[:7]
+            rate = float(rate)
+            period = rate * beat if args.wobble_legacy_period else beat / max(rate, 1e-6)
+            return FX.fx_wobble(left, right, mix, int(filter_type), int(wave_type), freq_a, freq_b, period, q,
+                                block=block, state=self.wobble_state)
+        if effect_id == 7:
+            mix, rate = params[:2]
+            return FX.fx_bitcrush(left, right, mix, int(rate), block=block,
+                                  continuous=args.bitcrush_continuous)
+        if effect_id == 9 and not args.no_pitchshift:
+            mix, amount = params[:2]
+            return FX.fx_pitchshift(left, right, mix, amount, block=block,
+                                    legacy_cursor=args.pitchshift_legacy_cursor)
+        if effect_id == 10 and not args.no_tapestop_ex:
+            mix, speed, *beats = params[:5]
+            duration, preroll, window = (b * beat for b in beats)
+            if args.tapestop_ex_3phase:
+                return FX.fx_tapestop_ex_3phase(left, right, mix, speed, duration, preroll, window,
+                                                block=block, lookahead=lookahead)
+            return FX.fx_tapestop_ex(left, right, mix, speed, duration, preroll, window, block=block,
+                                     lookahead=lookahead, floor=args.tapestop_ex_floor)
+        if effect_id == 11:
+            return FX.fx_laser_lpf(left, right, *params[:4], block=block, **resonance)
+        if effect_id == 12:
+            return FX.fx_laser_hpf(left, right, *params[:4], block=block, **resonance)
+        if effect_id == 13 and not args.no_pitch_speed:
+            return FX.fx_pitch_speed(left, right, *params[:3], block=block, lookahead=lookahead)
+        return None
+
+    def apply_laser_effect(self, left, right, effect, knob):
+        """A laser's own effect over a span, driven by `knob` automation. None for unknown types."""
+        args = self.args
+        effect_id = int(effect[0])
+        params = list(effect[1:])
+        params[0] *= args.mix_scale
+        resonance = dict(res_scale=args.filter_resonance_scale, res_max_db=args.filter_max_resonance)
+        if effect_id == 1:
+            return FX.fx_laser_lpf(left, right, *params[:4], knob=knob, block=args.block, **resonance)
+        if effect_id == 2:
+            return FX.fx_laser_hpf(left, right, *params[:4], knob=knob, block=args.block, **resonance)
+        if effect_id == 3:
+            return FX.fx_laser_bitcrush(left, right, *params[:2], knob=knob, block=args.block)
+        return None
+
+    # -- stages -----------------------------------------------------------
+
+    def _grid_lead_samples(self, effect, start_tick):
+        """Samples a grid-locked effect's phase starts before its note."""
+        if self.args.no_grid_snap or int(effect[0]) not in GRID_LOCKED or len(effect) <= 3:
+            return 0
+        return grid_lock_lead_samples(self.tl, start_tick, effect[3])
+
+    def _sample_range(self, start_tick, end_tick):
+        """Sample range between two ticks, clipped to the track."""
+        return (max(0, sample_index(self.tl, start_tick)),
+                min(self.n, sample_index(self.tl, end_tick)))
+
+    def apply_fx_buttons(self):
+        args = self.args
+        lanes = (("FX-L", self.chart.fx[0]), ("FX-R", self.chart.fx[1]))
+        for label, notes in lanes[::-1] if args.fx_order_rl else lanes:
+            for note in notes:
+                pair_index = note.c2 - 2
+                if note.length <= 0 or pair_index < 0 or pair_index >= len(self.fxdefs):
+                    continue
+                start, stop = self._sample_range(note.tick, note.tick + note.length)
+                if stop - start < 16:
+                    continue
+
+                plan = [(effect, self._grid_lead_samples(effect, note.tick))
+                        for effect in self.fxdefs[pair_index] if effect is not None]
+                if not plan:
+                    continue
+
+                # Grid-locked effects start their phase before the note, so render from there.
+                lead_start = max(0, start - max(snap for _effect, snap in plan))
+                if args.fx_chain_overlap:
+                    source_left, source_right = self.left, self.right
+                else:
+                    source_left, source_right = self.dry_left, self.dry_right
+                work_left, work_right = _copies(source_left, source_right, lead_start, stop)
+
+                wrote = False
+                for effect, snap in plan:
+                    offset = max(0, start - snap) - lead_start
+                    lookahead = (source_left, source_right, lead_start + offset)
+                    rendered = self.apply_button_effect(
+                        *_copies(work_left, work_right, offset, None), effect, note.tick, lookahead=lookahead)
+                    name = FX_NAMES.get(int(effect[0]), "?")
+                    if rendered is None:
+                        self.skipped[name] += 1
+                        continue
+                    work_left[offset:], work_right[offset:] = self.quantize_stereo(rendered)
+                    wrote = True
+                    key = "%s (%s)" % (name, label)
+                    self.applied[key] += 1
+                    if snap:
+                        self.snapped[key] += 1
+                if wrote:
+                    skip = start - lead_start
+                    self.left[start:stop], self.right[start:stop] = work_left[skip:], work_right[skip:]
+
+    def apply_auto_tab(self):
+        """#TRACK AUTO TAB spans: a laser borrows an FX-button effect pair, optionally with a laser-driven parameter sweep."""
+        sweep = not self.args.no_param_assign_sweep
+        assign_table = parse_param_assign(self.sec) if sweep else {}
+        sweep_value = sweep_active = None
+        if sweep:
+            sweep_value, sweep_active = param_sweep_curve(self.chart, self.n)
+
+        for start_tick, length, pair_id in parse_auto_tab(self.sec, self.tl):
+            pair_index = pair_id - 2
+            if length <= 0 or pair_index < 0 or pair_index >= len(self.fxdefs):
+                continue
+            start, stop = self._sample_range(start_tick, start_tick + length)
+            if stop - start < 16:
+                continue
+            assigns = assign_table.get(pair_index, [])
+            for slot, effect in enumerate(self.fxdefs[pair_index]):
+                if effect is None:
+                    continue
+                name = FX_NAMES.get(int(effect[0]), "?")
+                assignment = None
+                if sweep and slot < len(assigns):
+                    param_index = assigns[slot][0]
+                    if 0 < param_index < len(effect) and np.any(sweep_active[start:stop]):
+                        assignment = assigns[slot]
+
+                if assignment is None:
+                    self._apply_borrowed_effect(effect, name, start_tick, start, stop)
+                else:
+                    self._apply_borrowed_effect_swept(effect, name, start_tick, start, stop, assignment,
+                                         (sweep_value, sweep_active))
+
+    def _apply_borrowed_effect(self, effect, name, start_tick, start, stop):
+        left, right = self.left, self.right
+        lead_start = max(0, start - self._grid_lead_samples(effect, start_tick))
+        rendered = self.apply_button_effect(*_copies(left, right, lead_start, stop), effect, start_tick,
+                                            lookahead=(left, right, lead_start))
+        if rendered is None:
+            self.skipped[name] += 1
+            return
+        skip = start - lead_start
+        left[start:stop], right[start:stop] = self.quantize_stereo(rendered, skip)
+        self.applied["%s (AUTO TAB)" % name] += 1
+
+    def _apply_borrowed_effect_swept(self, effect, name, start_tick, start, stop, assignment, sweep):
+        """Runs the effect in short blocks, setting one parameter from the laser's position in each."""
+        left, right = self.left, self.right
+        sweep_value, sweep_active = sweep
+        param_index, low, high = assignment
+        any_applied = False
+        for block_start in range(start, stop, PARAM_ASSIGN_BLOCK):
+            block_end = min(block_start + PARAM_ASSIGN_BLOCK, stop)
+            block_effect = effect
+            active = sweep_active[block_start:block_end]
+            if np.any(active):
+                position = float(np.mean(sweep_value[block_start:block_end][active]))
+                block_effect = list(effect)
+                block_effect[param_index] = low + (high - low) * max(0.0, min(1.0, position))
+            rendered = self.apply_button_effect(*_copies(left, right, block_start, block_end), block_effect,
+                                                start_tick, lookahead=(left, right, block_start))
+            if rendered is None:
+                self.skipped[name] += 1
+                continue
+            left[block_start:block_end], right[block_start:block_end] = self.quantize_stereo(rendered)
+            any_applied = True
+        if any_applied:
+            self.applied["%s (AUTO TAB sweep)" % name] += 1
+
+    def apply_lasers(self):
+        """Applies each laser's own effect and returns the per-sample knob and the mask of lasers that bypass the device ParamEq."""
+        args, n = self.args, self.n
+        peak_knob = np.zeros(n, np.float32)
+        peak_disabled = np.zeros(n, bool)
+        # The engine snapshots its source once before dispatching any run, so lasers don't stack.
+        chain = (self.left, self.right) if args.laser_chain_overlap else (self.left.copy(), self.right.copy())
+        if args.no_laser:
+            return peak_knob, peak_disabled
+
+        for label, points, mirror in (("VOL-L", self.chart.laser[0], False),
+                                      ("VOL-R", self.chart.laser[1], True)):
+            segs = laser_segments(points, mirror)
+            for seg in segs:
+                start, stop = self._sample_range(seg.start_tick, seg.end_tick)
+                if stop <= start:
+                    continue
+                if args.laser_easing and seg.curve in (4, 5):
+                    phase = np.arange(stop - start, dtype=np.float64) / max(stop - start, 1)
+                    eased = _apply_easing(phase, seg.curve, np.sin)
+                    ramp = (seg.start_knob + (seg.end_knob - seg.start_knob) * eased).astype(np.float32)
+                else:
+                    ramp = np.linspace(seg.start_knob, seg.end_knob, stop - start, endpoint=False,
+                                       dtype=np.float32)
+                np.maximum(peak_knob[start:stop], ramp, out=peak_knob[start:stop])
+                if seg.tab_index != 0:
+                    peak_disabled[start:stop] = True
+
+            for run in self._group_into_runs(segs):
+                self._apply_laser_run(run, label, chain)
+        return peak_knob, peak_disabled
+
+    @staticmethod
+    def _group_into_runs(segs):
+        """Contiguous sections with the same effect column form one run."""
+        runs = []
+        for seg in segs:
+            previous = runs[-1][-1] if runs else None
+            if previous and previous.end_tick == seg.start_tick and previous.tab_index == seg.tab_index:
+                runs[-1].append(seg)
+            else:
+                runs.append([seg])
+        return runs
+
+    def _apply_laser_run(self, run, label, chain):
+        args, tl = self.args, self.tl
+        tab_index = run[0].tab_index
+        if tab_index >= 6 or (tab_index > 0 and tab_index - 1 >= len(self.tabdefs)):
+            return
+        start_tick, end_tick = run[0].start_tick, run[-1].end_tick
+        if end_tick <= start_tick:
+            return
+        start, stop = self._sample_range(start_tick, end_tick)
+        if stop - start < args.block:
+            return
+        if tab_index == 0:
+            self.applied["PeakFilter (%s)" % label] += 1
+            return
+
+        base = tl.seconds_at(start_tick)
+        knob = []
+        for seg in run:
+            start_seconds = max(tl.seconds_at(seg.start_tick) - base, 0.0)
+            if args.laser_easing and seg.curve in (4, 5):
+                duration = max(tl.seconds_at(seg.end_tick) - base, 0.0) - start_seconds
+                nsteps = max(2, int(duration * SR / max(args.block, 1)))
+                for k in range(nsteps):
+                    phase = _apply_easing(k / float(nsteps), seg.curve)
+                    value = seg.start_knob + (seg.end_knob - seg.start_knob) * phase
+                    knob.append((start_seconds + duration * (k / float(nsteps)), value))
+            else:
+                knob.append((start_seconds, seg.start_knob))
+        knob.append((max(tl.seconds_at(run[-1].end_tick) - base, 0.0), run[-1].end_knob))
+
+        effect = self.tabdefs[tab_index - 1]
+        source_left, source_right = (chain if args.laser_mode == "chain" else (self.dry_left, self.dry_right))
+        rendered = self.apply_laser_effect(*_copies(source_left, source_right, start, stop), effect, knob)
+        name = TAB_NAMES.get(int(effect[0]), "?")
+        if rendered is None:
+            self.skipped[name] += 1
+            return
+
+        left, right = self.left, self.right
+        if args.laser_mode == "add":
+            # Both lasers' deltas from the dry track are summed onto the chain.
+            left[start:stop] = self.quantize_stage(left[start:stop] + rendered[0] - self.dry_left[start:stop])
+            right[start:stop] = self.quantize_stage(
+                right[start:stop] + rendered[1] - self.dry_right[start:stop])
+        else:
+            left[start:stop], right[start:stop] = self.quantize_stereo(rendered)
+        self.applied["%s (%s)" % (name, label)] += 1
+
+    def paramq_knob(self, peak_knob, peak_disabled):
+        """Per-sample knob for the device ParamEq: gated to default-EQ lasers, then delayed by the engine's queue lag."""
+        args = self.args
+        knob = peak_knob.copy()
+        if not args.peak_always:
+            knob[peak_disabled] = 0.0
+        delay_samples = int(round(args.peak_delay * SR))
+        if delay_samples > 0:
+            knob = np.concatenate([np.zeros(delay_samples, np.float32), knob[:-delay_samples]])
+        return knob
+
+    def apply_music_duck(self, knob):
+        """Scales L/R by the music-voice gain the game applies alongside the default laser EQ."""
+        args = self.args
+        per_block = knob[::args.block].astype(np.int32)
+        step = np.inf if args.duck_rate is None else args.duck_rate * args.block / float(SR)
+        gains = np.empty(per_block.size, np.float64)
+        gain = 1.0
+        for i, knob_value in enumerate(per_block):
+            if not (args.duck_hold and knob_value < FX.PEAK_KNOB_DEADZONE):
+                target = FX.peak_duck_target(knob_value)
+                gain += max(-step, min(step, target - gain))
+            gains[i] = gain
+        envelope = np.repeat(gains, args.block)[:self.n].astype(np.float32)
+        self.left *= envelope
+        self.right *= envelope
+
+    def knob_per_block(self, knob):
+        """The knob sampled once per block, padded with zeros to cover the whole track."""
+        block = self.args.block
+        block_count = (self.n + block - 1) // block
+        sampled = knob[::block][:block_count]
+        if sampled.size < block_count:
+            sampled = np.concatenate([sampled, np.zeros(block_count - sampled.size, np.float32)])
+        return sampled
+
+    def _print_paramq_activity(self, knob_per_block):
+        block = self.args.block
+        active = int((knob_per_block >= FX.PEAK_KNOB_DEADZONE).sum())
+        print("device ParamEq: active in %d/%d blocks (%.1f s), peak knob %d\n"
+              % (active, knob_per_block.size, active * block / float(SR), int(knob_per_block.max())))
+
+    def apply_device_paramq(self, knob_per_block):
+        args = self.args
+        self.left[:], self.right[:] = FX.fx_laser_peak(
+            self.left, self.right, block=args.block, knob_per_block=knob_per_block,
+            gain_scale=args.peak_gain_scale, max_gain_db=args.peak_max_gain)
+
+    def mix_layered_se(self, folder):
+        args, tl, n = self.args, self.tl, self.n
+        bank_dir = args.se_bank_dir or os.path.join(os.path.dirname(os.path.dirname(folder)), "sound", "ver5")
+        s3p = os.path.join(bank_dir, "general_sampler.s3p")
+        if not os.path.exists(s3p):
+            print("note: %s not found, skipping layered SE" % s3p)
+            return
+        bank = load_sample_bank(s3p)
+        vgains = s3p_header_gains(os.path.join(os.path.dirname(s3p), "virtical_shot.s3p"))
+        if args.slam_gain is not None:
+            slam_level = args.slam_gain
+        elif args.slam_index < len(vgains):
+            slam_level = vgains[args.slam_index] * args.se_trim
+        else:
+            slam_level = bank[args.slam_index].gain * args.se_trim
+
+        def chip_level(idx):
+            return args.se_gain if args.se_gain is not None else bank[idx].gain * args.se_trim
+
+        def play(onsets, sample, level):
+            # One voice per sample: a re-trigger cuts the previous one off.
+            for k, onset in enumerate(onsets):
+                cut_at = onsets[k + 1] if not args.se_polyphonic and k + 1 < len(onsets) else None
+                mix_sample_into(self.left, self.right, onset, sample, level, cut_at)
+
+        slam_onsets = []
+        for points in self.chart.laser:
+            slam_onsets += [sample_index(tl, before.tick) for before, after in zip(points, points[1:])
+                            if before.tick == after.tick and abs(before.pos - after.pos) > 1e-6
+                            and before.node_type != 2]
+        slam_onsets = sorted({o for o in slam_onsets if 0 <= o < n})
+        play(slam_onsets, bank[args.slam_index], slam_level)
+        counts = collections.Counter({"laser slam @ %.4f" % slam_level: len(slam_onsets)})
+
+        chips = collections.defaultdict(list)
+        for label, notes in (("FX-L", self.chart.fx[0]), ("FX-R", self.chart.fx[1])):
+            for note in notes:
+                idx = note.c2
+                if note.length != 0 or not (1 <= idx <= 14) or idx >= len(bank):
+                    continue
+                onset = sample_index(tl, note.tick)
+                if 0 <= onset < n:
+                    chips[idx].append(onset)
+                    counts["FX chip %d %s (%s) @ %.4f"
+                           % (idx, CHIP_SAMPLE_NAMES.get(idx, "?"), label, chip_level(idx))] += 1
+        for idx, onsets in chips.items():
+            play(sorted(set(onsets)), bank[idx], chip_level(idx))
+
+        print("layered SE:")
+        for k in sorted(counts):
+            print("  %-40s x%d" % (k, counts[k]))
+        print()
+
+    def apply_chain(self, folder):
+        """The whole chain in engine order. Returns after the final master gain, ready to write."""
+        args = self.args
+        if not args.no_fx:
+            self.apply_fx_buttons()
+        if not args.no_auto_tab:
+            self.apply_auto_tab()
+
+        peak_knob, peak_disabled = self.apply_lasers()
+
+        knob_per_block = None
+        if not (args.no_laser or args.no_peak):
+            knob = self.paramq_knob(peak_knob, peak_disabled)
+            if not args.no_duck:
+                self.apply_music_duck(knob)
+            knob_per_block = self.knob_per_block(knob)
+            self._print_paramq_activity(knob_per_block)
+        # EQ slot 0 sits on the music path, upstream of the SE voices.
+        if knob_per_block is not None and not args.peak_post_se:
+            self.apply_device_paramq(knob_per_block)
+            knob_per_block = None
+
+        if not args.no_se:
+            self.mix_layered_se(folder)
+        if knob_per_block is not None:
+            self.apply_device_paramq(knob_per_block)
+
+        if args.master_gain != 1.0:
+            self.left *= args.master_gain
+            self.right *= args.master_gain
+
+    def print_summary(self):
+        if self.snapped:
+            print("grid-locked (phase started before the note):")
+            for k in sorted(self.snapped):
+                print("  %-34s x%d" % (k, self.snapped[k]))
+        print("applied:")
+        for k in sorted(self.applied):
+            print("  %-34s x%d" % (k, self.applied[k]))
+        if self.skipped:
+            print("skipped (not implemented):")
+            for k in sorted(self.skipped):
+                print("  %-34s x%d" % (k, self.skipped[k]))
 
 
 def build_arg_parser():
@@ -739,68 +975,25 @@ def build_arg_parser():
     return ap
 
 
-def main():
-    args = build_arg_parser().parse_args()
-
-    MODE[0] = args.laser_mode
-    STAGE_CLIP[0] = not args.no_stage_clip
-    MIXSCALE[0] = args.mix_scale
-    TAPESTOP_EX[0] = not args.no_tapestop_ex
-    TSE_FLOOR[0] = args.tapestop_ex_floor
-    PITCHSHIFT[0] = not args.no_pitchshift
-    PITCH_SPEED[0] = not args.no_pitch_speed
-    PITCHSHIFT_LEGACY_CURSOR[0] = args.pitchshift_legacy_cursor
-    WOBBLE_LEGACY[0] = args.wobble_legacy_period
-    GATE_HARD_BINARY[0] = args.gate_hard_binary
-    BITCRUSH_CONTINUOUS[0] = args.bitcrush_continuous
-    LASER_EASING[0] = args.laser_easing
-    TAPESTOP_EX_3PHASE[0] = args.tapestop_ex_3phase
-    PARAM_ASSIGN_SWEEP[0] = not args.no_param_assign_sweep
-    RES_SCALE[0] = args.filter_resonance_scale
-    RES_MAX_DB[0] = args.filter_max_resonance
-    if args.wobble_persist:
-        PERSIST.add(6)
-    folder = os.path.abspath(args.folder)
-    base = os.path.basename(folder)
+def pick_vox_filename(folder, difficulty):
     voxes = sorted(f for f in os.listdir(folder) if f.endswith(".vox"))
     if not voxes:
         raise SystemExit("no .vox in " + folder)
-    order = ["5m", "4i", "3e", "2a", "1n"]
-    if args.difficulty:
-        pick = [v for v in voxes if v.endswith("_%s.vox" % args.difficulty)]
+    if difficulty:
+        pick = [v for v in voxes if v.endswith("_%s.vox" % difficulty)]
         if not pick:
-            raise SystemExit("no chart for difficulty " + args.difficulty)
-        vox = pick[0]
-    else:
-        vox = next((v for d in order for v in voxes if v.endswith("_%s.vox" % d)), voxes[0])
-    vox_path = os.path.join(folder, vox)
+            raise SystemExit("no chart for difficulty " + difficulty)
+        return pick[0]
+    return next((v for d in ("5m", "4i", "3e", "2a", "1n") for v in voxes if v.endswith("_%s.vox" % d)),
+                voxes[0])
 
-    s3v = args.audio or os.path.join(folder, base + ".s3v")
-    if not os.path.exists(s3v):
-        raise SystemExit("missing " + s3v)
 
-    out = args.output or (base + "_fx.ogg")
-    print("chart : %s" % vox)
-    print("audio : %s" % os.path.basename(s3v))
-    L, R = decode_audio(s3v, what="track")
-    sr = SR
-    if args.dry:
-        write_audio(args.dry, L, R, sr, args.ogg_quality)
-    n = L.size
-    print("track : %d frames (%.2f s) @ %d Hz" % (n, n / float(sr), sr))
-
-    sec = read_sections(vox_path)
-    tl = Timeline(sec)
-    fxdefs = parse_fx_pairs(sec)
-    tabdefs = parse_effects(sec, "#TAB EFFECT INFO")
-    ver = (sec.get("#FORMAT VERSION") or ["?"])[0].strip()
+def print_effect_tables(chart, fxdefs, tabdefs):
     print("format: v%s   BPM %s   %d FX defs, %d laser defs\n"
-          % (ver, ", ".join("%g" % b for _, b in tl._bpm_pts), len(fxdefs), len(tabdefs)))
-
+          % (chart.version, ", ".join("%g" % b for _, b in chart.tl.bpm_pts), len(fxdefs), len(tabdefs)))
     print("FX definitions in this chart (each is a pair, applied in series):")
     for i, pair in enumerate(fxdefs):
-        desc = " + ".join("%s(%s)" % (FX_NAMES.get(int(e[0]), "?"),
-                                      ", ".join("%g" % v for v in e[1:]))
+        desc = " + ".join("%s(%s)" % (FX_NAMES.get(int(e[0]), "?"), ", ".join("%g" % v for v in e[1:]))
                           for e in pair if e) or "(empty)"
         print("  [%2d] %s" % (i, desc))
     print("laser definitions:")
@@ -809,391 +1002,34 @@ def main():
                                               ", ".join("%g" % v for v in e[1:])))
     print()
 
-    applied, skipped, snapped = {}, {}, {}
-    FXSTATE.clear()
 
-    dryL, dryR = L.copy(), R.copy()
+def main(argv=None):
+    args = build_arg_parser().parse_args(argv)
 
-    if not args.no_fx:
-        order = (("#TRACK7", "FX-R"), ("#TRACK2", "FX-L")) if args.fx_order_rl \
-            else (("#TRACK2", "FX-L"), ("#TRACK7", "FX-R"))
-        for trk, label in order:
-            for line in sec.get(trk, []):
-                f = line.split()
-                if len(f) < 3:
-                    continue
-                length, ev = int(f[1]), int(f[2])
-                if length <= 0 or ev < 2:
-                    continue
-                di = ev - 2
-                if di >= len(fxdefs):
-                    continue
-                t0 = tl.tick_of(f[0])
-                i0, i1 = tl.samples(t0), tl.samples(t0 + length)
-                i0, i1 = max(0, i0), min(n, i1)
-                if i1 - i0 < 16:
-                    continue
+    folder = os.path.abspath(args.folder)
+    base = os.path.basename(folder)
+    vox_name = pick_vox_filename(folder, args.difficulty)
+    s3v = args.audio or os.path.join(folder, base + ".s3v")
+    if not os.path.exists(s3v):
+        raise SystemExit("missing " + s3v)
 
-                plan = []
-                for eff in fxdefs[di]:
-                    if eff is None:
-                        continue
-                    snap = 0
-                    if (not args.no_grid_snap and int(eff[0]) in GRID_LOCKED
-                            and len(eff) > 3):
-                        snap = grid_snap_offset(tl, t0, eff[3])
-                    plan.append((eff, snap))
-                if not plan:
-                    continue
+    out = args.output or (base + "_fx.ogg")
+    print("chart : %s" % vox_name)
+    print("audio : %s" % os.path.basename(s3v))
+    left, right = decode_audio(s3v, what="track")
+    if args.dry:
+        write_audio(args.dry, left, right, SR, args.ogg_quality)
+    print("track : %d frames (%.2f s) @ %d Hz" % (left.size, left.size / float(SR), SR))
 
-                jmin = max(0, i0 - max(s for _, s in plan))
-                srcL, srcR = (L, R) if args.fx_chain_overlap else (dryL, dryR)
-                wl, wr = srcL[jmin:i1].copy(), srcR[jmin:i1].copy()
+    chart = vox.load(os.path.join(folder, vox_name))
+    render = Render(args, chart, left, right)
+    print_effect_tables(chart, render.fxdefs, render.tabdefs)
 
-                wrote = False
-                for eff, snap in plan:
-                    off = max(0, i0 - snap) - jmin
-                    res = run_fx(wl[off:].copy(), wr[off:].copy(), eff, tl, t0,
-                                 args.block, lookahead=(srcL, srcR, jmin + off))
-                    name = FX_NAMES.get(int(eff[0]), "?")
-                    if res is None:
-                        skipped[name] = skipped.get(name, 0) + 1
-                        continue
-                    wl[off:], wr[off:] = stage(res[0]), stage(res[1])
-                    wrote = True
-                    key = "%s (%s)" % (name, label)
-                    applied[key] = applied.get(key, 0) + 1
-                    if snap:
-                        snapped[key] = snapped.get(key, 0) + 1
-                if wrote:
-                    L[i0:i1], R[i0:i1] = wl[i0 - jmin:], wr[i0 - jmin:]
-
-    assign_table = parse_param_assign(sec) if PARAM_ASSIGN_SWEEP[0] else {}
-    assign_curve = assign_val = assign_active = None
-    if PARAM_ASSIGN_SWEEP[0]:
-        assign_val, assign_active = param_assign_curve(sec, tl, n)
-
-    if not args.no_auto_tab:
-        for line in sec.get("#TRACK AUTO TAB", []):
-            f = line.split()
-            if len(f) < 3:
-                continue
-            try:
-                length, ev = int(f[1]), int(f[2])
-            except ValueError:
-                continue
-            if length <= 0 or ev < 2:
-                continue
-            di = ev - 2
-            if di >= len(fxdefs):
-                continue
-            t0 = tl.tick_of(f[0])
-            i0, i1 = max(0, tl.samples(t0)), min(n, tl.samples(t0 + length))
-            if i1 - i0 < 16:
-                continue
-            for chain_index, eff in enumerate(fxdefs[di]):
-                if eff is None:
-                    continue
-                name = FX_NAMES.get(int(eff[0]), "?")
-
-                assign = None
-                if PARAM_ASSIGN_SWEEP[0] and chain_index < len(assign_table.get(di, [])):
-                    pidx, lo, hi = assign_table[di][chain_index]
-                    if pidx > 0 and pidx < len(eff) and np.any(assign_active[i0:i1]):
-                        assign = (pidx, lo, hi)
-
-                if assign is None:
-                    snap = 0
-                    if (not args.no_grid_snap and int(eff[0]) in GRID_LOCKED
-                            and len(eff) > 3):
-                        snap = grid_snap_offset(tl, t0, eff[3])
-                    j0 = max(0, i0 - snap)
-                    pre = i0 - j0
-                    res = run_fx(L[j0:i1].copy(), R[j0:i1].copy(), eff, tl, t0,
-                                 args.block, lookahead=(L, R, j0))
-                    if res is None:
-                        skipped[name] = skipped.get(name, 0) + 1
-                        continue
-                    L[i0:i1], R[i0:i1] = stage(res[0][pre:]), stage(res[1][pre:])
-                    key = "%s (AUTO TAB)" % name
-                    applied[key] = applied.get(key, 0) + 1
-                    continue
-
-                pidx, lo, hi = assign
-                any_applied = False
-                for bs in range(i0, i1, PARAM_ASSIGN_BLOCK):
-                    be = min(bs + PARAM_ASSIGN_BLOCK, i1)
-                    blk_active = assign_active[bs:be]
-                    blk_eff = eff
-                    if np.any(blk_active):
-                        v = float(np.mean(assign_val[bs:be][blk_active]))
-                        v = max(0.0, min(1.0, v))
-                        blk_eff = list(eff)
-                        blk_eff[pidx] = lo + (hi - lo) * v
-                    res = run_fx(L[bs:be].copy(), R[bs:be].copy(), blk_eff, tl, t0,
-                                 args.block, lookahead=(L, R, bs))
-                    if res is None:
-                        skipped[name] = skipped.get(name, 0) + 1
-                        continue
-                    L[bs:be], R[bs:be] = stage(res[0]), stage(res[1])
-                    any_applied = True
-                if any_applied:
-                    key = "%s (AUTO TAB sweep)" % name
-                    applied[key] = applied.get(key, 0) + 1
-
-    peak_knob = np.zeros(n, np.float32)
-    peak_off = np.zeros(n, bool)
-
-    chainL, chainR = (L, R) if args.laser_chain_overlap else (L.copy(), R.copy())
-    if not args.no_laser:
-        for trk, label in (("#TRACK1", "VOL-L"), ("#TRACK8", "VOL-R")):
-            pts = []
-            for line in sec.get(trk, []):
-                f = line.split()
-                if len(f) < 7:
-                    continue
-                tick = tl.tick_of(f[0])
-                pos = float(f[1])
-                if pos > 1.0:
-                    pos /= 127.0
-                flag = int(f[2])
-                filt = int(f[4])
-                curve = int(f[7]) if len(f) > 7 else 0
-                pts.append((tick, pos, flag, filt, curve))
-            pts.sort(key=lambda x: (x[0],))
-
-            events = []
-            for i in range(len(pts) - 1):
-                a, b = pts[i], pts[i + 1]
-                if a[2] == 2:
-                    continue
-                events.append((a[0], b[0], a[1], b[1], a[3], a[4]))
-
-            runs = []
-            for e in events:
-                if runs and runs[-1][-1][1] == e[0] and runs[-1][-1][4] == e[4]:
-                    runs[-1].append(e)
-                else:
-                    runs.append([e])
-
-            mir = (label == "VOL-R")
-            for (ta, tb, pa, pb, ef, curve) in events:
-                i0, i1 = max(0, tl.samples(ta)), min(n, tl.samples(tb))
-                if i1 <= i0:
-                    continue
-                va = (1.0 - pa if mir else pa) * 127.0
-                vb = (1.0 - pb if mir else pb) * 127.0
-                if LASER_EASING[0] and curve in (4, 5):
-                    phase = np.arange(i1 - i0, dtype=np.float64) / max(i1 - i0, 1)
-                    eased = np.sin(phase * math.pi / 2.0) if curve == 4 else \
-                        np.sin((phase - 1.0) * math.pi / 2.0) + 1.0
-                    seg = (va + (vb - va) * eased).astype(np.float32)
-                else:
-                    seg = np.linspace(va, vb, i1 - i0, endpoint=False, dtype=np.float32)
-                np.maximum(peak_knob[i0:i1], seg, out=peak_knob[i0:i1])
-                if ef != 0:
-                    peak_off[i0:i1] = True
-
-            for run in runs:
-                _apply_run(L, R, dryL, dryR, chainL, chainR, run, tabdefs, tl,
-                           args.block, applied, skipped, label, n)
-
-    peak_kb = None
-    if not (args.no_laser or args.no_peak):
-        knob = peak_knob.copy()
-        if not args.peak_always:
-            knob[peak_off] = 0.0
-        d = int(round(args.peak_delay * sr))
-        if d > 0:
-            knob = np.concatenate([np.zeros(d, np.float32), knob[:-d]])
-
-        if not args.no_duck:
-            tgt = np.array([FX.peak_duck_target(v) for v in
-                            knob[::args.block].astype(np.int32)], np.float64)
-            step = (np.inf if args.duck_rate is None
-                    else args.duck_rate * args.block / float(sr))
-            g = np.empty_like(tgt)
-            cur = 1.0
-            kb = knob[::args.block].astype(np.int32)
-            for i, t in enumerate(tgt):
-                if args.duck_hold and kb[i] < FX.PEAK_KNOB_DEADZONE:
-                    g[i] = cur
-                    continue
-                cur += max(-step, min(step, t - cur))
-                g[i] = cur
-            env = np.repeat(g, args.block)[:n].astype(np.float32)
-            L *= env
-            R *= env
-
-        nb = (n + args.block - 1) // args.block
-        peak_kb = knob[::args.block][:nb]
-        if peak_kb.size < nb:
-            peak_kb = np.concatenate([peak_kb, np.zeros(nb - peak_kb.size, np.float32)])
-        active = int((peak_kb >= FX.PEAK_KNOB_DEADZONE).sum())
-        print("device ParamEq: active in %d/%d blocks (%.1f s), peak knob %d\n"
-              % (active, nb, active * args.block / float(sr), int(peak_kb.max())))
-
-    if peak_kb is not None and not args.peak_post_se:
-        L[:], R[:] = FX.fx_laser_peak(L, R, block=args.block, knob_per_block=peak_kb,
-                                      gain_scale=args.peak_gain_scale,
-                                      max_gain_db=args.peak_max_gain)
-        peak_kb = None
-
-    if not args.no_se:
-        bank_dir = args.se_bank_dir or os.path.join(
-            os.path.dirname(os.path.dirname(folder)), "sound", "ver5")
-        s3p = os.path.join(bank_dir, "general_sampler.s3p")
-        if not os.path.exists(s3p):
-            print("note: %s not found, skipping layered SE" % s3p)
-        else:
-            samples = load_s3p(s3p)
-            se_counts = collections.Counter()
-
-            vgains = s3p_gains(os.path.join(os.path.dirname(s3p),
-                                            "virtical_shot.s3p"))
-            if args.slam_gain is not None:
-                slam_level = args.slam_gain
-            elif args.slam_index < len(vgains):
-                slam_level = vgains[args.slam_index] * args.se_trim
-            else:
-                slam_level = samples[args.slam_index][3] * args.se_trim
-
-            def chip_level(idx):
-                if args.se_gain is not None:
-                    return args.se_gain
-                return samples[idx][3] * args.se_trim
-
-            slam_onsets = []
-            for trk, label in (("#TRACK1", "VOL-L"), ("#TRACK8", "VOL-R")):
-                pts = []
-                for line in sec.get(trk, []):
-                    f = line.split()
-                    if len(f) < 7:
-                        continue
-                    pos = float(f[1])
-                    if pos > 1.0:
-                        pos /= 127.0
-                    pts.append((tl.tick_of(f[0]), pos, int(f[2])))
-                pts.sort(key=lambda x: (x[0],))
-                onsets = [tl.samples(pts[i][0]) for i in range(len(pts) - 1)
-                          if pts[i][0] == pts[i + 1][0]
-                          and abs(pts[i][1] - pts[i + 1][1]) > 1e-6
-                          and pts[i][2] != 2]
-                slam_onsets.extend(onsets)
-
-            slam_onsets = sorted(set(o for o in slam_onsets if 0 <= o < n))
-            for k, p in enumerate(slam_onsets):
-                cut = slam_onsets[k + 1] if (not args.se_polyphonic
-                                             and k + 1 < len(slam_onsets)) else None
-                mix_in(L, R, p, samples[args.slam_index], slam_level, cut)
-            se_counts["laser slam @ %.4f" % slam_level] += len(slam_onsets)
-
-            chips = collections.defaultdict(list)
-            for trk, label in (("#TRACK2", "FX-L"), ("#TRACK7", "FX-R")):
-                for line in sec.get(trk, []):
-                    f = line.split()
-                    if len(f) < 3 or int(f[1]) != 0:
-                        continue
-                    idx = int(f[2])
-                    if not (1 <= idx <= 14) or idx >= len(samples):
-                        continue
-                    p = tl.samples(tl.tick_of(f[0]))
-                    if 0 <= p < n:
-                        chips[idx].append(p)
-                        se_counts["FX chip %d %s (%s) @ %.4f"
-                                  % (idx, CHIP_SAMPLE_NAMES.get(idx, "?"), label,
-                                     chip_level(idx))] += 1
-            for idx, ps in chips.items():
-                ps = sorted(set(ps))
-                for k, p in enumerate(ps):
-                    cut = ps[k + 1] if (not args.se_polyphonic
-                                        and k + 1 < len(ps)) else None
-                    mix_in(L, R, p, samples[idx], chip_level(idx), cut)
-
-            print("layered SE:")
-            for k in sorted(se_counts):
-                print("  %-40s x%d" % (k, se_counts[k]))
-            print()
-
-    if peak_kb is not None:
-        L[:], R[:] = FX.fx_laser_peak(L, R, block=args.block, knob_per_block=peak_kb,
-                                      gain_scale=args.peak_gain_scale,
-                                      max_gain_db=args.peak_max_gain)
-
-    if args.master_gain != 1.0:
-        L *= args.master_gain
-        R *= args.master_gain
-    write_audio(out, L, R, sr, args.ogg_quality)
-
-    if snapped:
-        print("grid-locked (phase started before the note):")
-        for k in sorted(snapped):
-            print("  %-34s x%d" % (k, snapped[k]))
-    print("applied:")
-    for k in sorted(applied):
-        print("  %-34s x%d" % (k, applied[k]))
-    if skipped:
-        print("skipped (not implemented):")
-        for k in sorted(skipped):
-            print("  %-34s x%d" % (k, skipped[k]))
+    render.apply_chain(folder)
+    write_audio(out, left, right, SR, args.ogg_quality)
+    render.print_summary()
     print("\nwrote %s" % out)
     return 0
-
-
-def _apply_run(L, R, dryL, dryR, chainL, chainR, run, tabdefs, tl, block,
-               applied, skipped, label, n):
-    filt = run[0][4]
-    if filt >= 6 or (filt > 0 and (filt - 1) >= len(tabdefs)):
-        return
-    eff = tabdefs[filt - 1] if filt > 0 else None
-    t0, t1 = run[0][0], run[-1][1]
-    if t1 <= t0:
-        return
-    i0, i1 = max(0, tl.samples(t0)), min(n, tl.samples(t1))
-    if i1 - i0 < block:
-        return
-
-    mir = (label == "VOL-R")
-
-    def kv(v):
-        return (1.0 - v if mir else v) * 127.0
-
-    base = tl.seconds(t0)
-    knob = []
-    for (ta, tb, pa, pb, _f, curve) in run:
-        sa = max(tl.seconds(ta) - base, 0.0)
-        if LASER_EASING[0] and curve in (4, 5):
-            sb = max(tl.seconds(tb) - base, 0.0)
-            dur = sb - sa
-            nsteps = max(2, int(dur * SR / max(block, 1)))
-            for k in range(nsteps):
-                phase = _laser_ease(k / float(nsteps), curve)
-                knob.append((sa + dur * (k / float(nsteps)), kv(pa) + (kv(pb) - kv(pa)) * phase))
-        else:
-            knob.append((sa, kv(pa)))
-    knob.append((max(tl.seconds(run[-1][1]) - base, 0.0), kv(run[-1][3])))
-
-    if MODE[0] == "chain":
-        srcL, srcR = chainL[i0:i1].copy(), chainR[i0:i1].copy()
-    else:
-        srcL, srcR = dryL[i0:i1].copy(), dryR[i0:i1].copy()
-
-    if filt == 0:
-        applied["PeakFilter (%s)" % label] = applied.get("PeakFilter (%s)" % label, 0) + 1
-        return
-    res = run_tab(srcL, srcR, eff, knob, block)
-    name = TAB_NAMES.get(int(eff[0]), "?")
-    if res is None:
-        skipped[name] = skipped.get(name, 0) + 1
-        return
-
-    if MODE[0] == "add":
-        L[i0:i1] = stage(L[i0:i1] + res[0] - dryL[i0:i1])
-        R[i0:i1] = stage(R[i0:i1] + res[1] - dryR[i0:i1])
-    else:
-        L[i0:i1], R[i0:i1] = stage(res[0]), stage(res[1])
-    key = "%s (%s)" % (name, label)
-    applied[key] = applied.get(key, 0) + 1
 
 
 if __name__ == "__main__":

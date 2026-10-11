@@ -3,13 +3,8 @@
 SEPARATOR = "-" * 50
 
 
-def _wanted_diffs_for(song, diff_keys):
-    wanted = set(diff_keys)
-    if "top" in wanted:
-        wanted.discard("top")
-        top = song.top_difficulty()
-        if top:
-            wanted.add(top.key)
+def _difficulties_in_display_order(song, diff_keys):
+    wanted = song.resolve_diff_keys(diff_keys)
 
     order = []
     top = song.top_difficulty()
@@ -22,10 +17,10 @@ def _wanted_diffs_for(song, diff_keys):
     return order
 
 
-def generate(songs, diff_keys, header="New Songs Added"):
+def generate_new_songs_note(songs, diff_keys, header="New Songs Added"):
     entries = []
     for song in songs:
-        diffs = _wanted_diffs_for(song, diff_keys)
+        diffs = _difficulties_in_display_order(song, diff_keys)
         if not diffs:
             continue
         bracket = "/".join(d.level_display for d in diffs)

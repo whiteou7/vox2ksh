@@ -7,15 +7,16 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, os.pardir, "shared"))
 from game_paths import WORK as SP, MUSIC
 from spectral_metric import build_ref, spectrogram, rd, HOP
-from render_chart import read_sections, Timeline, parse_effects, FX_NAMES
+from render_chart import sample_index, parse_effects, FX_NAMES
+from vox_parser import VoxChart
 
 FOLDER = os.path.join(MUSIC, "2229_kamui_tjhangneil")
 refspec, nframes = build_ref()
 dryspec = spectrogram(rd(os.path.join(SP, "kamui_dry.wav")), nframes)
 minespec = spectrogram(rd(os.path.join(SP, "best.wav")), nframes)
 
-sec = read_sections(os.path.join(FOLDER, "2229_kamui_tjhangneil_5m.vox"))
-tl = Timeline(sec)
+chart = VoxChart(os.path.join(FOLDER, "2229_kamui_tjhangneil_5m.vox"))
+sec, tl = chart.sec, chart.tl
 fxdefs = parse_effects(sec, "#FXBUTTON EFFECT INFO")
 
 laser = np.zeros(nframes, bool)
@@ -25,12 +26,12 @@ for trk in ("#TRACK1", "#TRACK8"):
     for line in sec.get(trk, []):
         f = line.split()
         if len(f) >= 9:
-            pts.append((tl.tick_of(f[0]), int(f[2]), int(f[4])))
+            pts.append((tl.tick_of_position(f[0]), int(f[2]), int(f[4])))
     pts.sort(key=lambda x: (x[0],))
     for i in range(len(pts) - 1):
         if pts[i][1] == 2 or pts[i+1][0] <= pts[i][0]:
             continue
-        a = max(0, tl.samples(pts[i][0])//HOP); b = min(nframes, tl.samples(pts[i+1][0])//HOP+1)
+        a = max(0, sample_index(tl, pts[i][0])//HOP); b = min(nframes, sample_index(tl, pts[i+1][0])//HOP+1)
         if pts[i][2] == 0:
             peak[a:b] = True
         else:
@@ -45,8 +46,8 @@ for trk in ("#TRACK2", "#TRACK7"):
             di = int(f[2]) - 2
             if di >= len(fxdefs):
                 continue
-            t0 = tl.tick_of(f[0])
-            a = max(0, tl.samples(t0)//HOP); b = min(nframes, tl.samples(t0+int(f[1]))//HOP+1)
+            t0 = tl.tick_of_position(f[0])
+            a = max(0, sample_index(tl, t0)//HOP); b = min(nframes, sample_index(tl, t0+int(f[1]))//HOP+1)
             occupied[a:b] += 1
             m = fxmask.setdefault(int(fxdefs[di][0]), np.zeros(nframes, bool))
             m[a:b] = True

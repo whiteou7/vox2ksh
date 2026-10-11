@@ -13,7 +13,8 @@ from game_paths import SCRIPTS, WORK, ensure_work, find_ffmpeg
 AUDIO = os.path.join(SCRIPTS, "audio")
 sys.path.insert(0, AUDIO)
 from spectral_metric import bands, spectrogram, N, HOP, SR
-from render_chart import read_sections, Timeline, parse_fx_pairs, FX_NAMES
+from render_chart import sample_index, parse_fx_pairs, FX_NAMES
+from vox_parser import VoxChart
 
 
 def decode(path, mono=True):
@@ -91,8 +92,8 @@ def frame_masks(sec, tl, nframes, n):
                 continue
             if ln <= 0 or ev < 2 or ev - 2 >= len(pairs):
                 continue
-            t0 = tl.tick_of(f[0])
-            a, b = tl.samples(t0), tl.samples(t0 + ln)
+            t0 = tl.tick_of_position(f[0])
+            a, b = sample_index(tl, t0), sample_index(tl, t0 + ln)
             for eff in pairs[ev - 2]:
                 if eff is not None:
                     mark(FX_NAMES.get(int(eff[0]), "?"), a, b)
@@ -104,7 +105,7 @@ def frame_masks(sec, tl, nframes, n):
             f = line.split()
             if len(f) >= 3:
                 try:
-                    pts.append((tl.samples(tl.tick_of(f[0])), int(f[2])))
+                    pts.append((sample_index(tl, tl.tick_of_position(f[0])), int(f[2])))
                 except ValueError:
                     continue
         pts.sort()
@@ -206,8 +207,8 @@ def main():
     lm = np.log10(np.maximum(M, 1e-3))
     live = (R.mean(axis=1) > 20) & (D.mean(axis=1) > 20) & (M.mean(axis=1) > 20)
 
-    sec = read_sections(os.path.join(folder, vox))
-    tl = Timeline(sec)
+    chart = VoxChart(os.path.join(folder, vox))
+    sec, tl = chart.sec, chart.tl
     masks = frame_masks(sec, tl, nframes, n)
 
     fx_names = [k for k in masks if k not in ("laser", "idle")]

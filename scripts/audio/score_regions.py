@@ -7,14 +7,15 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, os.pardir, "shared"))
 from game_paths import WORK as SP, MUSIC
 from spectral_metric import build_ref, spectrogram, rd, HOP, N
-from render_chart import read_sections, Timeline, parse_effects, FX_NAMES
+from render_chart import sample_index, parse_effects, FX_NAMES
+from vox_parser import VoxChart
 SR = 44100
 
 refspec, nframes = build_ref()
 
 folder = os.path.join(MUSIC, "2229_kamui_tjhangneil")
-sec = read_sections(os.path.join(folder, "2229_kamui_tjhangneil_5m.vox"))
-tl = Timeline(sec)
+chart = VoxChart(os.path.join(folder, "2229_kamui_tjhangneil_5m.vox"))
+sec, tl = chart.sec, chart.tl
 fxdefs = parse_effects(sec, "#FXBUTTON EFFECT INFO")
 
 fx_mask = np.zeros(nframes, bool)
@@ -31,19 +32,19 @@ for trk in ("#TRACK2", "#TRACK7"):
     for line in sec.get(trk, []):
         f = line.split()
         if len(f) >= 3 and int(f[1]) > 0 and int(f[2]) >= 2:
-            t0 = tl.tick_of(f[0])
-            mark(fx_mask, tl.samples(t0), tl.samples(t0 + int(f[1])))
+            t0 = tl.tick_of_position(f[0])
+            mark(fx_mask, sample_index(tl, t0), sample_index(tl, t0 + int(f[1])))
 for trk in ("#TRACK1", "#TRACK8"):
     pts = []
     for line in sec.get(trk, []):
         f = line.split()
         if len(f) >= 9:
-            pts.append((tl.tick_of(f[0]), int(f[2]), int(f[4])))
+            pts.append((tl.tick_of_position(f[0]), int(f[2]), int(f[4])))
     pts.sort(key=lambda x: (x[0],))
     for i in range(len(pts) - 1):
         if pts[i][1] == 2 or pts[i + 1][0] <= pts[i][0]:
             continue
-        a, b = tl.samples(pts[i][0]), tl.samples(pts[i + 1][0])
+        a, b = sample_index(tl, pts[i][0]), sample_index(tl, pts[i + 1][0])
         if pts[i][2] == 0:
             mark(peak_mask, a, b)
         elif 1 <= pts[i][2] <= 5:
