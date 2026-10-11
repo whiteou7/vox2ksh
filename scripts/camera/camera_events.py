@@ -47,21 +47,23 @@ PRETILT_LEAD_BEATS = 0.5
 PRETILT_SNAP_BEATS = 0.25
 
 
-def _laser_sections(points):
+def _laser_sections(points, home):
     out = []
     cur = None
     for p in points:
+        at_home = abs(p.pos - home) < 1e-6
         if p.node_type == 1 or cur is None:
             if cur is not None:
-                out.append((cur[0], cur[1], cur[2]))
-            cur = [p.tick, p.pos, p.tick]
+                out.append(tuple(cur))
+            cur = [p.tick, p.pos, p.tick, at_home]
         else:
             cur[2] = p.tick
+            cur[3] = cur[3] and at_home
         if p.node_type == 2:
-            out.append((cur[0], cur[1], cur[2]))
+            out.append(tuple(cur))
             cur = None
     if cur is not None:
-        out.append((cur[0], cur[1], cur[2]))
+        out.append(tuple(cur))
     return out
 
 
@@ -70,10 +72,9 @@ def _pretilt_brackets(chart):
     window = max(1, int(round(PRETILT_WINDOW_BEATS * tl.res)))
     lead = max(0, int(round(PRETILT_LEAD_BEATS * tl.res)))
     snap = max(1, int(round(PRETILT_SNAP_BEATS * tl.res)))
-    sections = [(lane, s, pos, e)
+    sections = [(lane, s, pos, e, home)
                 for lane, pts in enumerate(chart.laser)
-                for (s, pos, e) in _laser_sections(pts)]
-    spans = [(s, e) for (_lane, s, _pos, e) in sections]
+                for (s, pos, e, home) in _laser_sections(pts, 0.0 if lane == 0 else 1.0)]
     manual = [(seg.tick, seg.end_tick) for seg in chart.camera["tilt"]]
 
     def snap_down(t):
@@ -81,11 +82,14 @@ def _pretilt_brackets(chart):
         return tl.measure_start_tick(m) + (off // snap) * snap
 
     out = []
-    for (lane, start, pos, _end) in sections:
+    for (lane, start, pos, _end, _home) in sections:
         factor = pos if lane == 0 else 1.0 - pos
         if factor <= 0.0:
             continue
         win = start - window
+        # A straight laser resting on the other lane's home edge adds no tilt, so it neither blocks nor bounds the bracket.
+        spans = [(s, e) for (l, s, _pos, e, home) in sections
+                 if l == lane or not home]
         if any(a < start and b > win for (a, b) in spans):
             continue
         if any(a <= start and b >= win for (a, b) in manual):

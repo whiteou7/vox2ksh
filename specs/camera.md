@@ -49,7 +49,7 @@ The reference charters flatten the run-up, then restore tilt exactly on the lase
 
 * has its lane idle for `PRETILT_WINDOW_BEATS = 2.0`;
 * opens anywhere off the home edge (a left laser above 0, a right laser below 1);
-* has the window clear of lasers on both lanes. ksh's tilt is global while KSM's look-ahead is per lane, so cancelling while the other lane holds a laser would flatten tilt the arcade really had. That's why this fires far less often than the charters do.
+* has the window clear of lasers on both lanes, except a straight laser resting on the other lane's home edge (left at 0, right at 1), which adds no tilt and is ignored. ksh's tilt is global while KSM's look-ahead is per lane, so cancelling while the other lane holds a tilting laser would flatten tilt the arcade really had. That's why this fires far less often than the charters do.
 
 The bracket closes on the section's first point and opens `PRETILT_WINDOW_BEATS + PRETILT_LEAD_BEATS` earlier, so the 250 ms fade finishes before the window opens. The opening tick is snapped to a 1/16 note (`PRETILT_SNAP_BEATS`) and never lands inside the preceding laser. Brackets that overlap a manual `Tilt` segment are skipped. Lengths are quarter notes times the chart's `tl.res`.
 
