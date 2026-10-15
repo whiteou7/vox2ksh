@@ -2,21 +2,22 @@
 
 Code: [`../scripts/camera/`](../scripts/camera/). Numbers and examples: [`evidence/camera.md`](evidence/camera.md).
 
-Spin (kind, direction and length) is solved. Zoom is approximate. Pretilt removal exists, but it's conservative and off by default.
+Spin (kind, direction and length) is solved. Zoom is approximate. Pretilt removal exists, but it's conservative and off by default. The arcade's lane tilt can be baked into manual ksh tilt (`--simulate-tilt`), also off by default.
 
 Scope: lane tilt, spin and swing, and top/bottom zoom. Not covered: `zoom_side`, `center_split`, `rotation_deg`, `scroll_speed` and the `*_curve` options (KSM v2 only).
 
-The reference conversions are hand-made, so values like zoom scale are subjective and differ between charters. `camera_events.py` approximates and says where it's guessing. The DLL was read for two things only: the laser row parser (which column holds the roll length) and `Game::AngleUpdater` (the spin).
+The reference conversions are hand-made, so values like zoom scale are subjective and differ between charters. `camera_events.py` approximates and says where it's guessing. The DLL was read for three things: the laser row parser (which column holds the roll length), `Game::AngleUpdater`'s spin, and, in the NABLA build, its lane tilt.
 
-`shared/vox_parser.py` parses three control types into `VoxChart.camera`: `tilt`, `cam_rotx` and `cam_radi`. `Realize`, `SpecialN`, `Morphing2`, `LaneY` and the rest stay raw.
+`shared/vox_parser.py` parses four control types into `VoxChart.camera`: `tilt`, `cam_rotx`, `cam_radi` and `bil_rotz`, plus the `#TILT MODE INFO` rows as `tilt_mode`. It reads `#LOCKED_SPCONTROLER` like `#SPCONTROLER` and splits rows on any whitespace, as the game does. `Realize`, `SpecialN`, `Morphing2`, `LaneY` and the rest stay raw.
 
 ```
-C0=timing  C1=control-type  C2=2  C3=length(cells)  C4=start  C5=end  C6=node-type(Tilt only)  C7=0
+C0=timing  C1=control-type  C2=2 (rarely 1 or 3)  C3=length(cells)  C4=start  C5=end  C6=node-type(Tilt only)  C7=0
 ```
 
 ## Takeaways
 
 * Most charts rely on the engine's auto-tilt. Manual `Tilt` is rare.
+* The arcade's lane tilt is fully determined by chart data (lasers, `Tilt`, `#TILT MODE INFO`, `BIL_RotZ`), with no look-ahead, so it can be written out as manual ksh tilt.
 * `roll_type` 7 exists, but `vox_format.md` lists only 0 to 6.
 * Zoom scale varies by charter, so any fixed constant is an approximation.
 
@@ -28,13 +29,41 @@ C0=timing  C1=control-type  C2=2  C3=length(cells)  C4=start  C5=end  C6=node-ty
 
 ## Tilt
 
-`compute_tilt_events` emits `tilt=normal` as the baseline and passes manual `Tilt` segments through as floats at each segment's start and end. It doesn't model the auto-tilt formula (`#TILT MODE INFO`); ksh's own auto-tilt stands in for it.
+By default `compute_tilt_events` emits `tilt=normal` as the baseline and passes manual `Tilt` segments through as floats at each segment's start and end. ksh's own auto-tilt stands in for the arcade's; `--simulate-tilt` (next section) replaces all of this.
 
-The two formats measure tilt in opposite directions: vox `+1.0` is ksh `-1`. The magnitude is `TILT_VOX_TO_KSH = -1.5` in `camera_events.py`, which follows the reference charters (a plain unit conversion would give -1.0). Still open: whether KSM's tilt unit is about two-thirds of SDVX's, or the charters exaggerate.
+The two formats measure tilt in opposite directions: vox `+1.0` is ksh `-1`. The default magnitude is `TILT_VOX_TO_KSH = -1.5` in `camera_events.py`, which follows the reference charters. The game's own factor is -2.375: a vox unit is 23.75 degrees and a KSM manual unit is 10 degrees, so the charters understate manual tilt by about a third. The default keeps -1.5.
+
+## Simulated tilt
+
+`compute_tilt_events(chart, simulate=True)` (`convert_camera.py --simulate-tilt`) replaces `tilt=normal` and the passthrough with manual `tilt=<float>` points for the whole chart, reproducing NABLA's `Game::AngleUpdater`. Every point is manual, so KSM's auto-tilt and pretilt never run, and `pretilt_fix` is ignored. Constants and DLL addresses are in the evidence file.
+
+The model, in real time (the game's rates are wall-clock):
+
+1. Target `r`. While a manual `Tilt` series runs, from its first point to its last, `r` is the series value times -2.375, or times -1 when the tilt mode isn't 0. Otherwise `r` is the sum over the laser sections active at that moment (first point <= t < last point, so no look-ahead) of `x` for the left laser and `x - 1` for the right, where `x` is the 0..1 position, interpolated linearly in time between points.
+2. Series. `Tilt` rows are read in time order. Node type 1 is one segment from (start, C4) to (end, C5). Types 0 and 2 open a series that takes (start, C4) from each `Tilt` row, the opener included, up to the next type-3 row, which also adds (end, C5); the other rows' C5 is ignored. Values with magnitude 0.01 or less become 0. A series that starts replaces the running one.
+3. Smoothing. `s` moves linearly toward `r` at 3.75/s, doubled while a series runs. When `|r| < 1/127` it moves at 0.9375/s (also doubled during a series) and snaps to 0 once `|s| < 1/127`.
+4. `#TILT MODE INFO` filters `d = 10 s` degrees into `o`. Mode 0 passes `d` through. Mode 1 follows `2.375 d` at 90 degrees/s. Mode 2 does the same but takes its direction from the first `|d| > 1/127` after the mode row, then only moves that way, holding its peak; until then it holds. A row switching back to 0 makes `o` follow `d` at 90 degrees/s until within 1/127, then pass through, and the manual factor stays -1 until it does.
+5. `BIL_RotZ` adds on top, unsmoothed, in degrees (the `d` prefix). Each row is a linear graph from C4, or from the current value when C2 isn't 2, to C5 over its span, held until the next row. The game reads these rows from `#LOCKED_SPCONTROLER` as well as `#SPCONTROLER`.
+6. ksh `tilt = (o + BIL_RotZ) / 10`, rounded to 3 decimals: a KSM manual tilt of 1.0 is 10 degrees, with the same sign as KSM's auto-tilt (ksm-v2 `HighwayTiltManual`, `kTiltRadians`).
+
+The model runs in 1 ms steps, is sampled on a 48-per-beat tick grid through the tempo map, and is reduced to the points of a piecewise-linear graph that stays within `SIM_TOLERANCE = 0.005` of every sample. The rate limits already make the motion piecewise linear, so a chart needs only a few hundred points. A `BIL_RotZ` jump becomes two `tilt=` lines on one tick, ksh's immediate change. Points stop once the tilt has settled after the last event, and never run past `#END POSITION`.
+
+Spin and swing tokens are unchanged. A type-4 ramp (0 to ±72 over `D`) is added on top of the simulated tilt and drops back to it on the ramp's last tick, a 720-degree jump that doesn't show.
+
+The default output is unchanged byte for byte.
+
+Unproven:
+
+* That KSM v1.6x also uses 10 degrees per manual unit. The source is ksm-v2.
+* Wide lasers use the stored 0..1 position. Whether the game rescales it for 2x lasers isn't checked.
+* Curved laser segments (`curve_type`) count as straight, which assumes the game's tilt reads only the points.
+* `BIL_RotZ` turns reach ksh tilt ±36, which relies on manual tilt being unclamped. The type-4 ramp relies on the same thing.
+* The ksh gets denser: a measure holding tilt points often needs the full 192-line grid.
+* Nobody has played the output in KSM.
 
 ## Pretilt
 
-KSM tilts a lane early toward the first point of a laser section that's still two beats away. From KSM v2's `HighwayTiltAuto.cpp`: each frame, for each laser lane, take the laser value under the crit line. If the lane has no active section, take the first point of any section starting within `kResolution4 / 2` = 480 pulses = 2 quarter notes. Then add `v` for the left lane or `-(1 - v)` for the right.
+KSM tilts a lane early toward the first point of a laser section that's still two beats away. The arcade doesn't, and `--simulate-tilt` avoids the problem entirely. From KSM v2's `HighwayTiltAuto.cpp`: each frame, for each laser lane, take the laser value under the crit line. If the lane has no active section, take the first point of any section starting within `kResolution4 / 2` = 480 pulses = 2 quarter notes. Then add `v` for the left lane or `-(1 - v)` for the right.
 
 * The size of the tilt depends on how far the first point is from the lane's home edge. A left laser opening at the left edge gives 0.0, the centre 0.5 and the right edge 1.0. The right lane mirrors this.
 * The trigger is per lane. An idle lane pretilts even while the other lane has a laser.
@@ -154,6 +183,7 @@ The shift comes from the game's row parser, which reads all ten columns before i
 
 1. A zero-length vox segment is an instant jump, like a slam. The zoom and tilt code kept one value per tick, so a neighbour on the same tick overwrote it and the peak became a shallow ramp. `_place_track` now puts distinct same-tick values one cell apart.
 2. Dedup kept only the first point of a same-value run, so a hold before a ramp collapsed into a long diagonal. Both the first and last point of each run now survive.
+3. Camera rows were split on single tabs, so a row with an empty field before C4 (two tabs) crashed the parser and the whole camera conversion. The game reads rows with `sscanf`, where any run of whitespace separates fields, so the empty field doesn't exist. Rows now split on whitespace. Only the two tutorial charts change: they used to crash.
 
 ## Status
 
@@ -163,11 +193,11 @@ Known gap: spin tokens sit on the roll point's exact tick, but `laser_curves.py`
 
 ## Open items
 
-1. The auto-tilt formula isn't modelled.
+1. The auto-tilt formula is modelled only behind `--simulate-tilt`, and nobody has played the result in KSM.
 2. The ksh scale for every spin type (24, 20.6 or 38.6) needs a test chart in KSM. The v13 length units have no reference coverage.
 3. Whether decimation can drop a roll point's grid line.
 4. DLL leads: the gameplay-event kinds in `FUN_180407200`; the producer of event kind 8 (to confirm the field order `[4]` BPM, `[5]` direction, `[6]` kind, `[7]` length); and the consumer of the v13-only `+0x34` field, which `FUN_1802409f0` uses to group laser points into runs, with track-dependent values 1 and 2 (`0x180240c15`). `FUN_1803b1180` also turns it into a 0.0/1.0/2.0 scale per laser point.
 5. Type-4 ramp: `72` is tested, not derived. A manual `tilt=` suppresses auto laser-tilt for the whole duration, and the linear ramp turns the lane during the settle, where the DLL's rotation is linear only for the first 3/4. Playing it would settle these.
-6. Pretilt while the other lane is busy needs the auto-tilt formula reproduced as manual floats.
-7. Tilt magnitude: -1.5 follows the charters. Deciding whether KSM's unit is 2/3 of SDVX's needs the DLL's tilt render path or playback.
+6. Pretilt while the other lane is busy: `--simulate-tilt` has no pretilt at all.
+7. Tilt magnitude: the DLL gives -2.375, which `--simulate-tilt` uses. The default keeps the charters' -1.5. Whether KSM v1.6x shares ksm-v2's 10 degrees per unit needs playback.
 8. Whether the v2 constants (two-beat window, 4.0 scale fade, 40 ms takeover) match v1.6x.

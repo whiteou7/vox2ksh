@@ -169,6 +169,7 @@ class CameraSeg:
     start: float
     end: float
     node_type: int
+    c2: int = 2
 
     @property
     def end_tick(self):
@@ -213,16 +214,25 @@ def parse_laser_track(sections, tl, tag, version):
 
 
 def parse_camera_segments(sections, tl, control_type):
+    """Rows of one control type from #SPCONTROLER and #LOCKED_SPCONTROLER, which the game reads alike. Fields split on any whitespace, as the game's sscanf does, so an empty field (two tabs) is skipped. BIL_RotZ values carry a `d` prefix (degrees)."""
     out = []
-    for line in sections.get("#SPCONTROLER", []):
-        fields = line.split("\t")
+    for line in sections.get("#SPCONTROLER", []) + sections.get("#LOCKED_SPCONTROLER", []):
+        fields = line.split()
         if len(fields) < 6 or fields[1] != control_type:
             continue
-        node_type = int(float(fields[6])) if len(fields) > 6 else 0
+        node_type = int(float(fields[6].lstrip("d"))) if len(fields) > 6 else 0
         out.append(CameraSeg(tl.tick_of_position(fields[0]), int(float(fields[3])),
-                             float(fields[4]), float(fields[5]), node_type))
+                             float(fields[4].lstrip("d")), float(fields[5].lstrip("d")), node_type, int(float(fields[2]))))
     out.sort(key=lambda s: s.tick)
     return out
+
+
+def parse_tilt_modes(sections, tl):
+    """(tick, mode) rows of #TILT MODE INFO, in time order."""
+    rows = [(tl.tick_of_position(fields[0]), int(fields[1]))
+            for fields in (line.split() for line in sections.get("#TILT MODE INFO", [])) if len(fields) >= 2]
+    rows.sort(key=lambda row: row[0])
+    return rows
 
 
 BT_TAGS = ["#TRACK3", "#TRACK4", "#TRACK5", "#TRACK6"]
@@ -250,11 +260,13 @@ class VoxChart:
 
     @cached_property
     def camera(self):
-        """Tilt, zoom-top and zoom-bottom segments. Parsed on first use, since only the camera converter reads them."""
+        """Tilt, zoom-top, zoom-bottom and BIL_RotZ segments, and the (tick, mode) rows of #TILT MODE INFO. Parsed on first use, since only the camera converter reads them."""
         return {
             "tilt": parse_camera_segments(self.sec, self.tl, "Tilt"),
             "cam_rotx": parse_camera_segments(self.sec, self.tl, "CAM_RotX"),
             "cam_radi": parse_camera_segments(self.sec, self.tl, "CAM_Radi"),
+            "bil_rotz": parse_camera_segments(self.sec, self.tl, "BIL_RotZ"),
+            "tilt_mode": parse_tilt_modes(self.sec, self.tl),
         }
 
     def _infer_end_tick(self):
@@ -280,4 +292,4 @@ if __name__ == "__main__":
     for i, lst in enumerate(c.laser):
         print("laser-%s: %d points" % ("LR"[i], len(lst)))
     for name, lst in c.camera.items():
-        print("%s: %d segments" % (name, len(lst)))
+        print("%s: %d rows" % (name, len(lst)))

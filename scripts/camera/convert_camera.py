@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Converts a chart with camera events on, through convert_notes.convert(..., camera=True).
 
-    python convert_camera.py <chart.vox> [-o out.ksh] [--pretilt-fix]
+    python convert_camera.py <chart.vox> [-o out.ksh] [--pretilt-fix] [--simulate-tilt]
 """
 import argparse
 import os
@@ -19,10 +19,15 @@ def main():
                     help="bracket laser sections KSM would tilt into early with "
                          "tilt=zero..tilt=normal, so the lane stays flat until the "
                          "laser actually arrives (see specs/camera.md)")
+    ap.add_argument("--simulate-tilt", action="store_true",
+                    help="replace tilt=normal and the manual passthrough with manual "
+                         "tilt=<float> points simulating SDVX NABLA's lane tilt for the "
+                         "whole chart, so KSM's auto tilt and pretilt never run "
+                         "(see specs/camera.md)")
     args = ap.parse_args()
     out = args.output or os.path.splitext(os.path.basename(args.vox))[0] + ".ksh"
     path = notes_convert.convert(args.vox, out, camera=True,
-                                 pretilt_fix=args.pretilt_fix)
+                                 pretilt_fix=args.pretilt_fix, simulate_tilt=args.simulate_tilt)
     print("wrote %s" % path)
 
 
