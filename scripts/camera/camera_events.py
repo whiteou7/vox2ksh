@@ -297,9 +297,9 @@ def _rotz_degrees(chart, ms):
     return at, jumps
 
 
-def _swing_door(samples, tolerance):
-    """Few points whose linear interpolation stays within tolerance of every (x, y) sample."""
-    ax, ay = samples[0]
+def _swing_door(samples, tolerance, start=None):
+    """Few points whose linear interpolation stays within tolerance of every (x, y) sample, starting from `start` (at the first sample's x) if given."""
+    ax, ay = start or samples[0]
     out = [(ax, ay)]
     lo, hi = -math.inf, math.inf
     px = ax
@@ -355,21 +355,38 @@ def simulated_tilt_points(chart):
     ticks = []
     while not ticks or (ms(ticks[-1]) < end_ms and ticks[-1] < chart.end_tick):
         ticks.append(len(ticks) * step)
-    # A BIL_RotZ jump splits the samples, so it becomes two tilt lines on one tick.
-    runs, samples = [], []
-    for tick in sorted(set(ticks) | {t for t in jumps if t <= ticks[-1]}):
+    tempo_ticks = {tick for (tick, bpm), (_tick, previous) in zip(tl.bpm_pts[1:], tl.bpm_pts) if bpm != previous}
+    # A BIL_RotZ jump splits the samples, so it becomes two tilt lines on one tick. A BPM change
+    # ends a segment without a jump: USC interpolates in time and KSM in ticks, so they agree only within one tempo.
+    runs, samples, joined = [], [], False
+    for tick in sorted(set(ticks) | {t for t in jumps | tempo_ticks if t <= ticks[-1]}):
         t = ms(tick)
         k = max(0, min(int(t), end_ms - 1))
         o = roll[k] + (roll[min(k + 1, end_ms)] - roll[k]) * min(1.0, t - k)
-        if tick in jumps and samples:
+        value = (o + rotz(t)) / KSH_TILT_DEGREES
+        if samples and tick in jumps:
             samples.append((tick, (o + rotz(t, before=True)) / KSH_TILT_DEGREES))
-            runs.append(samples)
-            samples = []
-        samples.append((tick, (o + rotz(t)) / KSH_TILT_DEGREES))
-    runs.append(samples)
-    points = [p for run in runs for p in _swing_door(run, SIM_TOLERANCE)]
+            runs.append((samples, joined))
+            samples, joined = [], False
+        elif samples and tick in tempo_ticks:
+            samples.append((tick, value))
+            runs.append((samples, joined))
+            samples, joined = [], True
+        samples.append((tick, value))
+    runs.append((samples, joined))
+    points = []
+    for run, joined in runs:
+        if joined:
+            points += _swing_door(run, SIM_TOLERANCE, start=points[-1])[1:]
+        else:
+            points += _swing_door(run, SIM_TOLERANCE)
     points = _add_spin_ramps(points, _triple_spin_ramps(chart))
-    return _collapse_equal_runs([(tick, format_tilt(v)) for (tick, v) in points])
+    out = _collapse_equal_runs([(tick, format_tilt(v)) for (tick, v) in points])
+    # USC applies manual tilt directly only if the first point after the switch to manual is an immediate change.
+    # 0.001 is a hundredth of a degree.
+    if len(out) > 1 and (len(out) < 3 or out[2][0] != out[1][0]):
+        out.insert(2, (out[1][0], format_tilt(float(out[1][1]) + 0.001)))
+    return out
 
 
 def compute_tilt_events(chart, pretilt_fix=False, simulate=False):

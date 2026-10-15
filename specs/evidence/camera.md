@@ -60,18 +60,31 @@ Corpus (8251 charts): `#TILT MODE INFO` has more than one row in 444 charts, mod
 
 | chart | checks | tilt points | lines, default to simulated |
 |---|---|---|---|
-| `0418_werewolf_howls_camellia_4i` | manual series: vox -0.5 gives 1.188; the 12-cell ramp to -0.75 is rate-limited to 1.761 (target 1.781) | 515 | 10619 to 16705 |
-| `0036_mei_164_4i` | mode 1 from tick 2640: a half-deflected laser settles at 1.19 (2.375 * 0.5) | 277 | 3350 to 11186 |
-| `0024_nishinippori_manbo_4i` | mode 2 at 5184: locks downward, ratchets to -2.363 and holds to the mode-0 row at 5784, then returns at 9 units/s (32 cells at 140 BPM) | 212 | 5424 to 8035 |
-| `0271_vallis_djyoshitaka_4i` | `BIL_RotZ`: two eased full turns to -360, each in two halves; the -360 to 0 jump at 16320 is written `-35` then `1` on one tick | 340 | 10839 to 14189 |
-| `2216_tetoris_hiiragimagnetite_5m` | type 4: `0`, `-72`, `0` at the ramp ends, as before without `normal` | 455 | 14207 to 16398 |
-| `1751_april2021_grace_5m` | `BIL_RotZ` 0 to 360 in quarter turns (ksh 0 to 36); the type-4 ramp ends on the reset tick as `-36` then `0` | 233 | 5692 to 7196 |
+| `0418_werewolf_howls_camellia_4i` | manual series: vox -0.5 gives 1.188; the 12-cell ramp to -0.75 is rate-limited to 1.761 (target 1.781) | 516 | 10619 to 16706 |
+| `0036_mei_164_4i` | mode 1 from tick 2640: a half-deflected laser settles at 1.19 (2.375 * 0.5) | 278 | 3350 to 11187 |
+| `0024_nishinippori_manbo_4i` | mode 2 at 5184: locks downward, ratchets to -2.363 and holds to the mode-0 row at 5784, then returns at 9 units/s (32 cells at 140 BPM) | 213 | 5424 to 8036 |
+| `0271_vallis_djyoshitaka_4i` | `BIL_RotZ`: two eased full turns to -360, each in two halves; the -360 to 0 jump at 16320 is written `-35` then `1` on one tick | 341 | 10839 to 14190 |
+| `2216_tetoris_hiiragimagnetite_5m` | type 4: `0`, `-72`, `0` at the ramp ends, as before without `normal` | 456 | 14207 to 16399 |
+| `1751_april2021_grace_5m` | `BIL_RotZ` 0 to 360 in quarter turns (ksh 0 to 36); the type-4 ramp ends on the reset tick as `-36` then `0` | 234 | 5692 to 7197 |
 
 `tetoris` shrinks from 153 to 105 measures: a `Tilt` row overruns `#END POSITION` (tick 19776) to 29072, and the default output follows it.
 
 Over 500 random charts the simulation never fails: median 150 points (max 741), median 0.10 s (max 0.27 s). One chart exceeds ksh 2.4, through its type-4 ramp.
 
 `scripts/camera/check_tilt_sim.py` checks the swing-door tolerance, the series builder, and steady states in modes 0 and 1.
+
+## Manual tilt in USC
+
+Read from `Drewol/unnamed-sdvx-clone` (`develop`, pushed 2026-10-10) and compared with ksm-v2 (`kshootmania/ksm-v2`).
+
+* Parsing (`Beatmap/src/BeatmapFromKSH.cpp`): a `tilt=` value that isn't `normal`, `bigger`, `biggest`, `zero` or a `keep_` form becomes a `TrackRollBehaviour::Manual` event plus a `ROTATION_Z` graph point of `atof(value) * -(10.0 / 360.0)` turns. Switching back to a named tilt extends the graph to that tick first.
+* Scale and sign: `MAX_ROLL_ANGLE = 10 / 360.f` (`Camera.hpp`). Auto roll targets `GetLaserPosition`, which is `-pos` for the left laser and `1 - pos` for the right (`Scoring.cpp`), clamped to ±1 and times `MAX_ROLL_ANGLE`. So a left laser on the right edge and a manual `tilt=1` both give -10/360 of a turn. ksm-v2 sets `m_radians = kTiltRadians * value` (`HighwayTiltManual.cpp`).
+* Same tick: `LineGraph::Insert` on an existing time overwrites only the after-value, so two lines are (before, after) and a third overwrites the after-value again. After the last point the value holds.
+* Interpolation: `LineGraph::ValueAt(mapTime)` lerps in milliseconds. ksm-v2 calls `kson::ManualTiltValueAt(tilt, currentPulse)` on a `ByPulse` graph, so in pulses.
+* Application (`Camera::Tick`): while manual, the lane lerps toward the graph value at `MAX_ROLL_ANGLE * 4 * 2.5` turns/s (100 degrees/s), multiplied by `1 + delta / 2.5` where `delta` is the gap beyond 10 degrees. That's an exponential catch-up at 40/s, so a 360-degree gap closes in about 0.22 s and 720 degrees in about 0.24 s. `m_actualRoll` takes the value directly only when `Beatmap::CheckIfManualTiltInstant` holds: the first `ROTATION_Z` point strictly after the last roll-behaviour change is an immediate change (`IsSlam`) and has been reached. Since repeated float lines don't count as a change, this stays true for the rest of the manual stretch. ksm-v2 applies the value directly, with a 40 ms blend (`m_lerpRate`) only when it switches between auto and manual.
+* Look-ahead: `Scoring::GetLaserRollOutput` falls back to the first point of the lane's next laser within `beatDuration * 2`, the same two-beat pretilt as KSM.
+
+On the same 500 random charts, 55 with BPM changes, the simulated output before the USC changes had 175 sloped segments spanning a tempo change (worst gap between time and tick interpolation at the change: 0.01, a tenth of a degree) and no chart started with an immediate change. After: no sloped segment spans a tempo change, and all 500 have the immediate change on their first point after tick 0. The test charts above gain exactly that one point each.
 
 ## Pretilt: what the reference charters do
 

@@ -13,7 +13,8 @@ import camera_events as ce  # noqa: E402
 import vox_parser  # noqa: E402
 
 # 120 BPM, so a measure is 2 s. A left laser rests on the right edge in measures 1 to 4,
-# and a single manual Tilt of -0.5 holds through measures 6 and 7.
+# and a single manual Tilt of -0.5 holds through measures 6 and 7. The tempo changes to 180
+# at tick 816, while the tilt is still relaxing from the laser.
 CHART = """#FORMAT VERSION
 12
 #END
@@ -22,6 +23,7 @@ CHART = """#FORMAT VERSION
 #END
 #BPM INFO
 001,01,00\t120.00\t4
+005,02,00\t180.00\t4
 #END
 #TILT MODE INFO
 001,01,00\t%d
@@ -39,13 +41,16 @@ CHART = """#FORMAT VERSION
 """
 
 
-def tilt_at(mode, measure):
+def tilt_points(mode):
     with tempfile.TemporaryDirectory() as folder:
         path = os.path.join(folder, "check.vox")
         with open(path, "w", encoding="cp932") as f:
             f.write(CHART % mode)
-        points = [(t, float(v)) for (t, v) in ce.compute_tilt_events(vox_parser.load(path), simulate=True)]
-    return ce._interpolate(points, (measure - 1) * 192)
+        return [(t, float(v)) for (t, v) in ce.compute_tilt_events(vox_parser.load(path), simulate=True)]
+
+
+def tilt_at(mode, measure):
+    return ce._interpolate(tilt_points(mode), (measure - 1) * 192)
 
 
 def main():
@@ -64,6 +69,11 @@ def main():
     # Mode 0: a full-right left laser is 10 degrees (ksh 1.0), manual -0.5 is -0.5 * -2.375. Mode 1 scales the laser by 2.375 and leaves manual alone.
     assert abs(tilt_at(0, 3) - 1.0) < 0.01 and abs(tilt_at(0, 7) - 1.1875) < 0.01
     assert abs(tilt_at(1, 3) - 2.375) < 0.01 and abs(tilt_at(1, 7) - 1.1875) < 0.01
+
+    # USC applies manual tilt directly only after an immediate change, and interpolates in time, so a BPM change needs a point.
+    points = tilt_points(0)
+    assert points[0][0] == 0 and points[1][0] == points[2][0] > 0 and points[1][1] != points[2][1]
+    assert 816 in [t for t, _v in points]
     print("ok")
 
 

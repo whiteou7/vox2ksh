@@ -46,7 +46,7 @@ The model, in real time (the game's rates are wall-clock):
 5. `BIL_RotZ` adds on top, unsmoothed, in degrees (the `d` prefix). Each row is a linear graph from C4, or from the current value when C2 isn't 2, to C5 over its span, held until the next row. The game reads these rows from `#LOCKED_SPCONTROLER` as well as `#SPCONTROLER`.
 6. ksh `tilt = (o + BIL_RotZ) / 10`, rounded to 3 decimals: a KSM manual tilt of 1.0 is 10 degrees, with the same sign as KSM's auto-tilt (ksm-v2 `HighwayTiltManual`, `kTiltRadians`).
 
-The model runs in 1 ms steps, is sampled on a 48-per-beat tick grid through the tempo map, and is reduced to the points of a piecewise-linear graph that stays within `SIM_TOLERANCE = 0.005` of every sample. The rate limits already make the motion piecewise linear, so a chart needs only a few hundred points. A `BIL_RotZ` jump becomes two `tilt=` lines on one tick, ksh's immediate change. Points stop once the tilt has settled after the last event, and never run past `#END POSITION`.
+The model runs in 1 ms steps, is sampled on a 48-per-beat tick grid through the tempo map, and is reduced to the points of a piecewise-linear graph that stays within `SIM_TOLERANCE = 0.005` of every sample. The rate limits already make the motion piecewise linear, so a chart needs only a few hundred points. A `BIL_RotZ` jump becomes two `tilt=` lines on one tick, ksh's immediate change. Every BPM change gets a point, and the first point after tick 0 carries an immediate change of 0.001, a hundredth of a degree; both are for USC (next section). Points stop once the tilt has settled after the last event, and never run past `#END POSITION`.
 
 Spin and swing tokens are unchanged. A type-4 ramp (0 to ±72 over `D`) is added on top of the simulated tilt and drops back to it on the ramp's last tick, a 720-degree jump that doesn't show.
 
@@ -60,6 +60,13 @@ Unproven:
 * `BIL_RotZ` turns reach ksh tilt ±36, which relies on manual tilt being unclamped. The type-4 ramp relies on the same thing.
 * The ksh gets denser: a measure holding tilt points often needs the full 192-line grid.
 * Nobody has played the output in KSM.
+
+### In USC
+
+USC reads a float `tilt=` the same way as KSM in scale and sign: one unit is 10 degrees, the same as a full auto tilt at normal intensity. Two lines on one tick are an immediate change, and the last value holds. It differs in two ways, and the simulated output allows for both:
+
+* It interpolates between points in time, where KSM uses ticks, so a segment that spans a BPM change bends differently in the two engines. A point at every BPM change keeps each segment within one tempo, where the two agree.
+* It applies manual tilt directly only if the first point after the switch to manual is an immediate change. Otherwise the lane chases the value at 100 degrees/s, speeding up once it's more than 10 degrees behind, which would lag fast `BIL_RotZ` turns and play the 360- and 720-degree drops (the `BIL_RotZ` reset, the type-4 ramp end) as a reverse spin of about 0.2 s. The 0.001 immediate change on the first point after tick 0 turns direct application on for the whole chart.
 
 ## Pretilt
 
@@ -86,7 +93,7 @@ Unproven:
 
 * The source is KSM v2, but the charters used v1.6x. Tilt relaxation and keep semantics changed across 1.20, 1.20b and 1.21.
 * "Cancel KSM pretilt" and "reproduce an untilted SDVX passage" are the same edit.
-* USC computes roll reactively with no look-ahead, so the brackets just read as untilted there.
+* USC looks two beats ahead for an idle lane too, so it pretilts like KSM and the brackets apply there as well.
 * Nobody has played the brackets in KSM.
 
 ## Spin
