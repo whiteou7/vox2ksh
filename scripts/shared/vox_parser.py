@@ -3,6 +3,7 @@
 """
 
 import bisect
+import math
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -35,10 +36,11 @@ def parse_position(position):
 
 
 class Timeline:
-    """Maps measure,beat,cell positions to absolute ticks and ticks to seconds. Measures are 0-based."""
+    """Maps measure,beat,cell positions to absolute ticks and ticks to seconds. Measures are 0-based. With `cell_div` > 1, `res` is a coarser grid than the file's and each cell is rounded onto it."""
 
-    def __init__(self, sections, res=DEFAULT_BEAT_RESOLUTION):
+    def __init__(self, sections, res=DEFAULT_BEAT_RESOLUTION, cell_div=1):
         self.res = res
+        self.cell_div = cell_div
 
         self.beats = sorted(
             (parse_position(fields[0])[0], int(fields[1]), int(fields[2]))
@@ -82,10 +84,19 @@ class Timeline:
         return 0 <= measure0 < TABLE_MEASURES
 
     def tick_at(self, measure0, beat0, cell):
+        cell = (cell + self.cell_div // 2) // self.cell_div
         return self.measure_start_tick(measure0) + beat0 * self.cells_per_beat(measure0) + cell
 
     def tick_of_position(self, position):
         return self.tick_at(*parse_position(position))
+
+    def tick_and_length(self, position, length):
+        """Start tick and length of an event `length` file cells long. Both ends are rounded, and a hold never shrinks to a chip."""
+        measure0, beat0, cell = parse_position(position)
+        start = self.tick_at(measure0, beat0, cell)
+        if length <= 0 or self.cell_div == 1:
+            return start, length
+        return start, max(1, self.tick_at(measure0, beat0, cell + length) - start)
 
     def measure_start_tick(self, measure0):
         if self._in_measure_table(measure0):
@@ -184,7 +195,7 @@ def parse_button_track(sections, tl, tag):
             continue
         c2 = int(fields[2]) if len(fields) > 2 else 0
         c3 = int(fields[3]) if len(fields) > 3 else None
-        out.append(ChipHold(tl.tick_of_position(fields[0]), int(fields[1]), c2, c3))
+        out.append(ChipHold(*tl.tick_and_length(fields[0], int(fields[1])), c2, c3))
     out.sort(key=lambda n: n.tick)
     return out
 
@@ -221,7 +232,7 @@ def parse_camera_segments(sections, tl, control_type):
         if len(fields) < 6 or fields[1] != control_type:
             continue
         node_type = int(float(fields[6].lstrip("d"))) if len(fields) > 6 else 0
-        out.append(CameraSeg(tl.tick_of_position(fields[0]), int(float(fields[3])),
+        out.append(CameraSeg(*tl.tick_and_length(fields[0], int(float(fields[3]))),
                              float(fields[4].lstrip("d")), float(fields[5].lstrip("d")), node_type, int(float(fields[2]))))
     out.sort(key=lambda s: s.tick)
     return out
@@ -241,15 +252,19 @@ LASER_TAGS = ["#TRACK1", "#TRACK8"]
 
 
 class VoxChart:
-    """One parsed chart. `sec` keeps the raw sections for the tags this parser does not interpret."""
+    """One parsed chart. `sec` keeps the raw sections for the tags this parser does not interpret. `res_unit` puts the ticks on gcd(file resolution, res_unit) per beat instead of the file's own resolution."""
 
-    def __init__(self, path):
+    def __init__(self, path, res_unit=None):
         self.path = path
         self.sec = read_sections(path)
         self.version = int((self.sec.get("#FORMAT VERSION") or ["10"])[0].strip())
         res_lines = self.sec.get("#BEAT RESOLUTION")
         self.res = int(res_lines[0].strip()) if res_lines else DEFAULT_BEAT_RESOLUTION
-        self.tl = Timeline(self.sec, self.res)
+        cell_div = 1
+        if res_unit:
+            coarse = math.gcd(self.res, res_unit)
+            cell_div, self.res = self.res // coarse, coarse
+        self.tl = Timeline(self.sec, self.res, cell_div)
 
         self.bt = [parse_button_track(self.sec, self.tl, t) for t in BT_TAGS]
         self.fx = [parse_button_track(self.sec, self.tl, t) for t in FX_TAGS]
@@ -275,8 +290,8 @@ class VoxChart:
         return max(holds + points, default=0)
 
 
-def load(path):
-    return VoxChart(path)
+def load(path, res_unit=None):
+    return VoxChart(path, res_unit)
 
 
 if __name__ == "__main__":
