@@ -31,7 +31,7 @@ C0=timing  C1=control-type  C2=2 (rarely 1 or 3)  C3=length(cells)  C4=start  C5
 
 By default `compute_tilt_events` emits `tilt=normal` as the baseline and passes manual `Tilt` segments through as floats at each segment's start and end. ksh's own auto-tilt stands in for the arcade's; `--simulate-tilt` (next section) replaces all of this.
 
-The two formats measure tilt in opposite directions: vox `+1.0` is ksh `-1`. The default magnitude is `TILT_VOX_TO_KSH = -1.5` in `camera_events.py`, which follows the reference charters. The game's own factor is -2.375: a vox unit is 23.75 degrees and a KSM manual unit is 10 degrees, so the charters understate manual tilt by about a third. The default keeps -1.5.
+The two formats measure tilt in opposite directions: vox `+1.0` is ksh `-1`. The magnitude is the game's own factor, `TILT_VOX_TO_KSH = -2.375` in `camera_events.py`: a vox unit is 23.75 degrees and a KSM manual unit is 10 degrees. Both modes use it. The reference charters mostly used -1.5, which understates manual tilt by about a third.
 
 ## Simulated tilt
 
@@ -50,7 +50,7 @@ The model runs in 1 ms steps, is sampled on a 48-per-beat tick grid through the 
 
 Spin and swing tokens are unchanged. A type-4 ramp (0 to ±72 over `D`) is added on top of the simulated tilt and drops back to it on the ramp's last tick, a 720-degree jump that doesn't show.
 
-The default output is unchanged byte for byte.
+Without the option, the output doesn't depend on any of this.
 
 Unproven:
 
@@ -206,5 +206,5 @@ Known gap: spin tokens sit on the roll point's exact tick, but `laser_curves.py`
 4. DLL leads: the gameplay-event kinds in `FUN_180407200`; the producer of event kind 8 (to confirm the field order `[4]` BPM, `[5]` direction, `[6]` kind, `[7]` length); and the consumer of the v13-only `+0x34` field, which `FUN_1802409f0` uses to group laser points into runs, with track-dependent values 1 and 2 (`0x180240c15`). `FUN_1803b1180` also turns it into a 0.0/1.0/2.0 scale per laser point.
 5. Type-4 ramp: `72` is tested, not derived. A manual `tilt=` suppresses auto laser-tilt for the whole duration, and the linear ramp turns the lane during the settle, where the DLL's rotation is linear only for the first 3/4. Playing it would settle these.
 6. Pretilt while the other lane is busy: `--simulate-tilt` has no pretilt at all.
-7. Tilt magnitude: the DLL gives -2.375, which `--simulate-tilt` uses. The default keeps the charters' -1.5. Whether KSM v1.6x shares ksm-v2's 10 degrees per unit needs playback.
+7. Tilt magnitude: -2.375 comes from the DLL and ksm-v2's 10 degrees per unit. Whether KSM v1.6x shares that unit needs playback.
 8. Whether the v2 constants (two-beat window, 4.0 scale fade, 40 ms takeover) match v1.6x.

@@ -14,7 +14,8 @@ def format_tilt(v):
     return s
 
 
-TILT_VOX_TO_KSH = -1.5
+# The game's manual factor (Game::AngleUpdater): a vox unit is 23.75 degrees, a ksh unit 10.
+TILT_VOX_TO_KSH = -2.375
 
 
 _NO_VALUE = object()
@@ -150,7 +151,6 @@ TILT_EPS = 1.0 / 127
 LASER_TILT_RATE = 0.00375
 RELAX_TILT_RATE = 0.0009375
 MANUAL_RATE_SCALE = 2.0
-MANUAL_TILT_SCALE = -2.375
 TILT_MODE_GAIN = 2.375
 TILT_MODE_RATE = 0.09
 KSH_TILT_DEGREES = 10.0
@@ -243,7 +243,7 @@ def _simulate_lane_roll(chart, ms):
         if manual is None:
             target, rate_scale = laser_target[k], 1.0
         else:
-            target, rate_scale = manual * (MANUAL_TILT_SCALE if mode == 0 else -1.0), MANUAL_RATE_SCALE
+            target, rate_scale = manual * (TILT_VOX_TO_KSH if mode == 0 else -1.0), MANUAL_RATE_SCALE
         previous_s, previous_o = s, o
         if abs(target) >= TILT_EPS:
             step = LASER_TILT_RATE * rate_scale

@@ -24,6 +24,8 @@ Of 4252 non-trivial matched samples, 98.9% have opposite signs in vox and ksh. P
 
 Per-song modal `ksh/vox` ratios: -1.5 (56 songs), -2.0 (16), -2.4 to -2.5 (9), beyond (3), -1.0 (1), about 0 (4). `#TILT MODE INFO` is ruled out as the cause.
 
+The default factor followed those charters at -1.5 until it moved to the DLL's -2.375. On the 529-chart sample, the 50 charts with nonzero manual `Tilt` change only in their `tilt=` values, with the same lines and grid. The 9 whose `Tilt` rows are all zero, and every notes-only output, stay byte-identical.
+
 ## Simulated tilt: the DLL
 
 Addresses are for the NABLA `soundvoltex.dll` (sha256 `b19193198fab56f1...`, Ghidra project `C:\rev\proj_nabla`). They don't carry over to the build `game_paths.py` points at, which the spin addresses below come from.
@@ -190,7 +192,7 @@ roll_type=6  2268_littleprana_amamihinami_5m.vox      v13  side=L  pos=020,01,00
 
 ## Smoke tests
 
-`convert_camera.py` produces notes plus camera. Tested on `1734_777_roughsketch_3e` (+2.2% lines), a manual-`Tilt` chart (`0418_werewolf_howls_camellia_4i`, vox `-0.500` gives `tilt=0.5`), type 7 (`0642_sayonara_planet_wars_kuroma_4i`), type 4 (`2216_tetoris_hiiragimagnetite_5m`, `2392_dementafterlegend_cosmograph_5m`) and `2226_gryphone_etia_5m`. With `camera=False` (the default) the output is unchanged, as `notes-refcheck` confirms byte for byte.
+`convert_camera.py` produces notes plus camera. Tested on `1734_777_roughsketch_3e` (+2.2% lines), a manual-`Tilt` chart (`0418_werewolf_howls_camellia_4i`, vox `-0.500` gives `tilt=1.188`), type 7 (`0642_sayonara_planet_wars_kuroma_4i`), type 4 (`2216_tetoris_hiiragimagnetite_5m`, `2392_dementafterlegend_cosmograph_5m`) and `2226_gryphone_etia_5m`. With `camera=False` (the default) the output is unchanged, as `notes-refcheck` confirms byte for byte.
 
 After the simulated-tilt change, 529 charts (500 random plus the test charts) convert byte-identically to the previous code with notes only, with camera, and with camera plus `pretilt_fix`. `notes-refcheck` gives identical CSVs over 649 matched charts.
 
