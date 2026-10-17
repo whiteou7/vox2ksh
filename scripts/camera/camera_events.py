@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Tilt, zoom and spin conversion (specs/camera.md): compute_tilt_events, compute_zoom_events and compute_spin_tokens. Pure functions over a loaded VoxChart, no file I/O.
 """
+import bisect
+import math
 import sys
 
 
@@ -12,7 +14,8 @@ def format_tilt(v):
     return s
 
 
-TILT_VOX_TO_KSH = -1.5
+# The game's manual factor (Game::AngleUpdater): a vox unit is 23.75 degrees, a ksh unit 10.
+TILT_VOX_TO_KSH = -2.375
 
 
 _NO_VALUE = object()
@@ -112,8 +115,9 @@ def _pretilt_brackets(chart):
     return merged
 
 
-def _triple_spin_tilt_points(chart):
-    ramp, restore, spans = [], [], []
+def _triple_spin_ramps(chart):
+    """(start tick, end tick, magnitude) of each roll_type 4 tilt ramp."""
+    out = []
     seen = set()
     for points in chart.laser:
         for index, point in enumerate(points):
@@ -127,15 +131,267 @@ def _triple_spin_tilt_points(chart):
             if span <= 0:
                 continue
             magnitude = TRIPLE_TILT_MAGNITUDE if direction < 0 else -TRIPLE_TILT_MAGNITUDE
-            ramp.append((point.tick, "0"))
-            ramp.append((point.tick + span, "%d" % magnitude))
-            restore.append((point.tick + span, "0"))
-            restore.append((point.tick + span + 1, "normal"))
-            spans.append((point.tick, point.tick + span))
+            out.append((point.tick, point.tick + span, magnitude))
+    return out
+
+
+def _triple_spin_tilt_points(chart):
+    ramp, restore, spans = [], [], []
+    for (start, end, magnitude) in _triple_spin_ramps(chart):
+        ramp.append((start, "0"))
+        ramp.append((end, "%d" % magnitude))
+        restore.append((end, "0"))
+        restore.append((end + 1, "normal"))
+        spans.append((start, end))
     return ramp, restore, spans
 
 
-def compute_tilt_events(chart, pretilt_fix=False):
+# NABLA Game::AngleUpdater (specs/camera.md, "Simulated tilt"). Rates are per millisecond of real time.
+TILT_EPS = 1.0 / 127
+LASER_TILT_RATE = 0.00375
+RELAX_TILT_RATE = 0.0009375
+MANUAL_RATE_SCALE = 2.0
+TILT_MODE_GAIN = 2.375
+TILT_MODE_RATE = 0.09
+KSH_TILT_DEGREES = 10.0
+SIM_TOLERANCE = 0.005
+SIM_SETTLE_MS = 10000
+
+
+def _laser_sections(points):
+    sections, current = [], None
+    for point in points:
+        if point.node_type == 1 or current is None:
+            current = []
+            sections.append(current)
+        current.append(point)
+        if point.node_type == 2:
+            current = None
+    return sections
+
+
+def _manual_tilt_series(segs):
+    """Point lists of the manual Tilt series, built as the game's series builder does."""
+    def value(v):
+        return 0.0 if abs(v) <= 0.01 else v
+
+    out, index = [], 0
+    while index < len(segs):
+        seg = segs[index]
+        index += 1
+        if seg.node_type == 1:
+            out.append([(seg.tick, value(seg.start)), (seg.end_tick, value(seg.end))])
+        elif seg.node_type in (0, 2):
+            series = [(seg.tick, value(seg.start))]
+            while seg.node_type != 3 and index < len(segs):
+                seg = segs[index]
+                index += 1
+                series.append((seg.tick, value(seg.start)))
+            if seg.node_type == 3:
+                series.append((seg.end_tick, value(seg.end)))
+            out.append(series)
+    return [series for series in out if len(series) >= 2]
+
+
+def _linear_samples(times, values, stop):
+    """(ms, value) of a piecewise-linear graph at each whole millisecond in [times[0], min(times[-1], stop))."""
+    j, last = 0, len(times) - 1
+    for k in range(math.ceil(times[0]), math.ceil(min(times[-1], stop))):
+        while j + 1 < last and times[j + 1] <= k:
+            j += 1
+        t0, t1 = times[j], times[j + 1]
+        yield k, (values[j + 1] if t1 <= t0 else values[j] + (values[j + 1] - values[j]) * (k - t0) / (t1 - t0))
+
+
+def _simulate_lane_roll(chart, ms):
+    """Filtered lane tilt in degrees at each millisecond, until it stops moving after the last event."""
+    lasers = []
+    for lane, points in enumerate(chart.laser):
+        for section in _laser_sections(points):
+            lasers.append(([ms(p.tick) for p in section], [p.pos if lane == 0 else p.pos - 1.0 for p in section]))
+    series = [([ms(tick) for tick, _v in s], [v for _t, v in s]) for s in _manual_tilt_series(chart.camera["tilt"])]
+    modes = [(ms(tick), mode) for tick, mode in chart.camera["tilt_mode"]]
+    last_event = max([0.0] + [times[-1] for times, _v in lasers + series] + [t for t, _m in modes])
+    count = int(last_event) + SIM_SETTLE_MS
+
+    laser_target = [0.0] * count
+    for times, values in lasers:
+        for k, v in _linear_samples(times, values, count):
+            laser_target[k] += v
+    manual_target = [None] * count
+    for i, (times, values) in enumerate(series):
+        # A later series replaces the running one.
+        stop = series[i + 1][0][0] if i + 1 < len(series) else count
+        for k, v in _linear_samples(times, values, stop):
+            manual_target[k] = v
+
+    out = []
+    s = o = 0.0
+    mode, state, lock = 0, "pass", 0
+    mode_index = 0
+    for k in range(count):
+        while mode_index < len(modes) and modes[mode_index][0] <= k:
+            new_mode = modes[mode_index][1]
+            mode_index += 1
+            if new_mode == 0:
+                if mode != 0:
+                    state = "return"
+            elif new_mode in (1, 2):
+                mode, state, lock = new_mode, "follow" if new_mode == 1 else "ratchet", 0
+
+        manual = manual_target[k]
+        if manual is None:
+            target, rate_scale = laser_target[k], 1.0
+        else:
+            target, rate_scale = manual * (TILT_VOX_TO_KSH if mode == 0 else -1.0), MANUAL_RATE_SCALE
+        previous_s, previous_o = s, o
+        if abs(target) >= TILT_EPS:
+            step = LASER_TILT_RATE * rate_scale
+            s = min(s + step, target) if target > s else max(s - step, target)
+        elif abs(s) >= TILT_EPS:
+            step = min(RELAX_TILT_RATE * rate_scale, abs(s) / 15.0 + TILT_EPS)
+            s += -step if target < s else step
+        else:
+            s = 0.0
+
+        d = KSH_TILT_DEGREES * s
+        if state == "pass":
+            o = d
+        elif state == "return":
+            o = min(o + TILT_MODE_RATE, d) if d > o else max(o - TILT_MODE_RATE, d)
+            if abs(o - d) < TILT_EPS:
+                mode, state = 0, "pass"
+        else:
+            goal = TILT_MODE_GAIN * d
+            if state == "ratchet" and lock == 0:
+                lock = 1 if d > TILT_EPS else -1 if d < -TILT_EPS else 0
+            if state == "follow":
+                o = min(o + TILT_MODE_RATE, goal) if goal > o else max(o - TILT_MODE_RATE, goal)
+            elif lock > 0:
+                o = max(o, min(o + TILT_MODE_RATE, goal))
+            elif lock < 0:
+                o = min(o, max(o - TILT_MODE_RATE, goal))
+        out.append(o)
+        if k > last_event and s == previous_s and o == previous_o:
+            break
+    return out
+
+
+def _rotz_degrees(chart, ms):
+    """BIL_RotZ as a function of milliseconds (each row is a linear graph, held after its end, until the next row), and the ticks where it jumps. at(t, before=True) is the value just before t."""
+    graphs, jumps = [], set()
+
+    def at(t, before=False):
+        i = (bisect.bisect_left if before else bisect.bisect_right)(graphs, t, key=lambda g: g[0]) - 1
+        if i < 0:
+            return 0.0
+        t0, t1, v0, v1 = graphs[i]
+        return v1 if t >= t1 else v0 + (v1 - v0) * (t - t0) / (t1 - t0)
+
+    for seg in chart.camera["bil_rotz"]:
+        t0 = ms(seg.tick)
+        graphs.append((t0, ms(seg.end_tick), seg.start if seg.c2 == 2 else at(t0), seg.end))
+    for seg in chart.camera["bil_rotz"]:
+        if at(ms(seg.tick)) != at(ms(seg.tick), before=True):
+            jumps.add(seg.tick)
+    return at, jumps
+
+
+def _swing_door(samples, tolerance, start=None):
+    """Few points whose linear interpolation stays within tolerance of every (x, y) sample, starting from `start` (at the first sample's x) if given."""
+    ax, ay = start or samples[0]
+    out = [(ax, ay)]
+    lo, hi = -math.inf, math.inf
+    px = ax
+    for x, y in samples[1:]:
+        dx = x - ax
+        new_lo, new_hi = max(lo, (y - tolerance - ay) / dx), min(hi, (y + tolerance - ay) / dx)
+        if new_lo > new_hi:
+            ay += (lo + hi) / 2.0 * (px - ax)
+            ax = px
+            out.append((ax, ay))
+            dx = x - ax
+            new_lo, new_hi = (y - tolerance - ay) / dx, (y + tolerance - ay) / dx
+        lo, hi = new_lo, new_hi
+        px = x
+    if px != ax:
+        out.append((px, ay + (lo + hi) / 2.0 * (px - ax)))
+    return out
+
+
+def _interpolate(points, tick):
+    i = bisect.bisect_right(points, tick, key=lambda p: p[0]) - 1
+    if i < 0:
+        return points[0][1]
+    if i + 1 >= len(points):
+        return points[-1][1]
+    (t0, v0), (t1, v1) = points[i], points[i + 1]
+    return v0 + (v1 - v0) * (tick - t0) / (t1 - t0)
+
+
+def _add_spin_ramps(points, ramps):
+    """Lays each roll_type 4 ramp on top of the simulated tilt, then drops back to it on the ramp's last tick."""
+    for (start, end, magnitude) in ramps:
+        # A tick can already hold two points (a BIL_RotZ jump): the ramp ends on the first and drops to the last.
+        at_start = [p for p in points if p[0] == start] or [(start, _interpolate(points, start))]
+        at_end = [p for p in points if p[0] == end] or [(end, _interpolate(points, end))]
+        inside = [(t, v + magnitude * (t - start) / (end - start)) for (t, v) in points if start < t < end]
+        points = ([p for p in points if p[0] < start] + at_start + inside
+                  + [(end, at_end[0][1] + magnitude), (end, at_end[-1][1])] + [p for p in points if p[0] > end])
+    return points
+
+
+def simulated_tilt_points(chart):
+    """(tick, ksh tilt) points reproducing NABLA's lane tilt, BIL_RotZ and type-4 ramps as manual tilt."""
+    tl = chart.tl
+
+    def ms(tick):
+        return tl.seconds_at(tick) * 1000.0
+
+    roll = _simulate_lane_roll(chart, ms)
+    rotz, jumps = _rotz_degrees(chart, ms)
+    step = max(1, chart.res // 48)
+    end_ms = len(roll) - 1
+    ticks = []
+    while not ticks or (ms(ticks[-1]) < end_ms and ticks[-1] < chart.end_tick):
+        ticks.append(len(ticks) * step)
+    tempo_ticks = {tick for (tick, bpm), (_tick, previous) in zip(tl.bpm_pts[1:], tl.bpm_pts) if bpm != previous}
+    # A BIL_RotZ jump splits the samples, so it becomes two tilt lines on one tick. A BPM change
+    # ends a segment without a jump: USC interpolates in time and KSM in ticks, so they agree only within one tempo.
+    runs, samples, joined = [], [], False
+    for tick in sorted(set(ticks) | {t for t in jumps | tempo_ticks if t <= ticks[-1]}):
+        t = ms(tick)
+        k = max(0, min(int(t), end_ms - 1))
+        o = roll[k] + (roll[min(k + 1, end_ms)] - roll[k]) * min(1.0, t - k)
+        value = (o + rotz(t)) / KSH_TILT_DEGREES
+        if samples and tick in jumps:
+            samples.append((tick, (o + rotz(t, before=True)) / KSH_TILT_DEGREES))
+            runs.append((samples, joined))
+            samples, joined = [], False
+        elif samples and tick in tempo_ticks:
+            samples.append((tick, value))
+            runs.append((samples, joined))
+            samples, joined = [], True
+        samples.append((tick, value))
+    runs.append((samples, joined))
+    points = []
+    for run, joined in runs:
+        if joined:
+            points += _swing_door(run, SIM_TOLERANCE, start=points[-1])[1:]
+        else:
+            points += _swing_door(run, SIM_TOLERANCE)
+    points = _add_spin_ramps(points, _triple_spin_ramps(chart))
+    out = _collapse_equal_runs([(tick, format_tilt(v)) for (tick, v) in points])
+    # USC applies manual tilt directly only if the first point after the switch to manual is an immediate change.
+    # 0.001 is a hundredth of a degree.
+    if len(out) > 1 and (len(out) < 3 or out[2][0] != out[1][0]):
+        out.insert(2, (out[1][0], format_tilt(float(out[1][1]) + 0.001)))
+    return out
+
+
+def compute_tilt_events(chart, pretilt_fix=False, simulate=False):
+    if simulate:
+        return simulated_tilt_points(chart)
     manual = chart.camera["tilt"]
     manual_ranges = [(s.tick, s.end_tick) for s in manual]
 
@@ -274,11 +530,12 @@ if __name__ == "__main__":
     import os
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "shared"))
     import vox_parser as voxmod
-    argv = [a for a in sys.argv[1:] if a != "--pretilt-fix"]
+    argv = [a for a in sys.argv[1:] if a not in ("--pretilt-fix", "--simulate-tilt")]
     if not argv:
-        raise SystemExit("usage: camera_events.py <chart.vox> [--pretilt-fix]")
+        raise SystemExit("usage: camera_events.py <chart.vox> [--pretilt-fix] [--simulate-tilt]")
     chart = voxmod.load(argv[0])
-    tilt = compute_tilt_events(chart, pretilt_fix="--pretilt-fix" in sys.argv)
+    tilt = compute_tilt_events(chart, pretilt_fix="--pretilt-fix" in sys.argv,
+                               simulate="--simulate-tilt" in sys.argv)
     zoom = compute_zoom_events(chart)
     spin = compute_spin_tokens(chart)
     print("tilt events: %d" % len(tilt))

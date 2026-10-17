@@ -8,7 +8,7 @@ Converts SOUND VOLTEX `.vox` charts to `.ksh` (KSM/USC), with the reverse-engine
 |---|---|---|
 | audio | FX/laser effects, ParamEq, music duck, SE bank, per-sample gains | Done, except the Pitch & Speed effect (id 13), whose phase vocoder is a stand-in |
 | notes | BT/FX/laser notes, timing, BPM/time-signature changes, slams, curves | Done |
-| camera | lane tilt, spin/swing, zoom | Zoom done. Spin lengths are approximate. Pretilt removal is optional. |
+| camera | lane tilt, spin/swing, zoom | Zoom done. Spin lengths are approximate. Pretilt removal is optional, and so is the simulated arcade tilt (`--simulate-tilt`). |
 
 ## The writeup
 

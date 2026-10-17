@@ -51,6 +51,7 @@ class BatchOptions:
     standard_slam_gap: bool = True
     ksh_version: int = 1
     pretilt_fix: bool = False
+    simulate_tilt: bool = False
     advanced_values: dict = field(default_factory=dict)
 
 
@@ -162,6 +163,7 @@ def run_job(job, options, log, preview_cache=None):
         notes_convert.convert(job.vox_path, job.ksh_out, camera=True, meta=meta,
                                slam_gap_frac=slam_gap_frac,
                                pretilt_fix=options.pretilt_fix,
+                               simulate_tilt=options.simulate_tilt,
                                ksh_version=options.ksh_version)
         result.wrote_ksh = True
     except Exception as e:  # noqa: BLE001 - one bad chart must not abort the batch

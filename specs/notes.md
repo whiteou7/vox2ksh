@@ -6,7 +6,7 @@ This covers BT, FX and laser notes, plus the BPM and time signatures that set up
 
 ## Buttons
 
-Every vox tick is a whole multiple of the ksh line count, so button conversion loses nothing. Each measure picks its own line count as the gcd over its events. BT: `1` is a chip, `2` a hold. FX: `2` is a chip, `1` a hold. The chart ends at the last real event, not at `#END POSITION`, which often runs well past the last note.
+Each measure picks its own line count as the gcd over its events. The chart is first read onto gcd(`#BEAT RESOLUTION`, 240) ticks per beat, USC's own grid, so 48- and 240-resolution charts lose nothing and finer ones round each event to the nearest USC tick. BT: `1` is a chip, `2` a hold. FX: `2` is a chip, `1` a hold. The chart ends at the last real event, not at `#END POSITION`, which often runs well past the last note.
 
 ## Lasers
 
@@ -72,3 +72,4 @@ All of these turned up on charts outside the original 30-chart matched set and w
 12. The beat column of a `measure,beat,cell` timing was read as a quarter note. A beat is one denominator unit (`res * 4 / den` cells, so 12 in 15/16), so events past the first beat of a non-`/4` measure landed late. Every button category improved. `vox_format.md` already had this right. `render_chart.py` had the same bug; see `audio_engine.md` §5.3b.
 13. The min-gap pass dropped sharp turning points that fell between its thinning steps. On a 3-tick sampled sine arch it moved the peak a tick and dropped the cusp after it, so the ksh laser stopped at 0.14 instead of 0. Reversals are now fixed points. Between two of them, a densely sampled stretch (every gap within a 24th note) gets as many evenly spaced points as the minimum gap allows, read off the vox polyline, so these points don't have to sit on vox sample ticks.
 14. A `t=` change after a measure's first row was looked up by row index instead of tick offset, so it landed on the wrong row or was dropped. モノノケ狂想曲 (2271) steps the BPM every 32nd note from 249 down to 160 over vox measures 126-133, and only 19 of its 173 changes came out. `t=` now keeps the vox's four decimals, the precision `#BPM INFO` stores.
+15. A 480-resolution chart could need 1920 rows a measure. USC steps each row by `960 / rows` of its ticks in integer math, so the measure collapsed to zero length and everything after it played early. Charts are now read onto USC's 240-per-beat grid (`USC_TICKS_PER_BEAT`), and `convert` asserts every row spacing lands on it.
