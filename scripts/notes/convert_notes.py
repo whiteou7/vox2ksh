@@ -21,6 +21,9 @@ import vox_parser as vox  # noqa: E402
 BT_CHIP, BT_HOLD = "1", "2"
 FX_CHIP, FX_HOLD = "2", "1"
 
+# USC steps each ksh row by a whole number of its 240-per-beat ticks, so a finer row spacing (a 480-resolution vox can need 1920 rows a measure) truncates to zero and collapses the measure.
+USC_TICKS_PER_BEAT = 240
+
 DIFF_MAP = {"1n": "light", "2a": "challenge", "3e": "extended",
             "4i": "infinite", "5m": "infinite"}
 
@@ -131,7 +134,7 @@ def _chart_last_tick(button_lanes, laser_lanes, extra_ticks):
 
 def convert(vox_path, out_path, camera=False, meta=None, slam_gap_frac=laser.SLAM_GAP_FRAC,
             pretilt_fix=False, ksh_version=1, simulate_tilt=False):
-    chart = vox.load(vox_path)
+    chart = vox.load(vox_path, res_unit=USC_TICKS_PER_BEAT)
     tl = chart.tl
 
     use_curves = ksh_version >= 2
@@ -173,6 +176,7 @@ def convert(vox_path, out_path, camera=False, meta=None, slam_gap_frac=laser.SLA
         offsets = (tick - measure_start for tick in sorted_anchors[first:end])
         subdivisions = slots_per_measure(measure_length_ticks, offsets)
         ticks_per_slot = measure_length_ticks // subdivisions
+        assert ticks_per_slot * USC_TICKS_PER_BEAT % tl.res == 0, "row spacing off USC's tick grid"
 
         time_signature = beat_by_measure.get(measure)
         if time_signature is not None:
