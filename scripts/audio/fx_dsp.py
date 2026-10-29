@@ -901,13 +901,19 @@ def _pv_channel(x, ratio, speed, n_out):
     return np.interp(pos, np.arange(mid.size), mid)
 
 
+def pitch_speed_wet(m):
+    """Wet share of a Pitch & Speed mix fraction `m`. The mixer (0x18062ca80) advances one interleaved sample per
+    pass but blends a whole stereo frame, so every sample is blended twice: dry 1 - m*m, wet m*m."""
+    return m * m
+
+
 def fx_pitch_speed(L, R, mix, semitones, speed, block=512, lookahead=None):
     n = L.size
     semitones, speed = float(semitones), float(speed)
     if n <= 0 or (semitones == 0.0 and speed == 1.0):
         return L.astype(np.float32), R.astype(np.float32)
 
-    m = mixof(mix)
+    m = pitch_speed_wet(mixof(mix))
     ratio = math.pow(2.0, semitones / 12.0)      # 0x18062d92e
     speed = max(speed, 0.0)
 
