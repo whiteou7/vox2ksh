@@ -1,4 +1,4 @@
-"""The window: song table, difficulty filters, KSH version dropdown, jacket and metadata preview, debug console, Advanced options panel and Settings. Standard slam gap, Remove pretilt and Preview offset are set by hand here, not generated from render_chart.py flags. The KSH version dropdown is in the toolbar because it decides which players can read the output.
+"""The window: song table, difficulty filters, KSH version dropdown, jacket and metadata preview, debug console, Advanced options panel and Settings. Standard slam gap, Remove pretilt, Simulate arcade tilt and Preview offset are set by hand here, not generated from render_chart.py flags. The KSH version dropdown is in the toolbar because it decides which players can read the output.
 """
 import os
 import queue
@@ -285,6 +285,11 @@ class App:
                          variable=self.pretilt_var,
                          command=lambda: self._remember("pretilt_fix", self.pretilt_var.get())
                          ).pack(anchor="w")
+        self.simulate_tilt_var = tk.BooleanVar(value=bool(self.settings.get("simulate_tilt", False)))
+        ttk.Checkbutton(notes_row, text="Simulate arcade tilt",
+                         variable=self.simulate_tilt_var,
+                         command=lambda: self._remember("simulate_tilt", self.simulate_tilt_var.get())
+                         ).pack(anchor="w")
         self.preview_meta_var = tk.BooleanVar(value=bool(self.settings.get("preview_meta", True)))
         ttk.Checkbutton(notes_row, text="Preview offset (po/plength)",
                          variable=self.preview_meta_var,
@@ -506,6 +511,7 @@ class App:
             standard_slam_gap=self.slam_gap_var.get(),
             ksh_version=self._ksh_version(),
             pretilt_fix=self.pretilt_var.get(),
+            simulate_tilt=self.simulate_tilt_var.get(),
             advanced_values=self._read_advanced_values(),
         )
         self._log("=== starting: %d job(s) across %d song(s), ksh v%d -> %s ==="

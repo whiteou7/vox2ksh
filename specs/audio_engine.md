@@ -422,6 +422,8 @@ So `13, p1, p2, p3` is `mix%, semitones, speed`.
 
 Each parameter is used only when it differs from neutral by more than `FLT_EPSILON` (`|p2| > e` at `0x180632cf6`, `|p3 - 1| > e` at `0x180632db8`, `|p1 - 100| > e` at `0x180632e5b`). Otherwise the wrapper passes an empty `std::function`, meaning "leave alone". So `13, 100.00, 0.00, 1.00`, the most common id-13 row, does nothing. At mix 100 there's no mixing stage.
 
+The mixing stage (`0x18062ca80`, both the speed-1 loop and the second-render loop) advances one interleaved sample per pass but blends a whole frame of `channels` samples from that position, so in stereo every sample is blended twice. With mix fraction `m` the output is `(1 - m*m)*dry + m*m*wet`, not `(1-m)*dry + m*wet`: authored 60 plays as 36% wet, 72 as 52%. `fx_dsp.pitch_speed_wet` applies this.
+
 Speed is a playback rate. `FUN_180784e10` advances a 16.16 position accumulator by `(int)(65536.0/speed + 0.5)` per input frame consumed: speed 2 eats two input frames per output frame, 0.5 eats half a frame, and `speed <= 0` freezes. Charts use 0, 0.5, 1 and 2. Pitch is `powf(2, semitones/12)` at `0x18062d92e`, unclamped (charts range over [-24, 24]).
 
 When speed isn't 1, the dry side of the mix isn't the dry track. `FUN_18062ca80` renders twice, once with both parameters and once with the same speed and a constant-0 pitch lambda (`0x1802be750`, at `0x18062cf79`), and mixes against the second render. At speed 1 the second pass is skipped (`0x18062ce2b`).
@@ -720,6 +722,8 @@ AUTO TAB is used in about a third of charts. PARAM ASSIGN has 24 rows in every c
 ```
 
 The sweep is `value = C2 + (C3 - C2) * clamp(laserValue, 0, 1)`, refreshed every 512 samples, with `param1` and `param2` chosen by chain position. The control source is a C4=6 laser.
+
+The effect is not restarted per block. `FUN_18062ef70` clips each laser node overlapping the span into a 0x2c-byte segment (sample range, knob/127 values, and a flag at +0x28 set when the node is C4=6), and if any segment is flagged the whole span goes through the animated dispatcher `0x180633360`. For Pitch & Speed (`0x1806371f0`), the swept parameter becomes a `std::function` of time handed to a single `ApplyPitchAndSpeed` render over the segments' extent. Its evaluator `0x180637cc0` returns `C2 + (C3 - C2) * v` inside a flagged segment and the authored value elsewhere. `render_chart.py` reproduces a swept **mix** exactly by rendering the effect once at mix 0 and once at mix 100 and blending them per 512-sample block, weighted by the effect's wet share (the mix fraction, or its square for Pitch & Speed, §4.11). Every effect is affine in that share except Flanger, whose feedback path is exact only where the mix holds still. Other swept parameters are still re-rendered block by block.
 
 Example: the AUTO TAB row `021,03,00  96  8` selects pair 8-2=6. If that pair's assign row is `6, 3, 3.00, 0.50`, the sweep drives param 3 of a Flanger, its period, from 3.00 to 0.50 measures. Most AUTO TAB spans land on an unmodulated pair and run at their authored parameters.
 

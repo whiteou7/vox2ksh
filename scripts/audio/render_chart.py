@@ -45,6 +45,8 @@ PARAM_ASSIGN_BLOCK = 512
 GRID_LOCKED = {1}
 # Laser point effect column value that selects #TAB PARAM ASSIGN INFO's sweep.
 PARAM_SWEEP_EFFECT = 6
+# Index of the mix in an FX-button effect's parameters (row minus its id column); 0 unless listed.
+MIX_PARAM = {1: 1, 8: 1, 6: 2}
 # Laser positions run 0..1; the engine's knob runs 0..127.
 KNOB_MAX = 127.0
 
@@ -318,7 +320,7 @@ class Render:
         args, tl, block = self.args, self.tl, self.args.block
         effect_id = int(effect[0])
         params = list(effect[1:])
-        mix_param = {1: 1, 8: 1, 6: 2}.get(effect_id, 0)
+        mix_param = MIX_PARAM.get(effect_id, 0)
         if mix_param < len(params):
             params[mix_param] *= args.mix_scale
         beat = 60.0 / tl.bpm_at(tick)
@@ -495,15 +497,53 @@ class Render:
         left, right = self.left, self.right
         sweep_value, sweep_active = sweep
         param_index, low, high = assignment
+
+        def swept_blocks():
+            """(block start, block end, parameter value or None where no control laser is active)."""
+            for block_start in range(start, stop, PARAM_ASSIGN_BLOCK):
+                block_end = min(block_start + PARAM_ASSIGN_BLOCK, stop)
+                active = sweep_active[block_start:block_end]
+                value = None
+                if np.any(active):
+                    position = float(np.mean(sweep_value[block_start:block_end][active]))
+                    value = low + (high - low) * max(0.0, min(1.0, position))
+                yield block_start, block_end, value
+
+        if param_index == 1 + MIX_PARAM.get(int(effect[0]), 0):
+            # The engine renders the span once and reads the swept mix as a function of time (0x1806371f0,
+            # evaluator 0x180637cc0), so effect state never restarts. Output is affine in each effect's wet
+            # share, so blending the mix-0 and mix-100 renders by that share gives the same result.
+            # shortcut: Flanger's feedback is not affine in mix, so only its constant-mix stretches are exact;
+            # render it in one pass with a time-varying mix if a moving Flanger sweep sounds off.
+            renders = []
+            for mix in (0.0, 100.0):
+                fixed = list(effect)
+                fixed[param_index] = mix
+                rendered = self.apply_button_effect(*_copies(left, right, start, stop), fixed, start_tick,
+                                                    lookahead=(left, right, start))
+                if rendered is None:
+                    self.skipped[name] += 1
+                    return
+                renders.append(rendered)
+            weight = np.full(stop - start, effect[param_index], np.float32)
+            for block_start, block_end, value in swept_blocks():
+                if value is not None:
+                    weight[block_start - start:block_end - start] = value
+            weight = np.clip(weight / 100.0, 0.0, 1.0)
+            if int(effect[0]) == 13:
+                weight = FX.pitch_speed_wet(weight)
+            (dry_left, dry_right), (wet_left, wet_right) = renders
+            left[start:stop], right[start:stop] = self.quantize_stereo(
+                (dry_left + weight * (wet_left - dry_left), dry_right + weight * (wet_right - dry_right)))
+            self.applied["%s (AUTO TAB sweep)" % name] += 1
+            return
+
         any_applied = False
-        for block_start in range(start, stop, PARAM_ASSIGN_BLOCK):
-            block_end = min(block_start + PARAM_ASSIGN_BLOCK, stop)
+        for block_start, block_end, value in swept_blocks():
             block_effect = effect
-            active = sweep_active[block_start:block_end]
-            if np.any(active):
-                position = float(np.mean(sweep_value[block_start:block_end][active]))
+            if value is not None:
                 block_effect = list(effect)
-                block_effect[param_index] = low + (high - low) * max(0.0, min(1.0, position))
+                block_effect[param_index] = value
             rendered = self.apply_button_effect(*_copies(left, right, block_start, block_end), block_effect,
                                                 start_tick, lookahead=(left, right, block_start))
             if rendered is None:
