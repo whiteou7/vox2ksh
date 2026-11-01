@@ -2,10 +2,6 @@
 
 Converts SOUND VOLTEX `.vox` charts to `.ksh` (KSM/USC), with the reverse-engineering notes behind it.
 
-Around 500% faster due to multithreading support (up to 32 simultaneously, minimum 2 but yall can go farther than that). Also manages CPU usage better.
-
-Will continue to add headless mode for VPS users.
-
 ## Content
 
 | part | covers | status |
@@ -43,3 +39,6 @@ Keep this folder inside the game's `contents/` directory; scripts find the game 
 pip install -r requirements-gui.txt
 python gui/main.py
 ```
+
+## Todo
+- [ ] Add a CLI mode for VPS users
