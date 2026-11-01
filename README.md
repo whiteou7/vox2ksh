@@ -39,3 +39,6 @@ Keep this folder inside the game's `contents/` directory; scripts find the game 
 pip install -r requirements-gui.txt
 python gui/main.py
 ```
+
+## Todo
+- [ ] Add a CLI mode for VPS users

@@ -11,6 +11,7 @@ _DEFAULTS = {
     "se_bank_dir": "",
     "difficulties": ["novice", "advanced", "exhaust", "top"],
     "ksh_version": 1,
+    "max_parallel_charts": 2,
     "pretilt_fix": True,
     "preview_meta": True,
     "debug": False,
