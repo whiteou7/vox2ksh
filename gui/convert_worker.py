@@ -1,8 +1,11 @@
-"""Job queue on one background thread. Per (song, difficulty) it runs convert_notes.convert() with real metadata, then render_chart.main(), both in-process, and streams stdout into the debug console. po= and plength= are measured by preview_offset and cached per song. Cancelling is job-granular: a render in progress finishes, the queue stops before the next one.
+"""Runs chart jobs on configurable isolated worker processes. po= and plength= are measured once per song and cached in the parent process. Cancelling stops new jobs and lets active jobs finish.
 """
+import concurrent.futures
 import contextlib
 import io
+import multiprocessing
 import os
+import queue
 import shutil
 import sys
 import threading
@@ -17,6 +20,9 @@ import music_db  # noqa: E402
 import convert_notes as notes_convert  # noqa: E402  (scripts/notes/convert_notes.py)
 import render_chart  # noqa: E402
 import preview_offset  # noqa: E402
+
+MAX_PARALLEL_CHARTS = 32
+_PROCESS_LOG_QUEUE = None
 
 
 @dataclass
@@ -46,6 +52,7 @@ class JobResult:
 class BatchOptions:
     se_bank_dir: str = None
     ffmpeg_path: str = None
+    max_parallel_charts: int = 2
     render_audio: bool = True
     preview_meta: bool = True
     standard_slam_gap: bool = True
@@ -151,7 +158,7 @@ def _measured_preview_window(job, options, log, cache):
     return window
 
 
-def run_job(job, options, log, preview_cache=None):
+def run_job(job, options, log, preview_cache=None, copy_jacket=True):
     os.makedirs(job.song_out_dir, exist_ok=True)
     result = JobResult(job=job, ok=True)
 
@@ -170,7 +177,7 @@ def run_job(job, options, log, preview_cache=None):
         log("!! %s: %s" % (os.path.basename(job.vox_path), e))
         return result
 
-    if meta["jacket"] and job.jacket_src:
+    if copy_jacket and meta["jacket"] and job.jacket_src:
         try:
             shutil.copyfile(job.jacket_src, os.path.join(job.song_out_dir, meta["jacket"]))
         except OSError as e:
@@ -218,13 +225,38 @@ def _render_audio(job, options, log):
     return ""
 
 
+def _run_isolated_job(job, options, preview_window):
+    """Runs one job with process-local stdout/stderr and returns its log lines."""
+    lines = []
+    log = _PROCESS_LOG_QUEUE.put if _PROCESS_LOG_QUEUE is not None else lines.append
+    forwarder = _LineForwarder(log)
+    cache = {job.s3v_path: preview_window} if job.s3v_path else {}
+    try:
+        with contextlib.redirect_stdout(forwarder), contextlib.redirect_stderr(forwarder):
+            result = run_job(job, options, log, cache, copy_jacket=False)
+    finally:
+        forwarder.flush()
+    return result, lines
+
+
+def _initialize_process_worker(log_queue):
+    global _PROCESS_LOG_QUEUE
+    _PROCESS_LOG_QUEUE = log_queue
+
+
 class ConvertWorker:
-    def __init__(self, jobs, options, on_log, on_progress, on_done):
+    def __init__(self, jobs, options, on_log, on_progress, on_done, on_status=None):
+        if (not isinstance(options.max_parallel_charts, int)
+                or isinstance(options.max_parallel_charts, bool)
+                or not 1 <= options.max_parallel_charts <= MAX_PARALLEL_CHARTS):
+            raise ValueError("max_parallel_charts must be between 1 and %d"
+                             % MAX_PARALLEL_CHARTS)
         self.jobs = jobs
         self.options = options
         self.on_log = on_log
         self.on_progress = on_progress
         self.on_done = on_done
+        self.on_status = on_status
         self._cancel = threading.Event()
         self._thread = None
         self._preview_cache = {}
@@ -238,12 +270,146 @@ class ConvertWorker:
         self._cancel.set()
 
     def _run_queue(self):
-        results = []
         total = len(self.jobs)
-        for i, job in enumerate(self.jobs):
-            if self._cancel.is_set():
-                self.on_done(results, True)
-                return
-            self.on_progress(i, total, job)
-            results.append(run_job(job, self.options, self.on_log, self._preview_cache))
-        self.on_done(results, False)
+        worker_count = min(self.options.max_parallel_charts, total)
+        completed = {}
+        copied_jackets = set()
+        next_index = 0
+        cancelled = False
+
+        def notify_status(active_jobs):
+            active_jobs = list(active_jobs)
+            names = ", ".join(os.path.basename(job.vox_path) for job in active_jobs)
+            status = "Completed %d/%d | Processing %d/%d: %s" % (
+                len(completed), total, len(active_jobs), worker_count, names or "none")
+            terminal = getattr(sys, "__stdout__", None) or sys.stdout
+            if terminal is not None:
+                print("[convert] " + status, file=terminal, flush=True)
+            if self.on_status:
+                self.on_status(status)
+
+        def finish_job(index, job, result, lines):
+            for line in lines:
+                self.on_log(line)
+            if result.wrote_ksh and job.jacket_src and job.jacket_out_name:
+                jacket_out = os.path.join(job.song_out_dir, job.jacket_out_name)
+                if jacket_out not in copied_jackets:
+                    try:
+                        shutil.copyfile(job.jacket_src, jacket_out)
+                        copied_jackets.add(jacket_out)
+                    except OSError as e:
+                        self.on_log("!! jacket copy failed for %s: %s" % (job.song.folder, e))
+            completed[index] = result
+            self.on_progress(len(completed), total, job)
+
+        def run_sequential(index, job):
+            active = {index: job}
+            notify_status(active.values())
+            _measured_preview_window(job, self.options, self.on_log, self._preview_cache)
+            try:
+                result = run_job(job, self.options, self.on_log,
+                                 self._preview_cache, copy_jacket=False)
+            except Exception as e:  # noqa: BLE001 - one failed job must not abort the batch
+                result = JobResult(job=job, ok=False,
+                                   error="conversion worker failed: %s" % e)
+                self.on_log("!! %s" % traceback.format_exc())
+            finish_job(index, job, result, [])
+            active.clear()
+            notify_status(active.values())
+
+        if worker_count <= 1:
+            for index, job in enumerate(self.jobs):
+                if self._cancel.is_set():
+                    cancelled = True
+                    break
+                run_sequential(index, job)
+        else:
+            pending = {}
+            retry_sequential = []
+            context = multiprocessing.get_context("spawn")
+            log_queue = context.Queue()
+
+            def drain_logs():
+                while True:
+                    try:
+                        self.on_log(log_queue.get_nowait())
+                    except queue.Empty:
+                        return
+
+            try:
+                pool = concurrent.futures.ProcessPoolExecutor(
+                    max_workers=worker_count,
+                    mp_context=context,
+                    initializer=_initialize_process_worker,
+                    initargs=(log_queue,))
+            except Exception as e:  # noqa: BLE001 - retain conversion if process startup is unavailable
+                self.on_log("-- parallel workers unavailable (%s); continuing sequentially" % e)
+                log_queue.close()
+                for index, job in enumerate(self.jobs):
+                    if self._cancel.is_set():
+                        cancelled = True
+                        break
+                    run_sequential(index, job)
+            else:
+                with pool:
+                    while next_index < total or pending:
+                        drain_logs()
+                        while (not self._cancel.is_set() and next_index < total
+                               and len(pending) < worker_count):
+                            index = next_index
+                            job = self.jobs[index]
+                            preview = _measured_preview_window(
+                                job, self.options, self.on_log, self._preview_cache)
+                            try:
+                                future = pool.submit(
+                                    _run_isolated_job, job, self.options, preview)
+                            except Exception as e:  # noqa: BLE001 - report worker startup failures
+                                self.on_log(
+                                    "-- parallel worker unavailable for %s (%s); retrying sequentially"
+                                    % (os.path.basename(job.vox_path), e))
+                                retry_sequential.append((index, job))
+                            else:
+                                pending[future] = (index, job)
+                                notify_status(job for _i, job in pending.values())
+                            next_index += 1
+
+                        if self._cancel.is_set():
+                            cancelled = True
+                            for future in pending:
+                                future.cancel()
+                        running = [future for future in pending if not future.cancelled()]
+                        if not running:
+                            break
+                        done, _ = concurrent.futures.wait(
+                            running, timeout=0.1,
+                            return_when=concurrent.futures.FIRST_COMPLETED)
+                        drain_logs()
+                        changed = bool(done)
+                        for future in done:
+                            index, job = pending.pop(future)
+                            try:
+                                result, lines = future.result()
+                            except Exception as e:  # noqa: BLE001 - one failed job must not abort the batch
+                                self.on_log(
+                                    "-- parallel worker failed for %s (%s); retrying sequentially"
+                                    % (os.path.basename(job.vox_path), e))
+                                self.on_log("!! %s" % traceback.format_exc())
+                                retry_sequential.append((index, job))
+                            else:
+                                finish_job(index, job, result, lines)
+                        for future in tuple(pending):
+                            if future.cancelled():
+                                pending.pop(future)
+                                changed = True
+                        if changed:
+                            notify_status(job for _i, job in pending.values())
+                drain_logs()
+                log_queue.close()
+                log_queue.join_thread()
+                for index, job in sorted(retry_sequential):
+                    run_sequential(index, job)
+
+        if cancelled:
+            notify_status(())
+        results = [completed[index] for index in sorted(completed)]
+        self.on_done(results, cancelled)
