@@ -1,9 +1,7 @@
-<<<<<<< HEAD
 """Runs chart jobs on configurable isolated worker processes. po= and plength= are measured once per song and cached in the parent process. Cancelling stops new jobs and lets active jobs finish.
 """
 import concurrent.futures
-=======
->>>>>>> f8231b135f13bfbe218beadfaf179aea064b286d
+
 import contextlib
 import io
 import multiprocessing
@@ -283,7 +281,9 @@ class ConvertWorker:
 
         def notify_status(active_jobs):
             active_jobs = list(active_jobs)
-            names = ", ".join(os.path.basename(job.vox_path) for job in active_jobs)
+            names = ", ".join(
+                "%s [%s]" % (job.song.title, music_db.DIFF_SHORT.get(job.diff_key, job.diff_key))
+                for job in active_jobs)
             status = "Completed %d/%d | Processing %d/%d: %s" % (
                 len(completed), total, len(active_jobs), worker_count, names or "none")
             terminal = getattr(sys, "__stdout__", None) or sys.stdout
@@ -411,6 +411,9 @@ class ConvertWorker:
                 log_queue.close()
                 log_queue.join_thread()
                 for index, job in sorted(retry_sequential):
+                    if self._cancel.is_set():
+                        cancelled = True
+                        break
                     run_sequential(index, job)
 
         if cancelled:

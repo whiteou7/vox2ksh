@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-<<<<<<< HEAD
 """Entry point for the Tkinter app.
 
     pip install -r ../requirements-gui.txt
     python main.py
 """
 import multiprocessing
-=======
->>>>>>> f8231b135f13bfbe218beadfaf179aea064b286d
+
 import os
 import sys
 import tkinter as tk
