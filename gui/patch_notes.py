@@ -1,5 +1,3 @@
-"""Generates the "New Songs Added" patch-note text for a set of songs and difficulties.
-"""
 SEPARATOR = "-" * 50
 
 

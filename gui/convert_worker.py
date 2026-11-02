@@ -1,5 +1,3 @@
-"""Job queue on one background thread. Per (song, difficulty) it runs convert_notes.convert() with real metadata, then render_chart.main(), both in-process, and streams stdout into the debug console. po= and plength= are measured by preview_offset and cached per song. Cancelling is job-granular: a render in progress finishes, the queue stops before the next one.
-"""
 import contextlib
 import io
 import os
@@ -51,6 +49,7 @@ class BatchOptions:
     standard_slam_gap: bool = True
     ksh_version: int = 1
     pretilt_fix: bool = False
+    simulate_tilt: bool = False
     advanced_values: dict = field(default_factory=dict)
 
 
@@ -162,6 +161,7 @@ def run_job(job, options, log, preview_cache=None):
         notes_convert.convert(job.vox_path, job.ksh_out, camera=True, meta=meta,
                                slam_gap_frac=slam_gap_frac,
                                pretilt_fix=options.pretilt_fix,
+                               simulate_tilt=options.simulate_tilt,
                                ksh_version=options.ksh_version)
         result.wrote_ksh = True
     except Exception as e:  # noqa: BLE001 - one bad chart must not abort the batch
@@ -191,7 +191,6 @@ def run_job(job, options, log, preview_cache=None):
 
 
 def _render_audio(job, options, log):
-    """Runs render_chart in-process, streaming its output to `log`. Returns an error message, or "" on success."""
     argv = [os.path.dirname(job.vox_path),
             "-d", job.song.difficulties[job.diff_key].suffix,
             "-a", job.s3v_path,

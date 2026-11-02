@@ -1,5 +1,3 @@
-"""Builds the Advanced panel from render_chart.build_arg_parser(), showing only the options in SHOWN_DESTS. Everything else runs at its default.
-"""
 import os
 import sys
 

@@ -1,9 +1,5 @@
 # SOUND VOLTEX audio engine
 
-Target: `modules/soundvoltex.dll` (PE32+ x64, ImageBase `0x180000000`, `SoundVoltex6_x64Release`, 2025-06-19). All addresses are virtual addresses in it.
-
-Read from MSVC RTTI, Ghidra 12.1.2 and capstone, and checked against the charts in `data/music/` and the cabinet recordings in `scripts/shared/reference/ksh/`. Two values are fitted rather than transcribed: Tape Stop Ex's envelope floor (§4.6b) and the SE trim (§7.2). Two renderer defaults soften the transcription for listening: the resonance cap (§4.1b) and the peak-EQ gain (§7.1). For a plain-language intro, see [`audio_engine_primer.md`](audio_engine_primer.md). Measurements are in [`evidence/audio_engine.md`](evidence/audio_engine.md).
-
 ## 1. Where the effects live
 
 `BMSoundLibSvo::CSvoEffectedAudioGeneratorImpl` (vftable `0x180919ca8`, roughly `0x180628000` to `0x180650000`) is the whole FX chain.
@@ -422,6 +418,8 @@ So `13, p1, p2, p3` is `mix%, semitones, speed`.
 
 Each parameter is used only when it differs from neutral by more than `FLT_EPSILON` (`|p2| > e` at `0x180632cf6`, `|p3 - 1| > e` at `0x180632db8`, `|p1 - 100| > e` at `0x180632e5b`). Otherwise the wrapper passes an empty `std::function`, meaning "leave alone". So `13, 100.00, 0.00, 1.00`, the most common id-13 row, does nothing. At mix 100 there's no mixing stage.
 
+The mixing stage (`0x18062ca80`, both the speed-1 loop and the second-render loop) advances one interleaved sample per pass but blends a whole frame of `channels` samples from that position, so in stereo every sample is blended twice. With mix fraction `m` the output is `(1 - m*m)*dry + m*m*wet`, not `(1-m)*dry + m*wet`: authored 60 plays as 36% wet, 72 as 52%. `fx_dsp.pitch_speed_wet` applies this.
+
 Speed is a playback rate. `FUN_180784e10` advances a 16.16 position accumulator by `(int)(65536.0/speed + 0.5)` per input frame consumed: speed 2 eats two input frames per output frame, 0.5 eats half a frame, and `speed <= 0` freezes. Charts use 0, 0.5, 1 and 2. Pitch is `powf(2, semitones/12)` at `0x18062d92e`, unclamped (charts range over [-24, 24]).
 
 When speed isn't 1, the dry side of the mix isn't the dry track. `FUN_18062ca80` renders twice, once with both parameters and once with the same speed and a constant-0 pitch lambda (`0x1802be750`, at `0x18062cf79`), and mixes against the second render. At speed 1 the second pass is skipped (`0x18062ce2b`).
@@ -721,145 +719,9 @@ AUTO TAB is used in about a third of charts. PARAM ASSIGN has 24 rows in every c
 
 The sweep is `value = C2 + (C3 - C2) * clamp(laserValue, 0, 1)`, refreshed every 512 samples, with `param1` and `param2` chosen by chain position. The control source is a C4=6 laser.
 
+The effect is not restarted per block. `FUN_18062ef70` clips each laser node overlapping the span into a 0x2c-byte segment (sample range, knob/127 values, and a flag at +0x28 set when the node is C4=6), and if any segment is flagged the whole span goes through the animated dispatcher `0x180633360`. For Pitch & Speed (`0x1806371f0`), the swept parameter becomes a `std::function` of time handed to a single `ApplyPitchAndSpeed` render over the segments' extent. Its evaluator `0x180637cc0` returns `C2 + (C3 - C2) * v` inside a flagged segment and the authored value elsewhere. `render_chart.py` reproduces a swept **mix** exactly by rendering the effect once at mix 0 and once at mix 100 and blending them per 512-sample block, weighted by the effect's wet share (the mix fraction, or its square for Pitch & Speed, §4.11). Every effect is affine in that share except Flanger, whose feedback path is exact only where the mix holds still. Other swept parameters are still re-rendered block by block.
+
 Example: the AUTO TAB row `021,03,00  96  8` selects pair 8-2=6. If that pair's assign row is `6, 3, 3.00, 0.50`, the sweep drives param 3 of a Flanger, its period, from 3.00 to 0.50 measures. Most AUTO TAB spans land on an unmodulated pair and run at their authored parameters.
 
 `#TRACK ORIGINAL L/R` has no effect on audio. It holds only the un-interpolated control points, and `#TRACK1`/`#TRACK8` already carry the sequence that plays.
-
-## 7. Calibration against a cabinet capture
-
-`scripts/audio/reference/kamui_goal.ogg` is a recording of the cabinet playing `2229_kamui_tjhangneil`. It's polarity-inverted, Ogg-coded and drifts +0.346 samples/s (7.9 ppm), so the metric is phase-insensitive: `spectral_metric.py` splits each 46 ms frame into 46 log-spaced bands, normalises the level and scores the mean |dB| difference. Codec noise keeps even an untouched track above zero. `check_one_chart.py` runs the metric with automatic alignment on any chart/capture pair, and `check_all_charts.py` aggregates it over the corpus.
-
-### 7.1 The default laser filter
-
-This runs through the gameplay event dispatcher and the sound device, not the effect generator.
-
-`FUN_180407200` (`Game::GameAudio::Update`, vtable slot 1 at `0x1808cb848`) walks 28-byte events:
-
-```
-+0x00  ?                 +0x04  int  kind (2..7, the switch selector)
-+0x08  int   a           +0x0c  float pos / time
-+0x10  int   b           +0x18  byte variant tag (= kind - 1)
-```
-
-Kind 3 is a laser (`0x1804074aa`, asserts tag 2). Per tick one accumulator covers every laser event:
-
-```c
-disableEq = (event.b != 0);                       // event+0x10, the C4 effect index
-v = (event.a == 2) ? 1.0f - event.pos             // event+0x08: 1 = VOL-L, 2 = VOL-R
-                   : event.pos;
-acc = max(acc, v);                                // both knobs share one filter
-```
-
-`acc` is queued with a timestamp at `gameAudio+0x58` and popped once the head is older than 80 ms (`comiss xmm0, 0.08` at `0x180407f61`), so the filter lags the knob. If `disableEq` is set, the queue is flushed and the knob is forced to 0. The popped value times 127 goes to `FUN_1805c7a00`:
-
-```c
-v  = clamp((int)knob, 0, 127);
-fc = clamp(TABLE[v], 80.0f, 16000.0f);            // DSFXPARAMEQ_CENTER_MIN/MAX
-if      (fc <  200)  bw = gain = fc * 0.075f;     // 6.0 .. 15.0
-else if (fc < 1000)  bw = gain = 15.0f;
-else               { bw   = 15.0f - (fc-1000)*0.0003f;    // 15.0 .. 10.5
-                     gain = 15.0f - (fc-1000)*0.0005f; }  // 15.0 ..  7.5
-if (v < 4) gain = 0.0f;                           // dead zone
-
-FUN_180626b30(device, 0, fc, bw, gain);           // -> _DSFXParamEq slot 0 of 7
-```
-
-`TABLE` is 128 floats at `DAT_18090c050`, a hand-drawn piecewise-linear ramp: `0, 6, 12 ... 54, 100, 106 ... 202, 232 ... 3672, 3852 ... 6912, 7400, 7700, 8000, 8400 ... 10800`. The first ten entries clamp to 80 Hz.
-
-The struct is `{fCenter, fBandwidth, fGain}` (`FUN_180626b30` writes args 3 to 5 to `[rsp+0x20/0x24/0x28]`). In the dead zone `fGain` is 0, which turns the EQ off.
-
-The DMO isn't in this binary. `CDmoSoundFxAudioProcessor<_DSFXParamEq>` (`0x180919970`) and `CDmoSoundFxDriver<IDirectSoundFXParamEq,_DSFXParamEq>` (`0x180919998`) forward to a COM object at `this+0x10`, and the math is Microsoft's `GUID_DSFX_STANDARD_PARAMEQ`. `fx_dsp.peaking_coeffs_bw` models it as the RBJ peaking filter with `BW(octaves) = fBandwidth / 12`, the same reading as the independent reimplementation (§9.1).
-
-The same call ducks the music. Bank 2 is the song's `.s3v` (registered per song by `FUN_1805c63b0(this, 2, path)`, up to 6 stems). Every bank-2 voice gets a target gain:
-
-```c
-if (v <  4)  g = 1.0f;
-if (v < 95)  g = 0.8f - (v - 4) * 0.0025274728f;  // 0.800 .. 0.570
-if (v < 100) g = 0.57f;
-if (v < 120) g = 0.57f + (v - 100) * 0.011500001f;
-else         g = 0.8f;
-```
-
-Voice `vtable+0x60` (`0x1806a21f0`) writes a target, and the mixer chases it at 0.33 gain/s (`0x1806a25b1`).
-
-ParamEq slot 0 sits on the music path, before the SE voices are mixed in (placed by measurement).
-
-`render_chart.py` defaults `--peak-gain-scale` to 0.8 and `--peak-max-gain` to 8 dB, a dampened EQ chosen for listening comfort; `paramq_from_knob`'s own defaults (`gain_scale=1.0, max_gain_db=None`) are the transcription. To reproduce this section's measurements, `check_one_chart.py`/`check_all_charts.py` need `--extra="--peak-gain-scale 1.0 --peak-max-gain 15"`.
-
-### 7.2 SE levels
-
-With the one-voice rule (6.1.3), the best SE trim against the capture is 1.25 (+1.9 dB) over the header gains, where the files imply 1.00. `render_chart.py` defaults `--se-trim` to 1.2. `virtical_shot[0]` is the right slam sample for kamui.
-
-## 8. Known gaps
-
-* The SE level fits the capture about 2 dB above the header gain (6.1.4, 7.2).
-* The producer of kind-6 events, which picks the slam sample, is untraced (6.1.1). Note and laser events probably share that vector.
-* Kind 14 (id 13): the PhaseGear internals. Transcribing `PhaseGearSignalProc` (`0x180787e20` init, `0x1807894b0` synthesis, `PhaseGearLib::FFTHandlerF`) would close this. Its fourth function remaps the note's 0..1 progress; in this build it's the identity lambda at `0x1802be750`.
-* Tape Stop Ex's floor (`this+0x46`) and phase field (`this+0x224`) are untraced (4.6b).
-* The order of the FX-note list at `gen+0x20` is untraced (8.1).
-* `Timeline` uses float seconds and the engine uses integer samples, so for BPMs that don't divide 2646000 evenly `grid_lock_lead_samples` (5.2) returns tens of samples where it should return zero.
-
-### 8.1 Effect combination
-
-With `x` the track, `A` the FX-button effect and `B` the laser effect:
-
-| model | meaning | result |
-|---|---|---|
-| chain | series | `B(A(x))` |
-| dry | `B` reads the original and replaces `A` where they overlap | `B(x)` |
-| add | parallel, changes sum | `x + (A(x) - x) + (B(x) - x)` |
-
-**FX-L plus FX-R: the later note overwrites.** `FUN_18062e3d0` handles one note, and its `lVar19 < 2` loop walks the pair's two effects (the map at `gen+0x38` stores each pair as two `{kind, index}` entries at stride 8). Those two chain:
-
-```
-if (lVar19 == 1 && iVar6 != -1) {            // second member of the pair
-    memcpy(param_5, param_4, param_6 * 2);   // scratch <- destination
-    puVar5 = *param_1; *puVar5 = param_5;    // generator source := scratch
-}
-```
-
-On exit the source is restored to the original track (`if (1 < lVar19) { puVar5 = *param_1; *puVar5 = param_2; ... }`). The caller `FUN_18062ef70` calls the dispatcher once per FX note from the list at `gen+0x20`. Each call reads the restored `param_2` and writes the same `param_4` (seeded with a copy of dry), so where two FX notes overlap, the later one replaces the earlier. The order follows the `gen+0x20` list. The renderer does FX-L then FX-R, and `--fx-order-rl` swaps them.
-
-**Peak filter plus anything: a separate stage.** The C4=0 filter is a device ParamEq (7.1), downstream of the generator and upstream of the SE mix, so it always stacks on top.
-
-**Tab laser (C4 1..5) plus FX button: chain.** Just before the laser run loop, `FUN_18062ef70` points the generator source at a copy of the FX result:
-
-```
-memcpy(scratch, param_4, len);      // scratch <- the DESTINATION, i.e. the FX result
-puVar23 = *param_1;
-*puVar23 = scratch;                 // generator source := that snapshot
-...
-for (run = first; run != last; run += 0x18)
-    FUN_18062ea60(param_1, param_4, run);
-```
-
-**Laser plus laser: the later run overwrites.** The snapshot is taken once, and each `FUN_18062ea60` call `memcpy`s its result over the destination. VOL-L and VOL-R both read the post-FX audio, and the later run wins the overlap.
-
-**Where effects stack,** the mix compounds, because each effect mixes against its own input (two effects at 50% leave 25% of the original). There's also an int16 requantisation between stages (`FUN_18063dc40` then `FUN_18063d9e0`, §2), so a chain can clip partway through. `--no-stage-clip` keeps float between stages.
-
-### 8.2 High-Q laser passages run about 1 dB hot
-
-A fast laser wiggle through a Q 5.0 tab LPF renders about 0.9 dB louder than the capture, with a fraction of a percent of samples clipping. The cause is unknown. Candidates: the Q 5 peak against its `(1 - Q*0.04)` trim, the device ParamEq stacking on top (7.1), and chaining compounding both.
-
-## 9. Cross-check against `Rosemoe/sdvx-sfx-renderer`
-
-[sdvx-sfx-renderer](https://github.com/Rosemoe/sdvx-sfx-renderer) is an independent reimplementation of the same engine, built from IDA in about 4000 lines of Python. It doesn't model SE bank levels, the music duck or the peak filter's queue delay.
-
-### 9.1 Agreement
-
-* The ParamEq (7.1): the 128-entry table, `[80, 16000]` clamp, bandwidth/gain curves, `knob < 4` dead zone and `bandwidth / 12` octave reading.
-* The effect-id table (§3), 11 of 13 ids.
-* Wobble's five waves, its `(1 - Q*0.04)` trim and column layout.
-* Laser handling: VOL-R as `1 - pos`, VOL-L raw, `max()` into one accumulator.
-* `#TRACK AUTO TAB`'s effect column is 2-indexed.
-* A tab laser reads the FX-button result (chain, 8.1).
-* Tape Stop (id 4) duration in seconds, and `#BEAT RESOLUTION` per chart.
-
-### 9.2 Taken from it
-
-* Wobble's C6 as a rate (4.9), later confirmed in the disassembly.
-* The `#TAB PARAM ASSIGN INFO` sweep formula and its 512-sample refresh (6.3), and C4=6 as its control source.
-
-### 9.3 Disagreements
-
-Each was A/B tested on the frames it affects, and the other renderer's reading stays behind a flag. Ours scores better for Gate's step table (4.5) and BitCrusher's block-realigned grid (4.3). Its three-phase Tape Stop Ex model is inconclusive (`--tapestop-ex-3phase`). Laser easing and float-only stages make no measurable difference.
+ 
