@@ -1,5 +1,3 @@
-"""Job queue on one background thread. Per (song, difficulty) it runs convert_notes.convert() with real metadata, then render_chart.main(), both in-process, and streams stdout into the debug console. po= and plength= are measured by preview_offset and cached per song. Cancelling is job-granular: a render in progress finishes, the queue stops before the next one.
-"""
 import contextlib
 import io
 import os
@@ -193,7 +191,6 @@ def run_job(job, options, log, preview_cache=None):
 
 
 def _render_audio(job, options, log):
-    """Runs render_chart in-process, streaming its output to `log`. Returns an error message, or "" on success."""
     argv = [os.path.dirname(job.vox_path),
             "-d", job.song.difficulties[job.diff_key].suffix,
             "-a", job.s3v_path,

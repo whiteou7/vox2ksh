@@ -1,5 +1,3 @@
-"""Checks GitHub releases for whiteou7/vox2ksh in the background. Shows red text only, no auto-update.
-"""
 import json
 import os
 import re

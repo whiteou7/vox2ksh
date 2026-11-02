@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""Converts buttons and lasers from .vox to the .ksh chart body (specs/notes.md). `--preview` fills po= and plength= from the song audio.
-
-    python convert_notes.py <chart.vox> [-o out.ksh] [--ksh-version 1|2] [--preview]
-"""
-
 import argparse
 import bisect
 import math
@@ -102,7 +97,6 @@ def _format_curve(curve):
 
 
 def _camera_events_by_tick(chart, pretilt_fix, simulate_tilt):
-    """Per-tick option lines (tilt, zoom) and per-tick spin tokens."""
     options, spins = {}, {}
     for (tick, value) in camera_events.compute_tilt_events(chart, pretilt_fix=pretilt_fix, simulate=simulate_tilt):
         options.setdefault(tick, []).append("tilt=" + value)

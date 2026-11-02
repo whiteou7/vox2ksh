@@ -1,5 +1,3 @@
-"""The window: song table, difficulty filters, KSH version dropdown, jacket and metadata preview, debug console, Advanced options panel and Settings. Standard slam gap, Remove pretilt, Simulate arcade tilt and Preview offset are set by hand here, not generated from render_chart.py flags. The KSH version dropdown is in the toolbar because it decides which players can read the output.
-"""
 import os
 import queue
 import sys

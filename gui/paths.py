@@ -1,5 +1,3 @@
-"""Path resolution for source runs and frozen builds, including where a build's bundled SE bank and ffmpeg live.
-"""
 import os
 import sys
 

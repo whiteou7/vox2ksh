@@ -1,5 +1,3 @@
-"""Saves folder choices and panel state to the vox2ksh-gui folder under %APPDATA% (settings.json).
-"""
 import json
 import os
 

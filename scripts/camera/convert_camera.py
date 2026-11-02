@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""Converts a chart with camera events on, through convert_notes.convert(..., camera=True).
-
-    python convert_camera.py <chart.vox> [-o out.ksh] [--pretilt-fix] [--simulate-tilt]
-"""
 import argparse
 import os
 import sys

@@ -1,5 +1,3 @@
-"""Fits the blend depth per effect region, |ref| = (1 - b)|dry| + b|mine|. A value of 1 means the depth is right.
-"""
 import os, sys, numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

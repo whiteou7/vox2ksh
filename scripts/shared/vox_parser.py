@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""Parser for .vox charts (formats 10, 12 and 13). Camera control tracks end up in VoxChart.camera, and laser points expose roll_type, roll_length, cells_per_chain and unknown_c8, resolved per format version.
-"""
-
 import bisect
 import math
 from dataclasses import dataclass
@@ -36,8 +33,6 @@ def parse_position(position):
 
 
 class Timeline:
-    """Maps measure,beat,cell positions to absolute ticks and ticks to seconds. Measures are 0-based. With `cell_div` > 1, `res` is a coarser grid than the file's and each cell is rounded onto it."""
-
     def __init__(self, sections, res=DEFAULT_BEAT_RESOLUTION, cell_div=1):
         self.res = res
         self.cell_div = cell_div
@@ -91,7 +86,6 @@ class Timeline:
         return self.tick_at(*parse_position(position))
 
     def tick_and_length(self, position, length):
-        """Start tick and length of an event `length` file cells long. Both ends are rounded, and a hold never shrinks to a chip."""
         measure0, beat0, cell = parse_position(position)
         start = self.tick_at(measure0, beat0, cell)
         if length <= 0 or self.cell_div == 1:
@@ -225,7 +219,6 @@ def parse_laser_track(sections, tl, tag, version):
 
 
 def parse_camera_segments(sections, tl, control_type):
-    """Rows of one control type from #SPCONTROLER and #LOCKED_SPCONTROLER, which the game reads alike. Fields split on any whitespace, as the game's sscanf does, so an empty field (two tabs) is skipped. BIL_RotZ values carry a `d` prefix (degrees)."""
     out = []
     for line in sections.get("#SPCONTROLER", []) + sections.get("#LOCKED_SPCONTROLER", []):
         fields = line.split()
@@ -239,7 +232,6 @@ def parse_camera_segments(sections, tl, control_type):
 
 
 def parse_tilt_modes(sections, tl):
-    """(tick, mode) rows of #TILT MODE INFO, in time order."""
     rows = [(tl.tick_of_position(fields[0]), int(fields[1]))
             for fields in (line.split() for line in sections.get("#TILT MODE INFO", [])) if len(fields) >= 2]
     rows.sort(key=lambda row: row[0])
@@ -252,8 +244,6 @@ LASER_TAGS = ["#TRACK1", "#TRACK8"]
 
 
 class VoxChart:
-    """One parsed chart. `sec` keeps the raw sections for the tags this parser does not interpret. `res_unit` puts the ticks on gcd(file resolution, res_unit) per beat instead of the file's own resolution."""
-
     def __init__(self, path, res_unit=None):
         self.path = path
         self.sec = read_sections(path)
@@ -275,7 +265,6 @@ class VoxChart:
 
     @cached_property
     def camera(self):
-        """Tilt, zoom-top, zoom-bottom and BIL_RotZ segments, and the (tick, mode) rows of #TILT MODE INFO. Parsed on first use, since only the camera converter reads them."""
         return {
             "tilt": parse_camera_segments(self.sec, self.tl, "Tilt"),
             "cam_rotx": parse_camera_segments(self.sec, self.tl, "CAM_RotX"),

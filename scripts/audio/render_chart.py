@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""Applies a chart's FX holds and lasers to its .s3v. Also does the device ParamEq, the music duck and the layered SE bank. `--help` lists the flags that switch off parts of the chain, each explained in specs/audio_engine.md section 6.
-
-    python render_chart.py ../data/music/2229_kamui_tjhangneil -d 5m -o output/kamui_fx.ogg
-"""
-
 import argparse
 import collections
 import math
@@ -68,7 +63,6 @@ def parse_fx_pairs(sec):
 
 
 def parse_param_assign(sec):
-    """{effect pair index: [(parameter index, low, high) per chain slot]}"""
     out = collections.defaultdict(list)
     for line in sec.get("#TAB PARAM ASSIGN INFO", []):
         parts = [p.strip() for p in line.replace("\t", ",").split(",") if p.strip() != ""]
@@ -95,7 +89,6 @@ def parse_effects(sec, key):
 
 
 def parse_auto_tab(sec, tl):
-    """(tick, length, effect pair id) per #TRACK AUTO TAB span."""
     for line in sec.get("#TRACK AUTO TAB", []):
         fields = line.split()
         if len(fields) < 3:
@@ -108,7 +101,6 @@ def parse_auto_tab(sec, tl):
 
 
 class LaserSegment(NamedTuple):
-    """One laser section between two points. Knob values are 0..127 with the right lane already mirrored."""
     start_tick: int
     end_tick: int
     start_knob: float
@@ -118,7 +110,6 @@ class LaserSegment(NamedTuple):
 
 
 def laser_segments(points, mirror):
-    """A point starts a section unless it is a section's end (node type 2)."""
     def knob(position):
         return (1.0 - position if mirror else position) * KNOB_MAX
     return [LaserSegment(current.tick, following.tick, knob(current.pos), knob(following.pos),
@@ -127,7 +118,6 @@ def laser_segments(points, mirror):
 
 
 def param_sweep_curve(chart, n):
-    """Per-sample 0..1 sweep value and mask for lasers whose effect column selects the param sweep. Overlaps keep the larger value."""
     tl = chart.tl
     values = np.zeros(n, np.float32)
     active = np.zeros(n, bool)
@@ -157,7 +147,6 @@ def _apply_easing(phase, curve, sin=math.sin):
 
 
 def _grid_origin_sample(tl, tick):
-    """The latest tempo or time-signature change at or before `tick`, in samples."""
     changes = [change_tick for change_tick, _bpm in tl.bpm_pts]
     changes += [tl.measure_start_tick(measure) for measure, _num, _den in tl.beats]
     return max((sample_index(tl, change_tick) for change_tick in changes if change_tick <= tick), default=0)
@@ -201,7 +190,6 @@ class Sample(NamedTuple):
 
 
 def load_sample_bank(path):
-    """One Sample per entry, named from the .def file beside it when there is one."""
     names = []
     def_path = os.path.splitext(path)[0] + ".def"
     if os.path.exists(def_path):
@@ -225,12 +213,10 @@ def load_sample_bank(path):
 
 
 def _copies(left, right, start, stop):
-    """Independent copies of both channels over [start, stop), for an effect to work on."""
     return left[start:stop].copy(), right[start:stop].copy()
 
 
 def mix_sample_into(left, right, position, sample, gain, cut_at=None):
-    """Mixes `sample` into L/R from `position`, stopping at `cut_at` when given."""
     n = min(sample.left.size, left.size - position)
     if cut_at is not None:
         n = min(n, max(0, cut_at - position))
@@ -286,8 +272,6 @@ def write_audio(path, left, right, sr, quality=6):
 
 
 class Render:
-    """One render: the working L/R track, the untouched dry copy, and the tallies reported at the end. Stages run in engine order in `run`."""
-
     def __init__(self, args, chart, left, right):
         self.args = args
         self.chart = chart
@@ -303,20 +287,15 @@ class Render:
         self.snapped = collections.Counter()
         self.wobble_state = {} if args.wobble_persist else None
 
-    # -- effect dispatch --------------------------------------------------
-
     def quantize_stage(self, values):
-        """Rounds a stage's output the way the engine's int16 buffers do, unless --no-stage-clip."""
         if self.args.no_stage_clip:
             return values
         return np.trunc(np.clip(values, -32768.0, 32767.0)).astype(np.float32)
 
     def quantize_stereo(self, rendered, skip=0):
-        """(left, right) of a stage result, quantized, without its first `skip` samples."""
         return self.quantize_stage(rendered[0][skip:]), self.quantize_stage(rendered[1][skip:])
 
     def apply_button_effect(self, left, right, effect, tick, lookahead=None):
-        """One FX-button effect over a span. None when the effect is unimplemented or switched off."""
         args, tl, block = self.args, self.tl, self.args.block
         effect_id = int(effect[0])
         params = list(effect[1:])
@@ -376,7 +355,6 @@ class Render:
         return None
 
     def apply_laser_effect(self, left, right, effect, knob):
-        """A laser's own effect over a span, driven by `knob` automation. None for unknown types."""
         args = self.args
         effect_id = int(effect[0])
         params = list(effect[1:])
@@ -393,13 +371,11 @@ class Render:
     # -- stages -----------------------------------------------------------
 
     def _grid_lead_samples(self, effect, start_tick):
-        """Samples a grid-locked effect's phase starts before its note."""
         if self.args.no_grid_snap or int(effect[0]) not in GRID_LOCKED or len(effect) <= 3:
             return 0
         return grid_lock_lead_samples(self.tl, start_tick, effect[3])
 
     def _sample_range(self, start_tick, end_tick):
-        """Sample range between two ticks, clipped to the track."""
         return (max(0, sample_index(self.tl, start_tick)),
                 min(self.n, sample_index(self.tl, end_tick)))
 
@@ -420,7 +396,6 @@ class Render:
                 if not plan:
                     continue
 
-                # Grid-locked effects start their phase before the note, so render from there.
                 lead_start = max(0, start - max(snap for _effect, snap in plan))
                 if args.fx_chain_overlap:
                     source_left, source_right = self.left, self.right
@@ -449,7 +424,6 @@ class Render:
                     self.left[start:stop], self.right[start:stop] = work_left[skip:], work_right[skip:]
 
     def apply_auto_tab(self):
-        """#TRACK AUTO TAB spans: a laser borrows an FX-button effect pair, optionally with a laser-driven parameter sweep."""
         sweep = not self.args.no_param_assign_sweep
         assign_table = parse_param_assign(self.sec) if sweep else {}
         sweep_value = sweep_active = None
@@ -493,13 +467,11 @@ class Render:
         self.applied["%s (AUTO TAB)" % name] += 1
 
     def _apply_borrowed_effect_swept(self, effect, name, start_tick, start, stop, assignment, sweep):
-        """Runs the effect in short blocks, setting one parameter from the laser's position in each."""
         left, right = self.left, self.right
         sweep_value, sweep_active = sweep
         param_index, low, high = assignment
 
         def swept_blocks():
-            """(block start, block end, parameter value or None where no control laser is active)."""
             for block_start in range(start, stop, PARAM_ASSIGN_BLOCK):
                 block_end = min(block_start + PARAM_ASSIGN_BLOCK, stop)
                 active = sweep_active[block_start:block_end]
@@ -510,11 +482,6 @@ class Render:
                 yield block_start, block_end, value
 
         if param_index == 1 + MIX_PARAM.get(int(effect[0]), 0):
-            # The engine renders the span once and reads the swept mix as a function of time (0x1806371f0,
-            # evaluator 0x180637cc0), so effect state never restarts. Output is affine in each effect's wet
-            # share, so blending the mix-0 and mix-100 renders by that share gives the same result.
-            # shortcut: Flanger's feedback is not affine in mix, so only its constant-mix stretches are exact;
-            # render it in one pass with a time-varying mix if a moving Flanger sweep sounds off.
             renders = []
             for mix in (0.0, 100.0):
                 fixed = list(effect)
@@ -555,11 +522,9 @@ class Render:
             self.applied["%s (AUTO TAB sweep)" % name] += 1
 
     def apply_lasers(self):
-        """Applies each laser's own effect and returns the per-sample knob and the mask of lasers that bypass the device ParamEq."""
         args, n = self.args, self.n
         peak_knob = np.zeros(n, np.float32)
         peak_disabled = np.zeros(n, bool)
-        # The engine snapshots its source once before dispatching any run, so lasers don't stack.
         chain = (self.left, self.right) if args.laser_chain_overlap else (self.left.copy(), self.right.copy())
         if args.no_laser:
             return peak_knob, peak_disabled
@@ -588,7 +553,6 @@ class Render:
 
     @staticmethod
     def _group_into_runs(segs):
-        """Contiguous sections with the same effect column form one run."""
         runs = []
         for seg in segs:
             previous = runs[-1][-1] if runs else None
@@ -647,7 +611,6 @@ class Render:
         self.applied["%s (%s)" % (name, label)] += 1
 
     def paramq_knob(self, peak_knob, peak_disabled):
-        """Per-sample knob for the device ParamEq: gated to default-EQ lasers, then delayed by the engine's queue lag."""
         args = self.args
         knob = peak_knob.copy()
         if not args.peak_always:
@@ -658,7 +621,6 @@ class Render:
         return knob
 
     def apply_music_duck(self, knob):
-        """Scales L/R by the music-voice gain the game applies alongside the default laser EQ."""
         args = self.args
         per_block = knob[::args.block].astype(np.int32)
         step = np.inf if args.duck_rate is None else args.duck_rate * args.block / float(SR)
@@ -674,7 +636,6 @@ class Render:
         self.right *= envelope
 
     def knob_per_block(self, knob):
-        """The knob sampled once per block, padded with zeros to cover the whole track."""
         block = self.args.block
         block_count = (self.n + block - 1) // block
         sampled = knob[::block][:block_count]
@@ -748,7 +709,6 @@ class Render:
         print()
 
     def apply_chain(self, folder):
-        """The whole chain in engine order. Returns after the final master gain, ready to write."""
         args = self.args
         if not args.no_fx:
             self.apply_fx_buttons()

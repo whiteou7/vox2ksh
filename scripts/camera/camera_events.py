@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Tilt, zoom and spin conversion (specs/camera.md): compute_tilt_events, compute_zoom_events and compute_spin_tokens. Pure functions over a loaded VoxChart, no file I/O.
-"""
 import bisect
 import math
 import sys
@@ -13,8 +11,7 @@ def format_tilt(v):
         return "0"
     return s
 
-
-# The game's manual factor (Game::AngleUpdater): a vox unit is 23.75 degrees, a ksh unit 10.
+# a vox unit is 23.75 degrees, a ksh unit 10.
 TILT_VOX_TO_KSH = -2.375
 
 
@@ -116,7 +113,6 @@ def _pretilt_brackets(chart):
 
 
 def _triple_spin_ramps(chart):
-    """(start tick, end tick, magnitude) of each roll_type 4 tilt ramp."""
     out = []
     seen = set()
     for points in chart.laser:
@@ -145,8 +141,6 @@ def _triple_spin_tilt_points(chart):
         spans.append((start, end))
     return ramp, restore, spans
 
-
-# NABLA Game::AngleUpdater (specs/camera.md, "Simulated tilt"). Rates are per millisecond of real time.
 TILT_EPS = 1.0 / 127
 LASER_TILT_RATE = 0.00375
 RELAX_TILT_RATE = 0.0009375
@@ -171,7 +165,6 @@ def _laser_sections(points):
 
 
 def _manual_tilt_series(segs):
-    """Point lists of the manual Tilt series, built as the game's series builder does."""
     def value(v):
         return 0.0 if abs(v) <= 0.01 else v
 
@@ -194,7 +187,6 @@ def _manual_tilt_series(segs):
 
 
 def _linear_samples(times, values, stop):
-    """(ms, value) of a piecewise-linear graph at each whole millisecond in [times[0], min(times[-1], stop))."""
     j, last = 0, len(times) - 1
     for k in range(math.ceil(times[0]), math.ceil(min(times[-1], stop))):
         while j + 1 < last and times[j + 1] <= k:
@@ -204,7 +196,6 @@ def _linear_samples(times, values, stop):
 
 
 def _simulate_lane_roll(chart, ms):
-    """Filtered lane tilt in degrees at each millisecond, until it stops moving after the last event."""
     lasers = []
     for lane, points in enumerate(chart.laser):
         for section in _laser_sections(points):
@@ -278,7 +269,6 @@ def _simulate_lane_roll(chart, ms):
 
 
 def _rotz_degrees(chart, ms):
-    """BIL_RotZ as a function of milliseconds (each row is a linear graph, held after its end, until the next row), and the ticks where it jumps. at(t, before=True) is the value just before t."""
     graphs, jumps = [], set()
 
     def at(t, before=False):
@@ -298,7 +288,6 @@ def _rotz_degrees(chart, ms):
 
 
 def _swing_door(samples, tolerance, start=None):
-    """Few points whose linear interpolation stays within tolerance of every (x, y) sample, starting from `start` (at the first sample's x) if given."""
     ax, ay = start or samples[0]
     out = [(ax, ay)]
     lo, hi = -math.inf, math.inf
@@ -330,9 +319,7 @@ def _interpolate(points, tick):
 
 
 def _add_spin_ramps(points, ramps):
-    """Lays each roll_type 4 ramp on top of the simulated tilt, then drops back to it on the ramp's last tick."""
     for (start, end, magnitude) in ramps:
-        # A tick can already hold two points (a BIL_RotZ jump): the ramp ends on the first and drops to the last.
         at_start = [p for p in points if p[0] == start] or [(start, _interpolate(points, start))]
         at_end = [p for p in points if p[0] == end] or [(end, _interpolate(points, end))]
         inside = [(t, v + magnitude * (t - start) / (end - start)) for (t, v) in points if start < t < end]
@@ -342,7 +329,6 @@ def _add_spin_ramps(points, ramps):
 
 
 def simulated_tilt_points(chart):
-    """(tick, ksh tilt) points reproducing NABLA's lane tilt, BIL_RotZ and type-4 ramps as manual tilt."""
     tl = chart.tl
 
     def ms(tick):
@@ -356,8 +342,6 @@ def simulated_tilt_points(chart):
     while not ticks or (ms(ticks[-1]) < end_ms and ticks[-1] < chart.end_tick):
         ticks.append(len(ticks) * step)
     tempo_ticks = {tick for (tick, bpm), (_tick, previous) in zip(tl.bpm_pts[1:], tl.bpm_pts) if bpm != previous}
-    # A BIL_RotZ jump splits the samples, so it becomes two tilt lines on one tick. A BPM change
-    # ends a segment without a jump: USC interpolates in time and KSM in ticks, so they agree only within one tempo.
     runs, samples, joined = [], [], False
     for tick in sorted(set(ticks) | {t for t in jumps | tempo_ticks if t <= ticks[-1]}):
         t = ms(tick)
@@ -382,8 +366,6 @@ def simulated_tilt_points(chart):
             points += _swing_door(run, SIM_TOLERANCE)
     points = _add_spin_ramps(points, _triple_spin_ramps(chart))
     out = _collapse_equal_runs([(tick, format_tilt(v)) for (tick, v) in points])
-    # USC applies manual tilt directly only if the first point after the switch to manual is an immediate change.
-    # 0.001 is a hundredth of a degree.
     if len(out) > 1 and (len(out) < 3 or out[2][0] != out[1][0]):
         out.insert(2, (out[1][0], format_tilt(float(out[1][1]) + 0.001)))
     return out
