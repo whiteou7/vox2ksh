@@ -1,5 +1,3 @@
-"""Reads data/others/music_db.xml (cp932) and matches it to data/music: titles, artists, jackets, levels, and which difficulties have a chart on disk. An input folder can be a partial game update with only the songs it changed, so a chart can exist without its .s3v. Those songs convert without audio unless a fallback game folder is set in Settings.
-"""
 import os
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -59,7 +57,6 @@ class Song:
         return self.difficulties.get("maximum") or self.difficulties.get("infinite")
 
     def resolve_diff_keys(self, diff_keys):
-        """`diff_keys` with the pseudo-key "top" replaced by this song's top difficulty, if it has one."""
         keys = set(diff_keys)
         if "top" in keys:
             keys.discard("top")

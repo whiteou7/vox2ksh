@@ -1,5 +1,3 @@
-"""Saves folder choices and panel state to the vox2ksh-gui folder under %APPDATA% (settings.json).
-"""
 import json
 import os
 
@@ -13,6 +11,7 @@ _DEFAULTS = {
     "ksh_version": 1,
     "max_parallel_charts": 2,
     "pretilt_fix": True,
+    "simulate_tilt": False,
     "preview_meta": True,
     "debug": False,
     "advanced": False,

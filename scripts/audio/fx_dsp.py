@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""The effect DSP, transcribed from BMSoundLibSvo::CSvoEffectedAudioGeneratorImpl (specs/audio_engine.md). Runs standalone on a WAV.
-
-    python fx_dsp.py --list
-    python fx_dsp.py in.wav out.wav --effect wobble --params 80,0,3,500,18000,4.0,1.4 --range 8:16
-"""
-
 import argparse
 import math
 import sys
@@ -901,13 +895,17 @@ def _pv_channel(x, ratio, speed, n_out):
     return np.interp(pos, np.arange(mid.size), mid)
 
 
+def pitch_speed_wet(m):
+    return m * m
+
+
 def fx_pitch_speed(L, R, mix, semitones, speed, block=512, lookahead=None):
     n = L.size
     semitones, speed = float(semitones), float(speed)
     if n <= 0 or (semitones == 0.0 and speed == 1.0):
         return L.astype(np.float32), R.astype(np.float32)
 
-    m = mixof(mix)
+    m = pitch_speed_wet(mixof(mix))
     ratio = math.pow(2.0, semitones / 12.0)      # 0x18062d92e
     speed = max(speed, 0.0)
 

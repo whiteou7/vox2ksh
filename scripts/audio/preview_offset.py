@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Finds a song's _pre.s3v preview inside the full track by cross-correlation, to fill the po= and plength= header fields (specs/notes.md). `--patch` fills them into charts that already exist. `--music` can be repeated, and this install's data/music is always searched last, so use it for batches converted from an update folder.
-
-    python preview_offset.py 0001_albida_muryoku 2229_kamui_tjhangneil
-    python preview_offset.py --patch <converted-folder> --music <game folder>/data/music --dry-run
-"""
-
 import argparse
 import os
 import subprocess

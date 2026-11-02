@@ -1,6 +1,9 @@
+<<<<<<< HEAD
 """Runs chart jobs on configurable isolated worker processes. po= and plength= are measured once per song and cached in the parent process. Cancelling stops new jobs and lets active jobs finish.
 """
 import concurrent.futures
+=======
+>>>>>>> f8231b135f13bfbe218beadfaf179aea064b286d
 import contextlib
 import io
 import multiprocessing
@@ -58,6 +61,7 @@ class BatchOptions:
     standard_slam_gap: bool = True
     ksh_version: int = 1
     pretilt_fix: bool = False
+    simulate_tilt: bool = False
     advanced_values: dict = field(default_factory=dict)
 
 
@@ -169,6 +173,7 @@ def run_job(job, options, log, preview_cache=None, copy_jacket=True):
         notes_convert.convert(job.vox_path, job.ksh_out, camera=True, meta=meta,
                                slam_gap_frac=slam_gap_frac,
                                pretilt_fix=options.pretilt_fix,
+                               simulate_tilt=options.simulate_tilt,
                                ksh_version=options.ksh_version)
         result.wrote_ksh = True
     except Exception as e:  # noqa: BLE001 - one bad chart must not abort the batch
@@ -198,7 +203,6 @@ def run_job(job, options, log, preview_cache=None, copy_jacket=True):
 
 
 def _render_audio(job, options, log):
-    """Runs render_chart in-process, streaming its output to `log`. Returns an error message, or "" on success."""
     argv = [os.path.dirname(job.vox_path),
             "-d", job.song.difficulties[job.diff_key].suffix,
             "-a", job.s3v_path,

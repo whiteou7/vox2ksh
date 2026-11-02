@@ -1,5 +1,3 @@
-"""Splits the spectral_metric score by what the chart is doing: FX, peak-laser, tab-laser, idle. Each region is scored over all its frames and over exclusive frames, where it is the only effect running; use the exclusive column to judge one effect. `gain` is dry minus render, so positive is closer to the recording than no effect. `moved` is how far the effect shifted the audio, and high `moved` with no `gain` means a wrong algorithm. The ALL row dilutes local changes.
-"""
 import os, sys, wave, numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

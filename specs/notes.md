@@ -1,12 +1,10 @@
 # Notes: `.vox` buttons and lasers to `.ksh`
 
-Code: [`../scripts/notes/`](../scripts/notes/). Formats: [`vox_format.md`](vox_format.md), [`ksh_format.md`](ksh_format.md). Numbers and examples: [`evidence/notes.md`](evidence/notes.md).
-
 This covers BT, FX and laser notes, plus the BPM and time signatures that set up the grid.
 
 ## Buttons
 
-Every vox tick is a whole multiple of the ksh line count, so button conversion loses nothing. Each measure picks its own line count as the gcd over its events. BT: `1` is a chip, `2` a hold. FX: `2` is a chip, `1` a hold. The chart ends at the last real event, not at `#END POSITION`, which often runs well past the last note.
+Each measure picks its own line count as the gcd over its events. The chart is first read onto gcd(`#BEAT RESOLUTION`, 240) ticks per beat, USC's own grid, so 48- and 240-resolution charts lose nothing and finer ones round each event to the nearest USC tick. BT: `1` is a chip, `2` a hold. FX: `2` is a chip, `1` a hold. The chart ends at the last real event, not at `#END POSITION`, which often runs well past the last note.
 
 ## Lasers
 
@@ -53,22 +51,3 @@ One option covers one segment, from its laser point to the next. The segment is 
 * Curves are offered only where every gap is a 32nd note or shorter (`CURVE_LEG_FRAC`). A parabola can thread sparse authored points exactly while bowing anywhere between them.
 
 Over the whole corpus, v2 writes fewer laser points than v1 and tracks the arcade's polyline much more closely. Authored staircases at 24th-note spacing survive point for point. Below one laser step, shapes get flattened, where v1's tighter `RDP_TOL` keeps more of them. `ver=` stays `171`.
-
-## Bugs found and fixed
-
-All of these turned up on charts outside the original 30-chart matched set and were checked against the full reference aggregate.
-
-1. `shared/vox_parser.py` dropped the data in `#END POSITION`.
-2. A fast curve tail could put its last point on ksh's slam cutoff and draw a slam nobody authored.
-3. A same-tick slam on a run boundary lost its endpoint and drew a diagonal. The fix was only half right; see 11.
-4. The min-gap pass could keep a near-extremum instead of the true peak.
-5. A slam's end landed on the next free tick, a hairline compared with hand charts. It now uses `SLAM_GAP_FRAC`, checked against the next run's true start.
-6. v2: a curve fitted over sparse linear points invented curvature. The fix was `CURVE_LEG_FRAC` plus scoring against the polyline. The metric shared the code's blind spot, so the bug stayed invisible until the ground truth changed from the vox points to the polyline through them.
-7. v2: the inflection rule fired on stretches too sparse for a curve. It now uses the same density test.
-8. v2: a split too close to an end was dropped, and a legal split went with it. It's now moved instead.
-9. v2: turning points were thinned left to right, so room went to the wrong reversal. It now keeps the one furthest from the chord.
-10. The minimum spacing was a fraction of the measure, not a note value, and was wrong in both directions outside 4/4 (6 ticks in 3/4, 82 in a 41-beat measure). It's now `whole_note // min_gap_frac`. 4/4 charts don't move.
-11. Two sections handing off on one tick came out as a phantom slam. Ending a section costs a `-` row, so the two need to be two ticks apart, which `_separate_runs` now ensures. A jump that rounds to the same ksh step needs only one tick. Still open: chained same-tick stacks of three or more points can produce non-monotonic ticks.
-12. The beat column of a `measure,beat,cell` timing was read as a quarter note. A beat is one denominator unit (`res * 4 / den` cells, so 12 in 15/16), so events past the first beat of a non-`/4` measure landed late. Every button category improved. `vox_format.md` already had this right. `render_chart.py` had the same bug; see `audio_engine.md` §5.3b.
-13. The min-gap pass dropped sharp turning points that fell between its thinning steps. On a 3-tick sampled sine arch it moved the peak a tick and dropped the cusp after it, so the ksh laser stopped at 0.14 instead of 0. Reversals are now fixed points. Between two of them, a densely sampled stretch (every gap within a 24th note) gets as many evenly spaced points as the minimum gap allows, read off the vox polyline, so these points don't have to sit on vox sample ticks.
-14. A `t=` change after a measure's first row was looked up by row index instead of tick offset, so it landed on the wrong row or was dropped. モノノケ狂想曲 (2271) steps the BPM every 32nd note from 249 down to 160 over vox measures 126-133, and only 19 of its 173 changes came out. `t=` now keeps the vox's four decimals, the precision `#BPM INFO` stores.
