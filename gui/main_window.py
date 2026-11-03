@@ -454,7 +454,7 @@ class App:
         self.row_to_song = {}
         query = self.search_var.get().strip().lower()
         for song in sorted(self.songs, key=lambda s: s.id):
-            if query and query not in song.title.lower() and query not in song.artist.lower():
+            if query and query not in song.title.lower() and query not in song.artist.lower() and query not in str(song.id):
                 continue
             iid = self.tree.insert("", "end", values=(song.id, song.title, song.artist, song.version_name,
                                                       song.distribution_date or "-"))
