@@ -1,0 +1,31 @@
+#!/bin/sh
+# When main is pushed to origin with a gui/version.py that has no GitHub release yet, build the exe
+# and publish the release once the push has landed. Enable once: git config core.hooksPath .githooks
+[ "$1" = origin ] || exit 0
+
+while read -r _ sha ref _; do
+    [ "$ref" = refs/heads/main ] || continue
+    ver=$(git show "$sha:gui/version.py" 2>/dev/null | sed -n 's/^__version__ = "\(.*\)"/\1/p')
+    [ -n "$ver" ] || continue
+    gh release view "v$ver" >/dev/null 2>&1 && continue
+
+    if [ "$sha" != "$(git rev-parse HEAD)" ] || ! git diff --quiet HEAD; then
+        echo "pre-push: v$ver has no release but the tree isn't clean at $sha - skipping release" >&2
+        continue
+    fi
+
+    echo "pre-push: building v$ver" >&2
+    python build/build.py >&2 || { echo "pre-push: build failed, push aborted" >&2; exit 1; }
+
+    # the tag needs the commit on GitHub, which a pre-push hook runs before - so publish after it lands
+    log="$(git rev-parse --git-dir)/release-$ver.log"
+    (
+        for _ in $(seq 60); do
+            [ "$(git ls-remote origin refs/heads/main | cut -f1)" = "$sha" ] && break
+            sleep 5
+        done
+        gh release create "v$ver" build/dist/vox2ksh.exe --target "$sha" --title "v$ver" --generate-notes
+    ) >"$log" 2>&1 </dev/null &
+    echo "pre-push: release v$ver will publish after the push (log: $log)" >&2
+done
+exit 0

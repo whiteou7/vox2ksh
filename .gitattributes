@@ -1,1 +1,2 @@
 *.ksh linguist-generated=true
+.githooks/* text eol=lf
