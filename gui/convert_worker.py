@@ -1,7 +1,4 @@
-"""Runs chart jobs on configurable isolated worker processes. po= and plength= are measured once per song and cached in the parent process. Cancelling stops new jobs and lets active jobs finish.
-"""
 import concurrent.futures
-
 import contextlib
 import io
 import multiprocessing
@@ -160,7 +157,7 @@ def _measured_preview_window(job, options, log, cache):
     return window
 
 
-def run_job(job, options, log, preview_cache=None, copy_jacket=True):
+def run_job(job, options, log, preview_cache=None):
     os.makedirs(job.song_out_dir, exist_ok=True)
     result = JobResult(job=job, ok=True)
 
@@ -179,12 +176,6 @@ def run_job(job, options, log, preview_cache=None, copy_jacket=True):
         result.error = "notes conversion failed: %s" % e
         log("!! %s: %s" % (os.path.basename(job.vox_path), e))
         return result
-
-    if copy_jacket and meta["jacket"] and job.jacket_src:
-        try:
-            shutil.copyfile(job.jacket_src, os.path.join(job.song_out_dir, meta["jacket"]))
-        except OSError as e:
-            log("!! jacket copy failed for %s: %s" % (job.song.folder, e))
 
     if not options.render_audio:
         return result
@@ -235,7 +226,7 @@ def _run_isolated_job(job, options, preview_window):
     cache = {job.s3v_path: preview_window} if job.s3v_path else {}
     try:
         with contextlib.redirect_stdout(forwarder), contextlib.redirect_stderr(forwarder):
-            result = run_job(job, options, log, cache, copy_jacket=False)
+            result = run_job(job, options, log, cache)
     finally:
         forwarder.flush()
     return result, lines
@@ -312,7 +303,7 @@ class ConvertWorker:
             _measured_preview_window(job, self.options, self.on_log, self._preview_cache)
             try:
                 result = run_job(job, self.options, self.on_log,
-                                 self._preview_cache, copy_jacket=False)
+                                 self._preview_cache)
             except Exception as e:  # noqa: BLE001 - one failed job must not abort the batch
                 result = JobResult(job=job, ok=False,
                                    error="conversion worker failed: %s" % e)

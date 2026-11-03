@@ -29,6 +29,3 @@ Clone this repo inside the game's `contents/` directory; scripts will find the g
 pip install -r requirements-gui.txt
 python gui/main.py
 ```
-
-## Todo
-- [ ] Add a CLI mode for VPS users
