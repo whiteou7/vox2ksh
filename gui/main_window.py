@@ -293,6 +293,13 @@ class App:
                          variable=self.preview_meta_var,
                          command=lambda: self._remember("preview_meta", self.preview_meta_var.get())
                          ).pack(anchor="w")
+        workers_row = ttk.Frame(notes_row)
+        workers_row.pack(anchor="w", pady=(4, 0))
+        ttk.Label(workers_row, text="Charts to convert at once (1-%d)"
+                  % convert_worker.MAX_PARALLEL_CHARTS).pack(side="left")
+        self.workers_var = tk.StringVar(value=str(self.settings.get("max_parallel_charts", 2)))
+        ttk.Spinbox(workers_row, from_=1, to=convert_worker.MAX_PARALLEL_CHARTS,
+                    textvariable=self.workers_var, width=5).pack(side="left", padx=6)
 
         ttk.Label(self.advanced_frame, text="render_chart.py options",
                   font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(4, 0))
@@ -515,15 +522,17 @@ class App:
             simulate_tilt=self.simulate_tilt_var.get(),
             advanced_values=self._read_advanced_values(),
         )
-        max_parallel_charts = self.settings.get("max_parallel_charts", 2)
-        if (not isinstance(max_parallel_charts, int) or isinstance(max_parallel_charts, bool)
-                or not 1 <= max_parallel_charts <= convert_worker.MAX_PARALLEL_CHARTS):
+        try:
+            opts.max_parallel_charts = int(self.workers_var.get())
+        except ValueError:
+            opts.max_parallel_charts = 0
+        if not 1 <= opts.max_parallel_charts <= convert_worker.MAX_PARALLEL_CHARTS:
             messagebox.showerror(
                 "Invalid conversion setting",
-                "Set charts to convert at once to a number from 1 to %d in Settings."
+                "Set charts to convert at once to a number from 1 to %d."
                 % convert_worker.MAX_PARALLEL_CHARTS)
             return
-        opts.max_parallel_charts = max_parallel_charts
+        self._remember("max_parallel_charts", opts.max_parallel_charts)
         self._log("=== starting: %d job(s) across %d song(s), ksh v%d, up to %d chart(s) "
                   "at once -> %s ==="
                   % (len(jobs), len(selected), opts.ksh_version,
@@ -669,19 +678,6 @@ class SettingsDialog(tk.Toplevel):
             ttk.Label(self, text=desc, foreground="#777", wraplength=440, justify="left",
                       font=("Segoe UI", 8)).grid(row=row * 2 + 2, column=0, columnspan=2, sticky="w", padx=8)
 
-        worker_row = len(fields) * 3
-        ttk.Label(self, text="Charts to convert at once").grid(
-            row=worker_row, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 0))
-        workers = tk.StringVar(value=str(app.settings.get("max_parallel_charts", 2)))
-        self.vars["max_parallel_charts"] = workers
-        ttk.Spinbox(self, from_=1, to=convert_worker.MAX_PARALLEL_CHARTS,
-                    textvariable=workers, width=8).grid(
-            row=worker_row + 1, column=0, sticky="w", padx=8)
-        ttk.Label(self, text="Uses one worker process per active chart (1-%d)."
-                  % convert_worker.MAX_PARALLEL_CHARTS, foreground="#777",
-                  wraplength=440, justify="left", font=("Segoe UI", 8)).grid(
-            row=worker_row + 2, column=0, columnspan=2, sticky="w", padx=8)
-
         btns = ttk.Frame(self, padding=8)
         btns.grid(row=99, column=0, columnspan=2, sticky="e")
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right")
@@ -697,22 +693,8 @@ class SettingsDialog(tk.Toplevel):
             var.set(d)
 
     def _save(self):
-        try:
-            max_parallel_charts = int(self.vars["max_parallel_charts"].get())
-        except ValueError:
-            messagebox.showerror("Invalid setting", "Charts to convert at once must be a whole number.",
-                                 parent=self)
-            return
-        if not 1 <= max_parallel_charts <= convert_worker.MAX_PARALLEL_CHARTS:
-            messagebox.showerror(
-                "Invalid setting",
-                "Charts to convert at once must be between 1 and %d."
-                % convert_worker.MAX_PARALLEL_CHARTS,
-                parent=self)
-            return
         for key, var in self.vars.items():
-            self.app.settings[key] = (
-                max_parallel_charts if key == "max_parallel_charts" else var.get())
+            self.app.settings[key] = var.get()
         settings_store.save(self.app.settings)
         self.app.fallback_music_dir = music_db.install_music_dir(
             self.app.settings.get("fallback_game_folder"))
