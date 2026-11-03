@@ -293,6 +293,13 @@ class App:
                          variable=self.preview_meta_var,
                          command=lambda: self._remember("preview_meta", self.preview_meta_var.get())
                          ).pack(anchor="w")
+        workers_row = ttk.Frame(notes_row)
+        workers_row.pack(anchor="w", pady=(4, 0))
+        ttk.Label(workers_row, text="Charts to convert at once (1-%d)"
+                  % convert_worker.MAX_PARALLEL_CHARTS).pack(side="left")
+        self.workers_var = tk.StringVar(value=str(self.settings.get("max_parallel_charts", 2)))
+        ttk.Spinbox(workers_row, from_=1, to=convert_worker.MAX_PARALLEL_CHARTS,
+                    textvariable=self.workers_var, width=5).pack(side="left", padx=6)
 
         ttk.Label(self.advanced_frame, text="render_chart.py options",
                   font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(4, 0))
@@ -384,19 +391,22 @@ class App:
         self.status_bar.pack(side="bottom", fill="x")
 
         self.selected_var = tk.StringVar(value="Selected 0/0 songs")
-        ttk.Label(self.status_bar, textvariable=self.selected_var).pack(side="left")
-
         self.progress_var = tk.StringVar(value="")
-        ttk.Label(self.status_bar, textvariable=self.progress_var).pack(side="left", padx=12)
-        self.progress = ttk.Progressbar(self.status_bar, mode="determinate", length=220)
+        ttk.Label(self.status_bar, textvariable=self.progress_var, wraplength=900,
+                  justify="left").pack(side="top", fill="x", anchor="w", pady=(0, 4))
+
+        controls = ttk.Frame(self.status_bar)
+        controls.pack(side="bottom", fill="x")
+        ttk.Label(controls, textvariable=self.selected_var).pack(side="left")
+        self.progress = ttk.Progressbar(controls, mode="determinate", length=220)
         self.progress.pack(side="left")
 
-        self.convert_btn = ttk.Button(self.status_bar, text="Convert", command=self.on_convert)
+        self.convert_btn = ttk.Button(controls, text="Convert", command=self.on_convert)
         self.convert_btn.pack(side="right")
-        self.cancel_btn = ttk.Button(self.status_bar, text="Cancel", command=self.on_cancel, state="disabled")
+        self.cancel_btn = ttk.Button(controls, text="Cancel", command=self.on_cancel, state="disabled")
         self.cancel_btn.pack(side="right", padx=(0, 6))
-        ttk.Button(self.status_bar, text="Select All", command=self.on_select_all).pack(side="right", padx=(0, 6))
-        ttk.Button(self.status_bar, text="Generate Convert Note",
+        ttk.Button(controls, text="Select All", command=self.on_select_all).pack(side="right", padx=(0, 6))
+        ttk.Button(controls, text="Generate Convert Note",
                    command=self.on_generate_note).pack(side="right", padx=(0, 6))
 
     def _update_selected_count(self):
@@ -512,9 +522,23 @@ class App:
             simulate_tilt=self.simulate_tilt_var.get(),
             advanced_values=self._read_advanced_values(),
         )
-        self._log("=== starting: %d job(s) across %d song(s), ksh v%d -> %s ==="
-                   % (len(jobs), len(selected), opts.ksh_version, out_dir))
+        try:
+            opts.max_parallel_charts = int(self.workers_var.get())
+        except ValueError:
+            opts.max_parallel_charts = 0
+        if not 1 <= opts.max_parallel_charts <= convert_worker.MAX_PARALLEL_CHARTS:
+            messagebox.showerror(
+                "Invalid conversion setting",
+                "Set charts to convert at once to a number from 1 to %d."
+                % convert_worker.MAX_PARALLEL_CHARTS)
+            return
+        self._remember("max_parallel_charts", opts.max_parallel_charts)
+        self._log("=== starting: %d job(s) across %d song(s), ksh v%d, up to %d chart(s) "
+                  "at once -> %s ==="
+                  % (len(jobs), len(selected), opts.ksh_version,
+                     opts.max_parallel_charts, out_dir))
         self.progress.configure(maximum=len(jobs), value=0)
+        self.progress_var.set("Starting conversions...")
         self.convert_btn.configure(state="disabled")
         self.cancel_btn.configure(state="normal")
 
@@ -523,13 +547,14 @@ class App:
             on_log=lambda line: self.events.put(("log", line)),
             on_progress=lambda i, total, job: self.events.put(("progress", i, total, job)),
             on_done=lambda results, cancelled: self.events.put(("done", results, cancelled)),
+            on_status=lambda status: self.events.put(("status", status)),
         )
         self.worker.start()
 
     def on_cancel(self):
         if self.worker is not None:
             self.cancel_btn.configure(state="disabled")
-            self._log("-- cancelling after the current file --")
+            self._log("-- cancelling after active files finish --")
             self.worker.cancel()
 
     def _resolve_se_bank_dir(self):
@@ -559,6 +584,8 @@ class App:
                     self._log(payload[0])
                 elif kind == "progress":
                     self._on_progress(*payload)
+                elif kind == "status":
+                    self.progress_var.set(payload[0])
                 elif kind == "done":
                     self._on_done(*payload)
                 elif kind == "update":
@@ -567,10 +594,8 @@ class App:
             pass
         self.root.after(50, self._poll_events)
 
-    def _on_progress(self, i, total, job):
+    def _on_progress(self, i, total, _job):
         self.progress.configure(maximum=total, value=i)
-        self.progress_var.set("Converting %d/%d: %s (%s)" %
-                               (i + 1, total, job.song.title, music_db.DIFF_SHORT[job.diff_key]))
 
     def _on_done(self, results, cancelled):
         self.worker = None

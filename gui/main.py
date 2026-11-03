@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import multiprocessing
+
 import os
 import sys
 import tkinter as tk
@@ -8,6 +10,7 @@ from main_window import App  # noqa: E402
 
 
 def main():
+    multiprocessing.freeze_support()
     root = tk.Tk()
     try:
         from tkinter import ttk

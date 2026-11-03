@@ -1,5 +1,7 @@
+import concurrent.futures
 import contextlib
 import io
+import multiprocessing
 import os
 import shutil
 import sys
@@ -15,6 +17,8 @@ import music_db  # noqa: E402
 import convert_notes as notes_convert  # noqa: E402  (scripts/notes/convert_notes.py)
 import render_chart  # noqa: E402
 import preview_offset  # noqa: E402
+
+MAX_PARALLEL_CHARTS = 32
 
 
 @dataclass
@@ -44,6 +48,7 @@ class JobResult:
 class BatchOptions:
     se_bank_dir: str = None
     ffmpeg_path: str = None
+    max_parallel_charts: int = 2
     render_audio: bool = True
     preview_meta: bool = True
     standard_slam_gap: bool = True
@@ -170,12 +175,6 @@ def run_job(job, options, log, preview_cache=None):
         log("!! %s: %s" % (os.path.basename(job.vox_path), e))
         return result
 
-    if meta["jacket"] and job.jacket_src:
-        try:
-            shutil.copyfile(job.jacket_src, os.path.join(job.song_out_dir, meta["jacket"]))
-        except OSError as e:
-            log("!! jacket copy failed for %s: %s" % (job.song.folder, e))
-
     if not options.render_audio:
         return result
 
@@ -217,13 +216,26 @@ def _render_audio(job, options, log):
     return ""
 
 
+def _run_isolated_job(job, options, preview_window):
+    log_lines = []
+    forwarder = _LineForwarder(log_lines.append)
+    cache = {job.s3v_path: preview_window} if job.s3v_path else {}
+    try:
+        with contextlib.redirect_stdout(forwarder), contextlib.redirect_stderr(forwarder):
+            result = run_job(job, options, log_lines.append, cache)
+    finally:
+        forwarder.flush()
+    return result, log_lines
+
+
 class ConvertWorker:
-    def __init__(self, jobs, options, on_log, on_progress, on_done):
+    def __init__(self, jobs, options, on_log, on_progress, on_done, on_status=None):
         self.jobs = jobs
         self.options = options
         self.on_log = on_log
         self.on_progress = on_progress
         self.on_done = on_done
+        self.on_status = on_status
         self._cancel = threading.Event()
         self._thread = None
         self._preview_cache = {}
@@ -237,12 +249,79 @@ class ConvertWorker:
         self._cancel.set()
 
     def _run_queue(self):
-        results = []
         total = len(self.jobs)
-        for i, job in enumerate(self.jobs):
-            if self._cancel.is_set():
-                self.on_done(results, True)
-                return
-            self.on_progress(i, total, job)
-            results.append(run_job(job, self.options, self.on_log, self._preview_cache))
-        self.on_done(results, False)
+        worker_count = min(self.options.max_parallel_charts, total)
+        completed = {}
+        copied_jackets = set()
+        pending = {}
+        next_index = 0
+        cancelled = False
+
+        def notify_status():
+            names = ", ".join(
+                "%s [%s]" % (job.song.title, music_db.DIFF_SHORT.get(job.diff_key, job.diff_key))
+                for _i, job in pending.values())
+            status = "Completed %d/%d | Processing %d/%d: %s" % (
+                len(completed), total, len(pending), worker_count, names or "none")
+            terminal = getattr(sys, "__stdout__", None) or sys.stdout
+            if terminal is not None:
+                print("[convert] " + status, file=terminal, flush=True)
+            if self.on_status:
+                self.on_status(status)
+
+        def finish_job(index, job, result, lines):
+            for line in lines:
+                self.on_log(line)
+            if result.wrote_ksh and job.jacket_src and job.jacket_out_name:
+                jacket_out = os.path.join(job.song_out_dir, job.jacket_out_name)
+                if jacket_out not in copied_jackets:
+                    try:
+                        shutil.copyfile(job.jacket_src, jacket_out)
+                        copied_jackets.add(jacket_out)
+                    except OSError as e:
+                        self.on_log("!! jacket copy failed for %s: %s" % (job.song.folder, e))
+            completed[index] = result
+            self.on_progress(len(completed), total, job)
+
+        def failed(job, e):
+            return JobResult(job=job, ok=False, error="conversion worker failed: %s" % e)
+
+        context = multiprocessing.get_context("spawn")
+        with concurrent.futures.ProcessPoolExecutor(
+                max_workers=worker_count, mp_context=context) as pool:
+            while True:
+                cancelled = cancelled or self._cancel.is_set()
+                while not cancelled and next_index < total and len(pending) < worker_count:
+                    index, job = next_index, self.jobs[next_index]
+                    next_index += 1
+                    preview = _measured_preview_window(
+                        job, self.options, self.on_log, self._preview_cache)
+                    try:
+                        pending[pool.submit(_run_isolated_job, job, self.options, preview)] = (
+                            index, job)
+                    except Exception as e:  # noqa: BLE001 - e.g. broken pool; keep the batch going
+                        finish_job(index, job, failed(job, e), [])
+                        continue
+                    notify_status()
+
+                if cancelled:
+                    for future in [f for f in pending if f.cancel()]:
+                        del pending[future]
+                if not pending:
+                    break
+
+                done, _ = concurrent.futures.wait(
+                    pending, timeout=0.1, return_when=concurrent.futures.FIRST_COMPLETED)
+                for future in done:
+                    index, job = pending.pop(future)
+                    try:
+                        result, lines = future.result()
+                    except Exception as e:  # noqa: BLE001 - one failed job must not abort the batch
+                        result, lines = failed(job, e), ["!! %s" % traceback.format_exc()]
+                    finish_job(index, job, result, lines)
+                if done:
+                    notify_status()
+
+        if cancelled:
+            notify_status()
+        self.on_done([completed[i] for i in sorted(completed)], cancelled)
