@@ -13,8 +13,7 @@ vox to ksh converter
 * **zacharied**: original `.vox` format specs
 * **m0seng**: rewrite and extension
 * **Rosemoe**: [`sdvx-sfx-renderer`](https://github.com/Rosemoe/sdvx-sfx-renderer)
-
-Manual converts by the community used for regression and refchecking.
+* Manual converts by the community used for regression and refchecking.
 
 ## Requirements & Development
 
@@ -22,6 +21,8 @@ Manual converts by the community used for regression and refchecking.
 * `ffmpeg` on `PATH`
 
 Clone this repo inside the game's `contents/` directory; scripts will find the game data relative to it.
+
+Add more converts to `scripts\shared\reference\ksh` for regression checking after making changes.
 
 ## Usage
 
