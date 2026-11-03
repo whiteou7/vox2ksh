@@ -17,6 +17,9 @@ from version import __version__  # noqa: E402
 
 DIFF_FILTERS = [("novice", "NOV"), ("advanced", "ADV"), ("exhaust", "EXH"), ("top", "INF/MXM")]
 
+TILT_KSM = "KSM default"
+TILT_SIMULATE = "Simulate arcade"
+
 KSH_VERSIONS = [
     (1, "KSH v1"),
     (2, "KSH v2 (with smooth laser)"),
@@ -278,21 +281,34 @@ class App:
         ttk.Checkbutton(notes_row, text="Standard slam gap", variable=self.slam_gap_var,
                          command=lambda: self._remember("standard_slam_gap", self.slam_gap_var.get())
                          ).pack(anchor="w")
-        self.pretilt_var = tk.BooleanVar(value=bool(self.settings.get("pretilt_fix", False)))
-        ttk.Checkbutton(notes_row, text="Remove pretilt",
-                         variable=self.pretilt_var,
-                         command=lambda: self._remember("pretilt_fix", self.pretilt_var.get())
-                         ).pack(anchor="w")
-        self.simulate_tilt_var = tk.BooleanVar(value=bool(self.settings.get("simulate_tilt", False)))
-        ttk.Checkbutton(notes_row, text="Simulate arcade tilt",
-                         variable=self.simulate_tilt_var,
-                         command=lambda: self._remember("simulate_tilt", self.simulate_tilt_var.get())
-                         ).pack(anchor="w")
         self.preview_meta_var = tk.BooleanVar(value=bool(self.settings.get("preview_meta", True)))
         ttk.Checkbutton(notes_row, text="Preview offset (po/plength)",
                          variable=self.preview_meta_var,
                          command=lambda: self._remember("preview_meta", self.preview_meta_var.get())
                          ).pack(anchor="w")
+
+        tilt_row = ttk.Frame(notes_row)
+        tilt_row.pack(anchor="w")
+        ttk.Label(tilt_row, text="Tilt behavior").pack(side="left")
+        self.tilt_mode_var = tk.StringVar(
+            value=TILT_SIMULATE if self.settings.get("simulate_tilt", False) else TILT_KSM)
+        ttk.Combobox(tilt_row, textvariable=self.tilt_mode_var, values=(TILT_KSM, TILT_SIMULATE),
+                     width=16, state="readonly").pack(side="left", padx=6)
+        self.pretilt_var = tk.BooleanVar(value=bool(self.settings.get("pretilt_fix", False)))
+        pretilt_check = ttk.Checkbutton(
+            notes_row, text="Remove pretilt", variable=self.pretilt_var,
+            command=lambda: self._remember("pretilt_fix", self.pretilt_var.get()))
+
+        def tilt_mode_changed(_event=None):
+            simulate = self.tilt_mode_var.get() == TILT_SIMULATE
+            self._remember("simulate_tilt", simulate)
+            if simulate:
+                pretilt_check.pack_forget()
+            else:
+                pretilt_check.pack(anchor="w", after=tilt_row)
+
+        self.tilt_mode_var.trace_add("write", lambda *_: tilt_mode_changed())
+        tilt_mode_changed()
         workers_row = ttk.Frame(notes_row)
         workers_row.pack(anchor="w", pady=(4, 0))
         ttk.Label(workers_row, text="Charts to convert at once (1-%d)"
@@ -518,8 +534,8 @@ class App:
             preview_meta=self.preview_meta_var.get(),
             standard_slam_gap=self.slam_gap_var.get(),
             ksh_version=self._ksh_version(),
-            pretilt_fix=self.pretilt_var.get(),
-            simulate_tilt=self.simulate_tilt_var.get(),
+            pretilt_fix=self.pretilt_var.get() and self.tilt_mode_var.get() == TILT_KSM,
+            simulate_tilt=self.tilt_mode_var.get() == TILT_SIMULATE,
             advanced_values=self._read_advanced_values(),
         )
         try:
