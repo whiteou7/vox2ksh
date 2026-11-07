@@ -139,9 +139,23 @@ def _fill_between_turns(polyline, out, effective_ticks, turn_at, min_gap):
         res.append(out[b])
     return res
 
+# a very specific fix for victim_uske  
+def _keep_straight_laser(polyline, min_gap, lead_ticks=0, tol=RDP_TOL):
+    pts = list(polyline)
+    turns = set(_direction_reversal_indices(pts, CURVE_DEAD_ZONE))
+    for i in range(1, len(pts) - 1):
+        (t0, v0), (t, v), (t1, v1) = pts[i - 1], pts[i], pts[i + 1]
+        lo = t0 + (lead_ticks if i == 1 else 0)
+        if i + 1 in turns and abs(v - v0) <= tol and t1 - t < min_gap and t1 - min_gap - lo >= min_gap:
+            pts[i] = (t1 - min_gap, v)
+        elif i - 1 in turns and abs(v1 - v) <= tol and t - t0 < min_gap and t1 - (t0 + min_gap) >= min_gap:
+            pts[i] = (t0 + min_gap, v)
+    return pts
+
 
 def decimate_segment(polyline, min_gap, tol=RDP_TOL, lead_ticks=0):
-    return _enforce_min_gap(_douglas_peucker(polyline, tol), min_gap, lead_ticks)
+    simplified = _keep_straight_laser(_douglas_peucker(polyline, tol), min_gap, lead_ticks)
+    return _enforce_min_gap(simplified, min_gap, lead_ticks)
 
 
 def _split_into_runs(laser_points):
